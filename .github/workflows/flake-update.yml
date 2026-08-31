@@ -15,8 +15,8 @@ permissions:
 
 jobs:
   update:
-    # skipped in forks and in the template repository itself (duskgrow
-    # is replaced with the real owner by init)
+    # runs only in the generated project (init substitutes the real owner into
+    # the guard); skipped in forks and in the template repository itself
     if: github.repository_owner == 'duskgrow'
     runs-on: ubuntu-latest
     steps:
