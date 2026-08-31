@@ -1,0 +1,25 @@
+# Local git hooks and CI share this one source: the quality-gate job runs
+# `prek run --all-files --show-diff-on-failure` (see .github/workflows/ci.yml).
+#
+# Tool versions are pinned exactly once: hooks invoke the binaries from the
+# devShell on PATH (language: unsupported) instead of having pre-commit install
+# a second copy — version SSOT stays with flake.lock / rust-toolchain.toml.
+# Test matrices do not belong to the hook layer; they live in CI.
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: just fmt
+        entry: just fmt
+        language: unsupported
+        pass_filenames: false
+      - id: lint
+        name: just lint
+        entry: just lint
+        language: unsupported
+        pass_filenames: false
+      - id: commit-convention
+        name: commit message convention
+        entry: cargo run -q -p xtask -- check-commit
+        language: unsupported
+        stages: [commit-msg]

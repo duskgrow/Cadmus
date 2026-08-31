@@ -1,0 +1,30 @@
+[package]
+name = "__project_name__"
+# shown in --help and on crates.io; replace with a real description after init
+description = "TODO: one-line description of __project_name__"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+# the GitHub Release body is generated from this changelog's matching section
+# (module-grouped per the [changelog] config in release-plz.toml)
+[package.metadata.dist]
+changelog = "../../CHANGELOG.md"
+
+[dependencies]
+clap.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+assert_cmd.workspace = true

@@ -1,0 +1,52 @@
+# ============================================================================
+# The root Cargo.toml is this repository's three-in-one SSOT:
+#   1. [workspace.dependencies] — third-party versions live ONLY here; member
+#      crates inherit via workspace = true (they may only add features/optional);
+#   2. [workspace.package]      — version, edition, license, ... declared once;
+#   3. [workspace.lints]        — lint policy declared once; members inherit via
+#      [lints] workspace = true, CI escalates it to hard errors with -D warnings.
+# ============================================================================
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/__GITHUB_OWNER__/__project_name__"
+homepage = "https://github.com/__GITHUB_OWNER__/__project_name__"
+
+[workspace.dependencies]
+# ---- runtime dependencies ----
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+# the `fancy` renderer may only appear in the final binary (top-level crate);
+# library crates should depend on plain miette instead
+miette = { version = "7", features = ["fancy"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+
+# ---- dev dependencies ----
+insta = "1"
+assert_cmd = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# pedantic rules whose noise outweighs their value for a bin + internal-lib shape:
+missing_errors_doc = "allow" # error docs are carried by miette Diagnostic (code/help)
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+# release artifacts are built cross-platform by cargo-dist; give distributed
+# binaries a solid optimization level
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

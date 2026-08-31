@@ -1,0 +1,39 @@
+# release-plz: Conventional Commits → Release PR (human gate) → tag + crates.io on merge.
+# Config reference: https://release-plz.dev/docs/config
+[workspace]
+# new crates are NOT managed by release-plz unless registered as [[package]] below
+release = false
+# tag format aligned with cargo-dist's trigger (v*)
+git_tag_name = "v{{ version }}"
+# the GitHub Release (with cross-platform binaries and installers) is created
+# by cargo-dist — release-plz must not create a second one
+git_release_enable = false
+# changelog: generated from commit messages, grouped by module (the commit
+# convention's scope). Never hand-edit released sections.
+[changelog]
+commit_parsers = [
+    # scoped commits get their own module section (Zed-style release notes)
+    { message = '^(\w+)\(([^)]+)\)', group = "${2}" },
+    # unscoped commits fall back to type groups
+    { message = "^feat", group = "features" },
+    { message = "^fix", group = "fixes" },
+    { message = "^security", group = "security" },
+    { message = "^.*", group = "other" },
+]
+body = """
+## [{{ version }}]{%- if release_link -%}({{ release_link }}){% endif %}{%- if timestamp %} - {{ timestamp | date(format="%Y-%m-%d") }}{% endif %}
+{% for group, commits in commits | group_by(attribute="group") -%}
+### {{ group | upper_first }}
+{% for commit in commits -%}
+- {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}{%- if commit.links %} ({% for link in commit.links %}[{{ link.text }}]({{ link.href }}) {% endfor %}){% endif %}
+{% endfor -%}
+{% endfor %}
+"""
+trim = true
+
+[[package]]
+name = "__project_name__"
+release = true
+# one canonical changelog at the repo root (not crates/<name>/CHANGELOG.md) —
+# README points there and cargo-dist renders the GitHub Release body from it
+changelog_path = "CHANGELOG.md"

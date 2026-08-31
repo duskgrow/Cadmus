@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Nix / direnv
+/.direnv
+/result
+/result-*
+
+# insta pending snapshots: after review they are either accepted (committed) or
+# rejected (deleted) — never commit the .new files
+*.snap.new
+
+# editors
+.idea/
+.vscode/
+*.swp

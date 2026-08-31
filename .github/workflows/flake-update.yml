@@ -1,0 +1,27 @@
+# Weekly automated flake.lock upgrade PRs (keeps the toolchain/ecosystem SSOT fresh).
+# Caveat: PRs opened with the default GITHUB_TOKEN do not trigger CI (GitHub's
+# recursion guard) — if CI must run on those PRs, supply a GitHub App token via
+# secrets (`token:`), or push an empty commit manually.
+name: update flake.lock
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1" # Mondays
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    # skipped in forks and in the template repository itself (__GITHUB_OWNER__
+    # is replaced with the real owner by init)
+    if: github.repository_owner == '__GITHUB_OWNER__'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/update-flake-lock@834c491b2ece4de0bbd00d85214bb5e83b4da5c6 # v28
+        with:
+          pr-title: "chore(deps): update flake.lock"

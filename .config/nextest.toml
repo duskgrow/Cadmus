@@ -1,0 +1,7 @@
+# cargo-nextest config SSOT (nextest reads this file automatically; the CLI
+# must not repeat these parameters)
+[profile.default]
+# one failing test does not cancel the rest — the full failure picture beats a fast exit
+fail-fast = false
+# slow-test guardrail: kill on timeout so a hanging test cannot stall CI
+slow-timeout = { period = "30s", terminate-after = 3 }

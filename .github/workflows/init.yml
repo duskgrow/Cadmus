@@ -1,0 +1,45 @@
+# Template-only: runs exactly once, in repositories created via "Use this
+# template" — performs the same initialization as `just init` (the same xtask
+# init module, so the two paths can never drift; init deletes this file itself
+# as template residue and stages the deletion), then commits and pushes.
+#
+# Guards (both must hold): the repository was created from a template (never
+# true for the template repository itself, checked via the REST API because the
+# push webhook payload is not guaranteed to carry template_repository), and the
+# placeholder crate still exists (makes re-runs a no-op). Note: the final
+# `git push` uses GITHUB_TOKEN, which by GitHub's recursion guard does NOT
+# trigger CI — the first human push does.
+name: template init
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual fallback if the creation push did not trigger this
+
+permissions:
+  contents: write # push the initialized tree + this file's deletion
+
+jobs:
+  init:
+    name: template init
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "pending=$([ -d crates/__project_name__ ] && gh api "repos/${{ github.repository }}" --jq '.template_repository != null' || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        if: steps.guard.outputs.pending == 'true'
+      # the repository name doubles as the project name, so it must be
+      # kebab-case (init validates and fails with guidance otherwise)
+      - run: nix develop -c just init "${{ github.event.repository.name }}" "${{ github.repository_owner }}"
+        if: steps.guard.outputs.pending == 'true'
+      # init already staged this file's deletion; the commit runs inside the
+      # devShell so the freshly armed hooks verify the initialized tree
+      # (fmt + lint + the commit-msg convention check — the message is fixed
+      # and convention-clean)
+      - run: 'nix develop -c git -c user.name="${{ github.actor }}" -c user.email="${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com" commit -m "chore: initialize from template"'
+        if: steps.guard.outputs.pending == 'true'
+      - run: git push
+        if: steps.guard.outputs.pending == 'true'

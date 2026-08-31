@@ -1,0 +1,27 @@
+# cargo-deny dependency policy: advisories / licenses / bans / sources (`just deny`).
+# Docs: https://embarkstudios.github.io/cargo-deny/
+[advisories]
+yanked = "deny"
+
+[bans]
+# Warn on multiple major versions of the same dependency — common while the
+# tree evolves, but must be explicitly acknowledged in review
+multiple-versions = "warn"
+highlight = "all"
+
+[licenses]
+# A new dependency's license must already be on this list; extending the list
+# requires a discussion in the PR first
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "Unicode-3.0",
+    "0BSD",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

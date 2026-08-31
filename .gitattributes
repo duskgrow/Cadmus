@@ -1,0 +1,5 @@
+# cross-platform line-ending consistency for snapshots and scripts
+# (Windows contributors work through WSL2)
+*.snap text eol=lf
+*.sh text eol=lf
+justfile text eol=lf

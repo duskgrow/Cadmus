@@ -1,0 +1,8 @@
+# Toolchain version SSOT: rustup users and Nix users (flake.nix via
+# rust-overlay's fromRustupToolchainFile) consume this one file; no other file
+# (README / CI / Dockerfile) may restate the toolchain version.
+# Upgrade = change this one place, then run `just ci` (new lints may fail the
+# gate — that interception is intentional).
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
