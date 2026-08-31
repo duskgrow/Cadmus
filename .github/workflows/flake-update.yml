@@ -15,9 +15,9 @@ permissions:
 
 jobs:
   update:
-    # skipped in forks and in the template repository itself (__GITHUB_OWNER__
+    # skipped in forks and in the template repository itself (duskgrow
     # is replaced with the real owner by init)
-    if: github.repository_owner == '__GITHUB_OWNER__'
+    if: github.repository_owner == 'duskgrow'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

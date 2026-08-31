@@ -1,7 +1,7 @@
 [package]
-name = "__project_name__"
+name = "cadmus"
 # shown in --help and on crates.io; replace with a real description after init
-description = "TODO: one-line description of __project_name__"
+description = "TODO: one-line description of cadmus"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

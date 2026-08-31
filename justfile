@@ -74,9 +74,3 @@ ci: lint test doc deny agent-check
 new-crate name:
     cargo run -q -p xtask -- new-crate {{name}}
 
-# >>> template-only: bootstrap entry; removed by a successful init
-
-# Turn the template into a fresh project (rename, strip template artifacts, git init)
-init name owner:
-    cargo run -q -p xtask -- init {{name}} {{owner}}
-# <<< template-only

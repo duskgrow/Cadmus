@@ -1,10 +1,10 @@
 ---
-source: crates/__project_name__/tests/cli.rs
+source: crates/cadmus/tests/cli.rs
 expression: stdout
 ---
-TODO: one-line description of __project_name__
+TODO: one-line description of cadmus
 
-Usage: __project_name__ <COMMAND>
+Usage: cadmus <COMMAND>
 
 Commands:
   greet  Print a greeting

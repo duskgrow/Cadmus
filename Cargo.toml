@@ -15,8 +15,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/__GITHUB_OWNER__/__project_name__"
-homepage = "https://github.com/__GITHUB_OWNER__/__project_name__"
+repository = "https://github.com/duskgrow/cadmus"
+homepage = "https://github.com/duskgrow/cadmus"
 
 [workspace.dependencies]
 # ---- runtime dependencies ----

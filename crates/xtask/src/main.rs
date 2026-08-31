@@ -10,10 +10,6 @@ use std::process::ExitCode;
 mod agent_docs;
 mod commit;
 mod new_crate;
-// >>> template-only: the bootstrap subcommand deletes this module and these
-// marker lines, so generated projects never carry their own scaffolding
-mod init;
-// <<< template-only
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -25,9 +21,6 @@ fn main() -> ExitCode {
         "check-commit" => commit::run(&rest),
         "agent-check" => agent_docs::run(&rest),
         "new-crate" => new_crate::run(&rest),
-        // >>> template-only
-        "init" => init::run(&rest),
-        // <<< template-only
         other => {
             eprintln!("error: unknown subcommand {other:?}");
             usage()
@@ -39,8 +32,5 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage: cargo run -q -p xtask -- <check-commit [FILE] | agent-check | new-crate <name>>"
     );
-    // >>> template-only: bootstrap subcommand, stripped with the init module
-    eprintln!("       template bootstrap: init <name> <owner>");
-    // <<< template-only
     ExitCode::from(2)
 }

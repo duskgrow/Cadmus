@@ -1,4 +1,4 @@
-//! Command-line shell for `__project_name__`.
+//! Command-line shell for `cadmus`.
 //!
 //! Follows <https://clig.dev>: data goes to stdout, diagnostics to stderr,
 //! `--json` provides machine-readable output, and `--help` is generated from
@@ -32,7 +32,7 @@ fn main() -> miette::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Greet { name, json } => {
-            let greeting = __project_name__::greet(&name)?;
+            let greeting = cadmus::greet(&name)?;
             if json {
                 let out = serde_json::json!({ "greeting": greeting });
                 println!("{out}");

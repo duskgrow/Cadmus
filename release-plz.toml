@@ -32,7 +32,7 @@ body = """
 trim = true
 
 [[package]]
-name = "__project_name__"
+name = "cadmus"
 release = true
 # one canonical changelog at the repo root (not crates/<name>/CHANGELOG.md) —
 # README points there and cargo-dist renders the GitHub Release body from it

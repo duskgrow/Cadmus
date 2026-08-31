@@ -21,9 +21,9 @@ jobs:
   # keeps a ready-to-merge Release PR open
   release-pr:
     name: release-plz PR
-    # skipped in forks and in the template repository itself (__GITHUB_OWNER__
+    # skipped in forks and in the template repository itself (duskgrow
     # is replaced with the real owner by init)
-    if: github.repository_owner == '__GITHUB_OWNER__'
+    if: github.repository_owner == 'duskgrow'
     runs-on: ubuntu-latest
     permissions:
       contents: write # push release-plz- branches
@@ -47,7 +47,7 @@ jobs:
   # release.yml) + publish to crates.io
   release:
     name: release-plz release
-    if: github.repository_owner == '__GITHUB_OWNER__'
+    if: github.repository_owner == 'duskgrow'
     runs-on: ubuntu-latest
     permissions:
       contents: write # push tags

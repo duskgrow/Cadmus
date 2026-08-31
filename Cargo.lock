@@ -3,20 +3,6 @@
 version = 4
 
 [[package]]
-name = "__project_name__"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "insta",
- "miette",
- "serde_json",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -144,6 +130,20 @@ dependencies = [
  "memchr",
  "regex-automata",
  "serde_core",
+]
+
+[[package]]
+name = "cadmus"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "insta",
+ "miette",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

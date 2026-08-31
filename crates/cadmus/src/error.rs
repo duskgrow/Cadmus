@@ -7,7 +7,7 @@
 use miette::Diagnostic;
 use thiserror::Error;
 
-/// All failure modes of the `__project_name__` library.
+/// All failure modes of the `cadmus` library.
 ///
 /// Errors are user-facing documentation: `code` is searchable and `help`
 /// gives an actionable fix. Once published, an error code is part of the
@@ -17,7 +17,7 @@ pub enum Error {
     /// The name was empty or whitespace-only.
     #[error("name must not be empty")]
     #[diagnostic(
-        code(__project_name__::empty_name),
+        code(cadmus::empty_name),
         help("pass a non-empty name, e.g. `--name ferris`")
     )]
     EmptyName,

@@ -6,7 +6,7 @@
 
 - Full quality gate: `just ci` (local green ≡ CI green; run before every commit)
 - Format / static checks: `just fmt` / `just lint` (includes actionlint on workflow YAML)
-- All tests: `just test`; single test: `cargo nextest run -p __project_name__ <name>`
+- All tests: `just test`; single test: `cargo nextest run -p cadmus <name>`
 - Iterate with the narrowest loop first (`cargo check -p <crate>`, scoped nextest); finish with `just ci`
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)
 - New crate: `just new-crate <name>`

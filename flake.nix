@@ -50,48 +50,6 @@
           '';
         };
 
-        # >>> template-only: one-command bootstrap — `nix run <flake> -- <name> <owner>`
-        # copies the template into an empty cwd and runs the same xtask init
-        # subcommand (runtimeInputs carry git/cargo/prek, no `nix develop` needed);
-        # removed by `just init`
-        apps.default = flake-utils.lib.mkApp {
-          drv = pkgs.writeShellApplication {
-            name = "rust-template-init";
-            runtimeInputs = with pkgs; [ bash git coreutils prek rustToolchain ];
-            text = ''
-              if [ "$#" -ne 2 ]; then
-                  echo "usage: nix run <template-flake> -- <project-name> <github-owner>" >&2
-                  exit 2
-              fi
-              if [ -n "$(ls -A . 2>/dev/null)" ]; then
-                  echo "error: run this in an empty directory — it becomes your project root" >&2
-                  exit 1
-              fi
-              cp -r ${self}/. .
-              chmod -R u+w .  # store copies are read-only; must precede any rm
-              # A `path:` flake on a commit-less tree copies the raw directory —
-              # including any local .git (init would then skip `git init` and build
-              # on the template's own repo state) and build artifacts. Pristine required.
-              rm -rf .git target .direnv result
-              exec cargo run -q -p xtask -- init "$1" "$2"
-            '';
-          };
-        };
-        # <<< template-only
       })
-    # >>> template-only: distribution entry for `nix flake init`; removed by `just init`
-    // {
-      templates.default = {
-        path = ./.;
-        description = "Rust project template: workspace + just + nextest + insta + release-plz + cargo-dist + OIDC Trusted Publishing";
-        welcomeText = ''
-
-          rust-template has been copied to the current directory (no git history).
-          Next step:
-            nix develop -c just init <project-name> <github-owner>
-        '';
-      };
-    }
-    # <<< template-only
     ;
 }

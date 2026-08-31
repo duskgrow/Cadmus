@@ -1,4 +1,4 @@
-//! Core library of `__project_name__`.
+//! Core library of `cadmus`.
 //!
 //! The binary (`src/main.rs`) is a thin CLI shell over this library: keep
 //! logic here so it stays testable without spawning a process.
