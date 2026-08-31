@@ -67,16 +67,21 @@ This creates an **internal crate** (`version = "0.0.0"`, `publish = false`) with
 Nothing to do day to day. release-plz keeps a Release PR up to date (version + CHANGELOG + semver-check verdict); **merging it** triggers:
 
 1. tag `vX.Y.Z` is pushed;
-2. crates.io publish via OIDC Trusted Publishing (no long-lived token);
-3. the tag triggers cargo-dist: four-platform builds → GitHub Release (installers, checksums, attestation) whose body renders the version's module-grouped changelog section.
+2. the tag triggers cargo-dist: four-platform builds → GitHub Release (installers, checksums, attestation) whose body renders the version's module-grouped changelog section.
+
+crates.io publishing is **opt-in**: the project runs in release-plz's `git_only` mode (versions come from git tags; no cargo registry is contacted), so nothing reaches crates.io until you deliberately enable it — see "Opting into crates.io publishing".
 
 The changelog is generated from commit messages, grouped by module: the commit scope (`feat(cli): …`) becomes the section name, so scoped commits write the release notes for free.
 
 Don't want to release yet? Just don't merge — the Release PR accumulates and updates itself.
 
-### One-time setup (~5 min for a fresh repo)
+### One-time setup (for the Release PR)
 
-1. **GitHub**: Settings → Actions → General → Workflow permissions: "Read and write", and check "Allow GitHub Actions to create and approve pull requests".
+**GitHub**: Settings → Actions → General → Workflow permissions: "Read and write", and check "Allow GitHub Actions to create and approve pull requests" — without it the Release PR cannot be opened.
+
+### Opting into crates.io publishing
+
+1. In `release-plz.toml`, drop the package's `git_only = true` / `publish = false` lines; in `.github/workflows/release-plz.yml`, add `id-token: write` to the release job's permissions (OIDC Trusted Publishing — no long-lived token).
 2. **First crates.io publish**: Trusted Publishing can only bind to an existing crate, so publish once manually with `cargo publish` (revoke the local token afterwards).
 3. **Register TP**: crates.io → crate → Settings → Trusted Publishing → add the GitHub repository and the workflow filename `release-plz.yml`. Optionally enable "Trusted Publishing only" on crates.io to disable token publishing entirely.
 4. Sanity check: no hand-made tags in `git tag`; no crates.io token in repository secrets.
@@ -88,9 +93,9 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 | `ci.yml` → quality-gate | `prek run --all-files`, same source as local git hooks |
 | `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci` |
 | `ci.yml` → test (windows) | native rustup route, same `rust-toolchain.toml` |
-| `ci.yml` → commits | commit-convention check on the PR title + body (the squash-merge commit message) |
+| `commits.yml` | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle |
 | `ci.yml` → dist-drift | consistency between generated release.yml and `dist-workspace.toml` |
-| `release-plz.yml` | Release PR + tag + crates.io (OIDC) |
+| `release-plz.yml` | Release PR + tag (crates.io publish is opt-in) |
 | `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs |
 | `flake-update.yml` | weekly flake.lock upgrade PR |
 

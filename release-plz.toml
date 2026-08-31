@@ -1,8 +1,13 @@
-# release-plz: Conventional Commits → Release PR (human gate) → tag + crates.io on merge.
+# release-plz: Conventional Commits → Release PR (human gate) → tag on merge →
+# cargo-dist GitHub Release. crates.io publishing is OPT-IN — see the
+# [[package]] section below and CONTRIBUTING.md "Releasing".
 # Config reference: https://release-plz.dev/docs/config
 [workspace]
 # new crates are NOT managed by release-plz unless registered as [[package]] below
 release = false
+# the Release PR is the human gate: without this, release-plz release would tag
+# (and dist would publish a GitHub Release) on the very first push to main
+release_always = false
 # tag format aligned with cargo-dist's trigger (v*)
 git_tag_name = "v{{ version }}"
 # the GitHub Release (with cross-platform binaries and installers) is created
@@ -34,6 +39,11 @@ trim = true
 [[package]]
 name = "cadmus"
 release = true
+# crates.io publishing is opt-in: git_only tracks versions from git tags and
+# never contacts a cargo registry (git_only forbids publish = true). To opt in:
+# drop both lines and follow CONTRIBUTING.md "Releasing".
+git_only = true
+publish = false
 # one canonical changelog at the repo root (not crates/<name>/CHANGELOG.md) —
 # README points there and cargo-dist renders the GitHub Release body from it
 changelog_path = "CHANGELOG.md"

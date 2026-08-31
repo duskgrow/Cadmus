@@ -1,15 +1,12 @@
 # Release pipeline: Release PR (machine-prepared, human-gated) → on merge,
-# automatic tag + crates.io publish. No long-lived tokens: crates.io publishing
-# uses OIDC Trusted Publishing (short-lived, scoped tokens).
+# automatic tag → cargo-dist's GitHub Release (binaries + installers).
+# crates.io publishing is OPT-IN: generated projects run git-only (see
+# release-plz.toml), never contacting a cargo registry or holding any credential
+# until the owner enables it (CONTRIBUTING.md "Releasing").
 #
-# One-time repository setup (see CONTRIBUTING.md "Releasing"):
-#   1. GitHub Settings → Actions → General:
-#      - Workflow permissions: Read and write
-#      - Check "Allow GitHub Actions to create and approve pull requests"
-#   2. First publish must be manual (`cargo publish` once) — Trusted Publishing
-#      can only bind to an existing crate
-#   3. crates.io → crate → Settings → Trusted Publishing: register this
-#      repository + this workflow's filename
+# One-time repository setup: GitHub Settings → Actions → General → Workflow
+# permissions: Read and write + "Allow GitHub Actions to create and approve
+# pull requests" (without it the Release PR cannot be opened).
 name: release-plz
 
 on:
@@ -44,7 +41,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # After the Release PR is merged: push the tag (which triggers cargo-dist's
-  # release.yml) + publish to crates.io
+  # release.yml). crates.io publish joins only after the opt-in setup.
   release:
     name: release-plz release
     if: github.repository_owner == 'duskgrow'
@@ -52,7 +49,6 @@ jobs:
     permissions:
       contents: write # push tags
       pull-requests: read # detect the merged Release PR
-      id-token: write # crates.io OIDC Trusted Publishing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,5 +60,3 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Deliberately NO CARGO_REGISTRY_TOKEN: without it, release-plz
-          # automatically uses OIDC Trusted Publishing

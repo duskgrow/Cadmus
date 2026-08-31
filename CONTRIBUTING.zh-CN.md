@@ -65,16 +65,21 @@ just new-crate <name>
 日常什么都不用做。release-plz 会持续维护一个 Release PR（版本号 + CHANGELOG + semver 检查结论）；**合并它**即触发：
 
 1. 推 tag `vX.Y.Z`；
-2. 发布 crates.io（OIDC Trusted Publishing，无长期 token）；
-3. tag 触发 cargo-dist：四平台构建 → GitHub Release（含安装脚本、checksum、attestation），Release 正文渲染该版本的按模块分组 changelog 小节。
+2. tag 触发 cargo-dist：四平台构建 → GitHub Release（含安装脚本、checksum、attestation），Release 正文渲染该版本的按模块分组 changelog 小节。
+
+crates.io 发布是**可选启用**：项目默认运行在 release-plz 的 `git_only` 模式（版本号来自 git tag，不接触任何 cargo registry），在你明确启用之前不会有任何东西发到 crates.io——见下文「启用 crates.io 发布」。
 
 changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli): …`）即小节名——写好带 scope 的提交，发布说明就免费得到了。
 
 不想发版就不合并——Release PR 会自动累积更新。
 
-### 一次性设置（新仓库约 5 分钟）
+### 一次性设置（Release PR 需要）
 
-1. **GitHub**：Settings → Actions → General → Workflow permissions 设 "Read and write"，勾选 "Allow GitHub Actions to create and approve pull requests"。
+**GitHub**：Settings → Actions → General → Workflow permissions 设 "Read and write"，勾选 "Allow GitHub Actions to create and approve pull requests"——否则 Release PR 无法创建。
+
+### 启用 crates.io 发布
+
+1. 在 `release-plz.toml` 中删掉该包的 `git_only = true` / `publish = false` 两行；在 `.github/workflows/release-plz.yml` 中给 release job 的 permissions 加 `id-token: write`（OIDC Trusted Publishing——无长期 token）。
 2. **crates.io 首发**：Trusted Publishing 只能绑定已存在的 crate，第一次需手动：`cargo publish`（本地 token 用完即可吊销）。
 3. **crates.io TP 注册**：crate → Settings → Trusted Publishing → 添加 GitHub 仓库与 workflow 文件名 `release-plz.yml`。之后在 crates.io 开启 "Trusted Publishing only" 可彻底禁用 token 发布。
 4. 校验：`git tag` 无手工标签遗留；secrets 里没有任何 crates.io token。
@@ -86,9 +91,9 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 | `ci.yml` → quality-gate | `prek run --all-files`，与本地 git 钩子同源 |
 | `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci` |
 | `ci.yml` → test (windows) | rustup 原生路线，消费同一 `rust-toolchain.toml` |
-| `ci.yml` → commits | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message） |
+| `commits.yml` | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑 |
 | `ci.yml` → dist-drift | release.yml 生成物与 `dist-workspace.toml` 的一致性 |
-| `release-plz.yml` | Release PR + tag + crates.io（OIDC） |
+| `release-plz.yml` | Release PR + tag（crates.io 发布为可选启用） |
 | `release.yml`（dist 生成） | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan` |
 | `flake-update.yml` | 每周 flake.lock 升级 PR |
 
