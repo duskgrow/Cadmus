@@ -79,7 +79,7 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 
 ### 启用 crates.io 发布
 
-1. 在 `release-plz.toml` 中删掉该包的 `git_only = true` / `publish = false` 两行；在 `.github/workflows/release-plz.yml` 中给 release job 的 permissions 加 `id-token: write`（OIDC Trusted Publishing——无长期 token）。
+1. 在 `release-plz.toml` 中删掉 workspace 级的 `git_only = true` / `publish = false` 两行；在 `.github/workflows/release-plz.yml` 中给 release job 的 permissions 加 `id-token: write`（OIDC Trusted Publishing——无长期 token）。
 2. **crates.io 首发**：Trusted Publishing 只能绑定已存在的 crate，第一次需手动：`cargo publish`（本地 token 用完即可吊销）。
 3. **crates.io TP 注册**：crate → Settings → Trusted Publishing → 添加 GitHub 仓库与 workflow 文件名 `release-plz.yml`。之后在 crates.io 开启 "Trusted Publishing only" 可彻底禁用 token 发布。
 4. 校验：`git tag` 无手工标签遗留；secrets 里没有任何 crates.io token。

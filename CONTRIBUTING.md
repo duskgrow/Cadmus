@@ -81,7 +81,7 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 
 ### Opting into crates.io publishing
 
-1. In `release-plz.toml`, drop the package's `git_only = true` / `publish = false` lines; in `.github/workflows/release-plz.yml`, add `id-token: write` to the release job's permissions (OIDC Trusted Publishing — no long-lived token).
+1. In `release-plz.toml`, drop the workspace's `git_only = true` / `publish = false` lines; in `.github/workflows/release-plz.yml`, add `id-token: write` to the release job's permissions (OIDC Trusted Publishing — no long-lived token).
 2. **First crates.io publish**: Trusted Publishing can only bind to an existing crate, so publish once manually with `cargo publish` (revoke the local token afterwards).
 3. **Register TP**: crates.io → crate → Settings → Trusted Publishing → add the GitHub repository and the workflow filename `release-plz.yml`. Optionally enable "Trusted Publishing only" on crates.io to disable token publishing entirely.
 4. Sanity check: no hand-made tags in `git tag`; no crates.io token in repository secrets.
