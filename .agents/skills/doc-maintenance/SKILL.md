@@ -33,6 +33,9 @@ If none applies, the paragraph is a future drift source — don't write it.
 
 English is canonical; `*.zh-CN.md` files are translations.
 
+- Which docs get translations: external-facing portals only (README,
+  CONTRIBUTING). ADRs, AGENTS.md and skills are English-only — a translation
+  serves its readers, and those docs' readers all read English.
 - Update the English version **first**; the translation follows in the same PR.
 - Every zh-CN file carries the cross-link header (`[English](./X.md)` +
   "以英文版为准"). Translation drift is a bug — flag or fix it when noticed.

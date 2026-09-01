@@ -138,4 +138,4 @@ Boundaries: agents may open PRs but never merge, push tags, or publish; the hard
 
 Hand-written docs carry exactly three things: **intent** (why), **rationale** (ADRs), and **entry points** (runnable commands). Facts that code can state itself (parameter tables, version numbers, command lists) are never hand-copied into prose; architecture decisions go to `docs/decisions/` and everywhere else references the number only.
 
-Language: English is canonical. `*.zh-CN.md` files are translations — update the English version first, and treat translation drift as a bug.
+Language: English is canonical. `*.zh-CN.md` files are translations — update the English version first, and treat translation drift as a bug. Translations exist for external-facing docs (README, CONTRIBUTING) only; ADRs, AGENTS.md and `.agents/skills` stay English-only — a translation serves its readers, and those docs' readers (the maintainer, agents) all read English.

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-<!-- Freshness: Commands tracks the justfile; NEVER tracks the generated-file list and .github/; Skills tracks .agents/skills/. Last reviewed: 2026-08 -->
+<!-- Freshness: Commands tracks the justfile; NEVER tracks the generated-file list and .github/; Skills tracks .agents/skills/. Last reviewed: 2026-09 -->
 
 ## Commands (just is the only entry point; never bypass the quality gates)
 
@@ -46,5 +46,5 @@ Done = `just ci` green + the `pr-preflight` checklist clean.
 - Time / randomness / IO are always injected as constructor parameters; no hidden `now()` / `rand()` / global state (test determinism depends on this seam).
 - Error split: library crates use `thiserror` enums (callers branch on failure modes); the binary's top level reports with `miette` (three-part `code` + `help`); functions that propagate errors don't log — log once at the handling site.
 - Commit messages: modified Conventional Commits — `type(scope): subject`, lowercase type/scope, pure-ASCII English subject, header ≤ 100 chars, blank line before body/footer (`fix`→PATCH, `feat`→MINOR, `!`→MAJOR). Enforced at the commit-msg hook and by the PR-title CI check (SSOT: the `check-commit` subcommand of `crates/xtask`); merge strategy is squash-only, so the PR title must obey the same rules.
-- Docs and code are English-first; `*.zh-CN.md` files are translations and English is canonical — update the English version first.
+- Docs and code are English-first; `*.zh-CN.md` files are translations and English is canonical — update the English version first. Translations exist only for external-facing docs (README, CONTRIBUTING); ADRs, AGENTS.md and skills stay English-only.
 - Docs co-evolve in the same PR as the behavior change. A rule you needed but couldn't find is a missing rule: add it via the `rule-maintenance` skill in that PR, instead of re-deriving it next session.
