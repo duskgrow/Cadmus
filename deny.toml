@@ -2,6 +2,17 @@
 # Docs: https://embarkstudios.github.io/cargo-deny/
 [advisories]
 yanked = "deny"
+# Every ignore is temporary and carries its removal trigger in a comment; the
+# fuse is `just deny`'s `-D advisory-not-detected`, which fails CI once the
+# advisory no longer matches any crate in the tree — the dependency-update PR
+# that clears the condition is the one that must delete the entry.
+ignore = [
+    # RUSTSEC-2024-0436: paste declared unmaintained by its author, pulled in
+    # by genai 0.6.5; no functional impact and no safe upgrade exists.
+    # Trigger: genai migrates to pastey (or we switch client) and paste
+    # leaves Cargo.lock.
+    "RUSTSEC-2024-0436",
+]
 
 [bans]
 # Warn on multiple major versions of the same dependency — common while the
@@ -11,7 +22,8 @@ highlight = "all"
 
 [licenses]
 # A new dependency's license must already be on this list; extending the list
-# requires a discussion in the PR first
+# requires a discussion in the PR first. Prefer a per-crate exception below
+# over widening this global list.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -19,6 +31,26 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "0BSD",
+]
+# Per-crate exceptions: the license is allowed ONLY for the named crate, so a
+# new crate arriving under the same license still trips the gate. The fuse is
+# `just deny`'s `-D license-exception-not-encountered`: when the named crate
+# leaves the dependency tree, CI fails and the entry must be deleted in that
+# same PR.
+exceptions = [
+    # aws-lc-sys <- aws-lc-rs <- rustls <- reqwest <- genai: the aws-lc glue
+    # code's mixed attribution (BSD-3-Clause, and MIT-0 inside one OR arm).
+    { allow = ["BSD-3-Clause", "MIT-0"], crate = "aws-lc-sys" },
+    # encoding_rs <- reqwest: (Apache-2.0 OR MIT) AND BSD-3-Clause; the BSD
+    # part covers the WHATWG encoding index tables.
+    { allow = ["BSD-3-Clause"], crate = "encoding_rs" },
+    # subtle <- rustls <- reqwest: constant-time crypto primitives.
+    { allow = ["BSD-3-Clause"], crate = "subtle" },
+    # webpki-root-certs <- rustls-platform-verifier <- reqwest 0.13: Mozilla's
+    # root CA bundle shipped as data. CDLA-Permissive-2.0 is a permissive data
+    # license whose only condition is carrying the license text alongside the
+    # data (include it in third-party notices when shipping binaries).
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
 ]
 
 [sources]

@@ -27,7 +27,19 @@ thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = "1"
 serde_json = "1"
+tokio = "1"
+tokio-stream = "0.1"
+async-trait = "0.1"
+# thin LLM client (repo: jeremychone/rust-genai). Beware: crates.io also hosts
+# an unrelated Gemini-only crate literally named `rust-genai` — not this one.
+genai = "0.6.5"
+
+# ---- internal crates ----
+cadmus-contract = { path = "crates/cadmus-contract" }
+cadmus-core = { path = "crates/cadmus-core" }
+cadmus-llm-openai = { path = "crates/cadmus-llm-openai" }
 
 # ---- dev dependencies ----
 insta = "1"
