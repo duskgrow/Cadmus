@@ -7,7 +7,10 @@
 //!   header:  `type(scope)!: subject` — type from [`TYPES`], optional lowercase
 //!            `[a-z0-9-]+` scope, optional `!` breaking marker; subject pure
 //!            ASCII; whole header at most 100 chars
-//!   body:    free-form (any language), separated from the header by one blank line
+//!   body:    free-form (any language), separated from the header by one blank
+//!            line; no HTML comments — the squash merge lands the PR body as
+//!            the commit body verbatim, so template comments must be deleted,
+//!            not merged into history
 //!   footer:  `TOKEN: value` / `TOKEN #value` (incl. `BREAKING CHANGE:`) must
 //!            start the footer block, preceded by a blank line
 
@@ -107,6 +110,14 @@ pub fn check(text: &str) -> Vec<String> {
 
     if lines.len() > 1 && !lines[1].is_empty() {
         errors.push("header and body must be separated by a blank line".to_string());
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains("<!--") {
+            errors.push(format!(
+                "line {} contains an HTML comment (`<!--`) — delete the template's comments instead of merging them",
+                index + 1
+            ));
+        }
     }
     for (index, line) in lines.iter().enumerate().skip(1) {
         if is_footer_start(line) && !lines[index - 1].is_empty() {
@@ -211,6 +222,13 @@ mod tests {
         assert!(!errors_of("feat: x\nbody\nBREAKING CHANGE: y").is_empty());
         assert!(!errors_of("feat: x\nbody\nReviewed-by: someone").is_empty());
         assert!(errors_of("feat: x\n\nReviewed-by: someone").is_empty());
+    }
+
+    #[test]
+    fn rejects_html_comments_anywhere() {
+        assert!(!errors_of("feat: x\n\nbody\n\n<!-- template note -->").is_empty());
+        assert!(!errors_of("feat: x\n\n<!-- lone comment -->").is_empty());
+        assert!(errors_of("feat: x\n\nbody without comments").is_empty());
     }
 
     #[test]

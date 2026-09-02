@@ -26,8 +26,8 @@ Commit convention — modified Conventional Commits:
 - `type`: one of `feat fix docs style refactor perf test build ci chore revert` (lowercase)
 - `scope`: optional, lowercase (crate name, `cli`, …); `!` marks breaking (or a `BREAKING CHANGE:` footer). Scope doubles as the changelog's module section (release notes are grouped by scope, Zed-style), so prefer setting it
 - `subject`: pure-ASCII English; the whole header is at most 100 chars
-- body: free-form — any language, no line-width limit; separated from the header by one blank line
-- footer (`BREAKING CHANGE:` / `TOKEN: value` / `TOKEN #value`): preceded by a blank line
+- body: free-form — any language, no line-width limit; separated from the header by one blank line; no HTML comments — the squash merge lands the PR body verbatim, so template comments must be deleted, not merged
+- footer (`TOKEN: value` / `TOKEN #value`): the block is preceded by a blank line. Blessed tokens: `Closes #N` (GitHub auto-closes the issue on merge) and `BREAKING CHANGE:` (semver-MAJOR signal). GitHub itself appends `Co-authored-by:` for multi-author PRs; tooling-attribution trailers stay banned (see AGENTS.md)
 
 Semver mapping: `fix` → PATCH, `feat` → MINOR, `!` → MAJOR. Version derivation and the CHANGELOG are generated from these messages — a wrong type is a wrong release.
 
@@ -40,7 +40,7 @@ Notes:
 
 - GitHub appends ` (#NNN)` to the squash-merge commit title — expected, leave it.
 - `git revert`'s default `Revert "…"` header doesn't match the convention — rewrite it as `revert: <what>`.
-- When squash-merging, tidy the generated commit body (drop the template's checklist/comments); the title must stay convention-clean.
+- The PR template is two zones split by a `---` cut line: above it, the commit body (written commit-ready — CI rejects HTML comments); below it, process scaffolding (checklist etc.). When squash-merging, delete from the `---` line down in the merge dialog; the title must stay convention-clean.
 
 ## Adding a dependency
 
@@ -111,9 +111,16 @@ These live in GitHub settings rather than in code; set them once when the repo i
 The same settings as a one-shot `gh` block (run inside the repo, authenticated as yourself with `gh auth login` — `{owner}`/`{repo}` auto-resolve from the remote). This is deliberately a documented command block rather than a shipped script: it runs once per repository, needs your admin credentials, and a copy-paste block cannot rot silently the way a shipped one-off script would.
 
 ```bash
-gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-title=PR_TITLE --squash-merge-commit-message=PR_BODY
+gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-message=pr-title-description
 gh api repos/{owner}/{repo}/actions/permissions/workflow -X PUT -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
 gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
+```
+
+Settings live outside git and can drift — verify with:
+
+```bash
+gh api repos/{owner}/{repo} --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, squash_merge_commit_title, squash_merge_commit_message}'
+# expect: squash only; title PR_TITLE + message PR_BODY; delete_branch_on_merge true
 ```
 
 (The block above is one-shot imperative setup. If you later want continuous settings-as-code, the probot `settings` app reads `.github/settings.yml` — adopt it deliberately, since it also gates `.github/` changes.)

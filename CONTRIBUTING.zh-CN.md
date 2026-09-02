@@ -24,8 +24,8 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 - `type`：`feat fix docs style refactor perf test build ci chore revert` 之一（小写）
 - `scope`：可选，小写（crate 名、`cli` 等）；`!` 标记破坏性变更（或 footer `BREAKING CHANGE:`）。scope 同时是 changelog 的模块小节名（release notes 按 scope 分组，Zed 风格），建议填写
 - `subject`：纯英文 ASCII；整个 header 不超过 100 字符
-- body：随意——可中文、不限行宽；与 header 之间空一行
-- footer（`BREAKING CHANGE:` / `TOKEN: value` / `TOKEN #value`）：前留空行
+- body：随意——可中文、不限行宽；与 header 之间空一行；不写 HTML 注释——squash 合并会原样落地 PR 正文，模板注释必须删掉，不能合进历史
+- footer（`TOKEN: value` / `TOKEN #value`）：整个块前留空行。推荐 token：`Closes #N`（合并时 GitHub 自动关闭对应 issue）与 `BREAKING CHANGE:`（semver MAJOR 信号）。多作者 PR 的 `Co-authored-by:` 由 GitHub 自动追加；工具署名类 trailer 依旧禁止（见 AGENTS.md）
 
 语义化版本映射：`fix` → PATCH，`feat` → MINOR，`!` → MAJOR。版本号推导与 CHANGELOG 都以提交信息为输入——type 写错等于版本发错。
 
@@ -38,7 +38,7 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 
 - GitHub 会给 squash 合并的标题自动追加 ` (#NNN)`——预期行为，保留即可。
 - `git revert` 默认的 `Revert "…"` 头不符合规范——改写成 `revert: <什么>`。
-- squash 合并时顺手清理生成的正文（删掉模板清单/注释）；标题必须保持规范。
+- PR 模板以 `---` 分割线为界分两区：线上是 commit body（写成可直接入历史的样子——CI 拒绝 HTML 注释）；线下是流程脚手架（checklist 等）。squash 合并时在合并对话框里把 `---` 及以下删掉；标题必须保持规范。
 
 ## 添加依赖
 
@@ -109,9 +109,16 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 同样的设置也有一份一次性 `gh` 命令块（在仓库目录内执行，需先用 `gh auth login` 登录你本人的账号——`{owner}`/`{repo}` 会从 remote 自动解析）。刻意写成文档里的命令块而不是随仓库分发的脚本：它每个仓库只跑一次、需要你本人的管理员凭据，而随仓库分发的一次性脚本只会悄悄腐烂。
 
 ```bash
-gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-title=PR_TITLE --squash-merge-commit-message=PR_BODY
+gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-message=pr-title-description
 gh api repos/{owner}/{repo}/actions/permissions/workflow -X PUT -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
 gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
+```
+
+设置在 git 之外，可能漂移——校验命令：
+
+```bash
+gh api repos/{owner}/{repo} --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge, squash_merge_commit_title, squash_merge_commit_message}'
+# 期望：仅 squash；title PR_TITLE + message PR_BODY；delete_branch_on_merge 为 true
 ```
 
 （上面的命令块是一次性命令式设置。若将来想要持续生效的 settings-as-code，probot 的 settings app 读取 `.github/settings.yml`——它会同时管住 `.github/` 变更，采纳前请先讨论。）

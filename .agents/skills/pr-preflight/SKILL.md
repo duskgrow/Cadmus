@@ -58,9 +58,12 @@ this section is the process gate over the assembled PR.
   impact: user-facing feature → `feat`; bug fix → `fix`; breaking → `!` /
   `BREAKING CHANGE:` footer. Changelog entries are generated from these
   messages — a wrong type is a wrong release.
-- Merge strategy is squash-only: **the PR title becomes the commit header** and
-  CI checks it. Help the human get the title right; the body may be any
-  language, the title may not.
+- Merge strategy is squash-only, landing **the PR title as the commit header
+  and the PR body as the commit body**; CI checks both. Help the human get the
+  title right; the body may be any language, the title may not. Body hygiene:
+  delete the template's HTML comments before opening (CI rejects them); at
+  merge time, cut everything below the `---` line (checklist etc.) in the
+  merge dialog.
 - No agent-attribution footers (`Co-Authored-By`, `Generated-with`) in
   commits or PRs — see AGENTS.md.
 
