@@ -1,0 +1,15 @@
+data: {"choices":[{"delta":{"reasoning_content":""}}]}
+
+data: {"choices":[{"delta":{"reasoning_content":"Let me think."}}]}
+
+data: {"choices":[{"delta":{"reasoning_content":null}}]}
+
+data: {"choices":[{"delta":{"content":""}}]}
+
+data: {"choices":[{"delta":{"content":"The answer is 42."}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":12,"total_tokens":62}}
+
+data: [DONE]
