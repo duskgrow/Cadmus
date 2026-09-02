@@ -3,6 +3,7 @@ use cadmus_contract::{Capabilities, ChatRequest, ChunkStream, ModelError, Provid
 use genai::adapter::AdapterKind;
 use genai::resolver::AuthData;
 use genai::{Client, ModelIden, ServiceTarget};
+use tokio_stream::StreamExt;
 
 use crate::dialect::{Dialect, api_key_from_env};
 use crate::error::map_genai_error;
@@ -61,6 +62,15 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(map_genai_error)?;
 
-        Ok(Box::pin(MappedStream::new(response.stream)))
+        // genai surfaces pre-content HTTP failures (4xx/5xx) as the first
+        // stream item; the port contract wants call-level failures as
+        // call-level errors (pitfall #11), so peek one item. A failure after
+        // content starts stays an in-stream item (pitfall #9).
+        let mut stream = MappedStream::new(response.stream);
+        match stream.next().await {
+            Some(Err(error)) => Err(error),
+            Some(Ok(first)) => Ok(Box::pin(tokio_stream::iter(vec![Ok(first)]).chain(stream))),
+            None => Ok(Box::pin(stream)),
+        }
     }
 }

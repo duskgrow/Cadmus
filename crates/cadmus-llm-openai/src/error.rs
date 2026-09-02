@@ -4,9 +4,9 @@
 //! rather than masquerading as a transient error.
 
 use cadmus_contract::ModelError;
+use genai::Error as GenaiError;
 
 pub fn map_genai_error(error: genai::Error) -> ModelError {
-    use genai::Error as GenaiError;
     match error {
         GenaiError::HttpError {
             status,
@@ -17,7 +17,12 @@ pub fn map_genai_error(error: genai::Error) -> ModelError {
         | GenaiError::WebModelCall { webc_error, .. } => {
             ModelError::Network(webc_error.to_string())
         }
-        GenaiError::WebStream { cause, .. } => ModelError::Network(cause),
+        // Stream transport failures wrap the underlying error boxed; an HTTP
+        // error response (e.g. 429) arrives this way, so recover and classify
+        // it instead of degrading it to a generic network error.
+        GenaiError::WebStream { error, cause, .. } => error
+            .downcast_ref::<GenaiError>()
+            .map_or_else(|| ModelError::Network(cause), map_genai_error_ref),
         GenaiError::StreamParse { serde_error, .. } => {
             ModelError::Protocol(serde_error.to_string())
         }
@@ -27,6 +32,13 @@ pub fn map_genai_error(error: genai::Error) -> ModelError {
         // An error event inside the stream (provider JSON error mid-flight).
         GenaiError::ChatResponse { body, .. } => classify_stream_error(&body),
         other => ModelError::InvalidRequest(other.to_string()),
+    }
+}
+
+fn map_genai_error_ref(error: &GenaiError) -> ModelError {
+    match error {
+        GenaiError::HttpError { status, body, .. } => classify_http(status.as_u16(), body),
+        other => ModelError::Network(other.to_string()),
     }
 }
 
