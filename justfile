@@ -66,6 +66,11 @@ snapshot-review:
 agent-check:
     cargo run -q -p xtask -- agent-check
 
+# Bump rust-toolchain.toml's channel to the latest stable release. The weekly
+# toolchain-update workflow wraps this in a validated PR; requires curl.
+toolchain-bump:
+    cargo run -q -p xtask -- bump-toolchain
+
 # The local full quality gate ≡ CI (modulo matrix dimensions); run before committing
 ci: lint test doc deny agent-check
     @echo "just ci: all green ✅"
@@ -73,4 +78,3 @@ ci: lint test doc deny agent-check
 # Add an internal crate (unpublished by default; rules in CONTRIBUTING.md "Adding a crate")
 new-crate name:
     cargo run -q -p xtask -- new-crate {{name}}
-

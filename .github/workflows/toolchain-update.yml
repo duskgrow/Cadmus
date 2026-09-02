@@ -1,0 +1,55 @@
+# Weekly automated rust-toolchain.toml upgrade PRs. The toolchain is pinned to
+# an exact stable version and bumped deliberately (the Zed model); this
+# workflow is what makes the bump cheap: xtask rewrites the channel, then a
+# full `just ci` validates the new toolchain IN-JOB before the PR opens. That
+# validation is the only automated signal on the PR, because PRs opened with
+# the default GITHUB_TOKEN do not trigger CI (GitHub's recursion guard — same
+# caveat as flake-update.yml's header).
+# Scheduled on Tuesdays so Monday's flake.lock refresh (flake-update.yml)
+# lands first: CI's nix jobs need a rust-overlay new enough to know the stable
+# being bumped to.
+name: update rust toolchain
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 2" # Tuesdays
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    # runs only in the generated project (init substitutes the real owner into
+    # the guard); skipped in forks and in the template repository itself
+    if: github.repository_owner == 'duskgrow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rustup route (no nix): the runner ships rustup, which auto-installs
+      # the pinned toolchain on first cargo invocation — after the bump step
+      # rewrites rust-toolchain.toml, `just ci` validates with the NEW one
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
+        with:
+          tool: just,nextest,cargo-deny
+      # actionlint is not in install-action's manifest (its cargo-binstall
+      # fallback fails for a Go tool); the runner ships Go, so install directly
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - id: bump
+        run: cargo run -q -p xtask -- bump-toolchain
+      - if: steps.bump.outputs.changed == 'true'
+        run: just ci
+      - if: steps.bump.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: bot/toolchain-update
+          delete-branch: true
+          commit-message: "chore(toolchain): bump rust to ${{ steps.bump.outputs.version }}"
+          title: "chore(toolchain): bump rust to ${{ steps.bump.outputs.version }}"
+          body: |
+            Bumps `rust-toolchain.toml` to the latest stable, Rust ${{ steps.bump.outputs.version }} ([release notes](https://releases.rs/docs/${{ steps.bump.outputs.version }}/)).
+
+            Opened by the toolchain-update workflow; `just ci` ran green in-job before opening (bot PRs do not trigger CI — GitHub's recursion guard).

@@ -16,6 +16,7 @@
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)
 - New crate: `just new-crate <name>`
 - Dependency policy: `just deny`; docs build: `just doc`; release-artifact drift check: `just dist-check`; agent-doc smoke check: `just agent-check`
+- Toolchain bump: `just toolchain-bump` (also run weekly by CI, which opens a validated PR)
 
 ## Environment
 

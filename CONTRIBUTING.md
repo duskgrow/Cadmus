@@ -98,6 +98,7 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 | `release-plz.yml` | Release PR + tag (crates.io publish is opt-in) |
 | `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs |
 | `flake-update.yml` | weekly flake.lock upgrade PR |
+| `toolchain-update.yml` | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`) |
 
 ## Repository settings (one-time, GitHub side)
 

@@ -96,6 +96,7 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 | `release-plz.yml` | Release PR + tag（crates.io 发布为可选启用） |
 | `release.yml`（dist 生成） | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan` |
 | `flake-update.yml` | 每周 flake.lock 升级 PR |
+| `toolchain-update.yml` | 每周 rust-toolchain.toml 升级 PR（由 job 内 `just ci` 验证） |
 
 ## 仓库设置（一次性，GitHub 侧）
 
