@@ -1,0 +1,29 @@
+[package]
+name = "cadmus-llm-openai"
+description = "OpenAI-compatible provider adapter and per-vendor wire dialects (ADR-0003)"
+# Internal crates carry no semver burden. To publish later, switch to
+# version.workspace = true, drop publish = false, and register the package
+# in release-plz.toml — see CONTRIBUTING.md.
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cadmus-contract.workspace = true
+genai.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cadmus-core.workspace = true
+insta.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
