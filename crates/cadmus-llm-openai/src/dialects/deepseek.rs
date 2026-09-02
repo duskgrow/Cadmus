@@ -54,7 +54,8 @@ impl Dialect for DeepSeekDialect {
     }
 
     fn endpoint(&self) -> Endpoint {
-        Endpoint::from_static("https://api.deepseek.com")
+        // Trailing slash per the RFC-3986 join rule (see `KimiDialect`).
+        Endpoint::from_static("https://api.deepseek.com/")
     }
 
     fn api_key_env(&self) -> &'static str {

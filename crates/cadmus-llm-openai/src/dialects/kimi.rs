@@ -49,7 +49,9 @@ impl Dialect for KimiDialect {
     }
 
     fn endpoint(&self) -> Endpoint {
-        Endpoint::from_static("https://api.moonshot.cn/v1")
+        // Trailing slash: genai URL-joins `chat/completions` (RFC 3986), which
+        // would drop a slash-less base's last segment (`/v1`).
+        Endpoint::from_static("https://api.moonshot.cn/v1/")
     }
 
     fn api_key_env(&self) -> &'static str {

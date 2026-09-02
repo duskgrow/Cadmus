@@ -25,5 +25,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 cadmus-core.workspace = true
+async-trait.workspace = true
 insta.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util"] }

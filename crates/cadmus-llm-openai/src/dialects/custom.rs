@@ -3,24 +3,31 @@ use genai::resolver::Endpoint;
 
 use crate::Dialect;
 
-/// A relay-station GPT — a generic OpenAI-compatible endpoint reached through
-/// a relay, so the base URL is always explicit configuration (relays vary).
-/// Serves as the "no vendor quirks" control case for the dialect seam.
-pub struct RelayGptDialect {
+/// A custom OpenAI-compatible endpoint — relay stations, self-hosted servers,
+/// the phase-3 llama.cpp node. Because such endpoints vary, the base URL and
+/// model are always explicit configuration. Serves as the "no vendor quirks"
+/// control case for the dialect seam.
+pub struct CustomDialect {
     model: String,
     base_url: String,
     capabilities: Capabilities,
 }
 
-impl RelayGptDialect {
+impl CustomDialect {
     /// The capability declaration describes a GPT-5-class model; override it
-    /// when the relay fronts something else (the config level of the
+    /// when the endpoint fronts something else (the config level of the
     /// capability resolution stack).
     #[must_use]
     pub fn new(model: impl Into<String>, base_url: impl Into<String>) -> Self {
+        // Normalize to a trailing slash: genai URL-joins `chat/completions`
+        // (RFC 3986), which would otherwise drop the base's last segment.
+        let mut base_url = base_url.into();
+        if !base_url.ends_with('/') {
+            base_url.push('/');
+        }
         Self {
             model: model.into(),
-            base_url: base_url.into(),
+            base_url,
             capabilities: Capabilities {
                 tools: true,
                 parallel_tools: Support::Yes,
@@ -47,7 +54,7 @@ impl RelayGptDialect {
     }
 }
 
-impl Dialect for RelayGptDialect {
+impl Dialect for CustomDialect {
     fn id(&self) -> &str {
         &self.model
     }
@@ -57,7 +64,7 @@ impl Dialect for RelayGptDialect {
     }
 
     fn api_key_env(&self) -> &'static str {
-        "RELAY_GPT_API_KEY"
+        "CADMUS_CUSTOM_API_KEY"
     }
 
     fn model_name(&self) -> &str {

@@ -7,7 +7,7 @@ use tokio_stream::StreamExt;
 
 use crate::dialect::{Dialect, api_key_from_env};
 use crate::error::map_genai_error;
-use crate::map::build_genai_request;
+use crate::request_map::build_genai_request;
 use crate::stream_map::MappedStream;
 
 /// The OpenAI-compatible provider adapter: one thin-client-backed

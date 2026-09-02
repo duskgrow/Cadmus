@@ -14,10 +14,10 @@
 mod dialect;
 mod dialects;
 mod error;
-mod map;
 mod provider;
+mod request_map;
 mod stream_map;
 
 pub use dialect::Dialect;
-pub use dialects::{DeepSeekDialect, KimiDialect, RelayGptDialect};
+pub use dialects::{CustomDialect, DeepSeekDialect, KimiDialect, dialect_by_name, dialect_names};
 pub use provider::OpenAiProvider;

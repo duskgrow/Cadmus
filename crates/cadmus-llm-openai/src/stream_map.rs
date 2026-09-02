@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio_stream::Stream;
 
 use crate::error::map_genai_error;
-use crate::map::{map_stop_reason, map_usage};
+use crate::request_map::{map_stop_reason, map_usage};
 
 struct OpenCall {
     id: String,
