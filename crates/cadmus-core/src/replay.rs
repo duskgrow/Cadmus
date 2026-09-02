@@ -3,9 +3,15 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use cadmus_contract::{
-    CacheSupport, Capabilities, ChatRequest, ChunkStream, ModelError, Provider, SoSupport,
-    StreamChunk, Support,
+    CacheSupport, Capabilities, ChatRequest, ChunkStream, ContractSubject, ModelError, Provider,
+    QueuedResponse, SoSupport, StreamChunk, Support,
 };
+
+/// One queued response: a chunk script or a call-level failure.
+enum ReplayScript {
+    Stream(Vec<Result<StreamChunk, ModelError>>),
+    Fail(ModelError),
+}
 
 /// Recorded-replay fake provider (ADR-0003): scripts are fixed chunk
 /// sequences and each `chat_stream` call pops the next one. Contract tests
@@ -13,7 +19,7 @@ use cadmus_contract::{
 /// recorded into fixtures offline.
 pub struct ReplayProvider {
     capabilities: Capabilities,
-    scripts: Mutex<VecDeque<Vec<Result<StreamChunk, ModelError>>>>,
+    scripts: Mutex<VecDeque<ReplayScript>>,
 }
 
 impl ReplayProvider {
@@ -23,7 +29,7 @@ impl ReplayProvider {
     {
         Self {
             capabilities: Self::default_capabilities(),
-            scripts: Mutex::new(scripts.into_iter().collect()),
+            scripts: Mutex::new(scripts.into_iter().map(ReplayScript::Stream).collect()),
         }
     }
 
@@ -59,13 +65,43 @@ impl Provider for ReplayProvider {
         &self.capabilities
     }
 
-    async fn chat_stream(&self, _request: &ChatRequest) -> Result<ChunkStream, ModelError> {
-        let script = self
+    async fn chat_stream(&self, request: &ChatRequest) -> Result<ChunkStream, ModelError> {
+        // Fakes provide behavior: the declared capabilities are enforced like
+        // a real adapter would, failing fast before the scripted wire.
+        if !self.capabilities.tools && !request.tools.is_empty() {
+            return Err(ModelError::CapabilityMismatch(
+                "replay profile declares no tool support".into(),
+            ));
+        }
+        match self
             .scripts
             .lock()
             .expect("replay scripts poisoned")
             .pop_front()
-            .ok_or_else(|| ModelError::Protocol("replay script exhausted".into()))?;
-        Ok(Box::pin(tokio_stream::iter(script)))
+        {
+            Some(ReplayScript::Stream(script)) => Ok(Box::pin(tokio_stream::iter(script))),
+            Some(ReplayScript::Fail(error)) => Err(error),
+            None => Err(ModelError::Protocol("replay script exhausted".into())),
+        }
+    }
+}
+
+impl ContractSubject for ReplayProvider {
+    fn queue(&self, response: QueuedResponse) {
+        let script = match response {
+            QueuedResponse::Chunks(chunks) => ReplayScript::Stream(Self::script(chunks)),
+            QueuedResponse::CallError(error) => ReplayScript::Fail(error),
+            QueuedResponse::StreamError { chunks, error } => ReplayScript::Stream(
+                chunks
+                    .into_iter()
+                    .map(Ok)
+                    .chain(std::iter::once(Err(error)))
+                    .collect(),
+            ),
+        };
+        self.scripts
+            .lock()
+            .expect("replay scripts poisoned")
+            .push_back(script);
     }
 }

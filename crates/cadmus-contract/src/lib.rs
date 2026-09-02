@@ -13,6 +13,7 @@ mod profile;
 mod provider;
 mod request;
 mod stream;
+pub mod testing;
 
 pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Support};
 pub use error::ModelError;
@@ -23,3 +24,5 @@ pub use request::{
     CacheDirective, ChatRequest, EffortLevel, OutputMode, Reasoning, Sampling, ToolChoice, ToolSpec,
 };
 pub use stream::{FinishReason, StreamChunk, Usage};
+#[doc(inline)]
+pub use testing::{ContractSubject, QueuedResponse};
