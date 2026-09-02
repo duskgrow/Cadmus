@@ -1,0 +1,69 @@
+---
+source: crates/cadmus-core/tests/conversations.rs
+expression: messages
+---
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "look up TODOs in main.rs"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "tool_call",
+        "call": {
+          "id": "call_1",
+          "name": "read_file",
+          "arguments": {
+            "path": "src/main.rs"
+          }
+        }
+      },
+      {
+        "type": "tool_call",
+        "call": {
+          "id": "call_2",
+          "name": "grep",
+          "arguments": {
+            "pattern": "TODO"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": [
+      {
+        "type": "text",
+        "text": "contents of src/main.rs"
+      }
+    ],
+    "tool_call_id": "call_1"
+  },
+  {
+    "role": "tool",
+    "content": [
+      {
+        "type": "text",
+        "text": "3 matches for TODO"
+      }
+    ],
+    "tool_call_id": "call_2"
+  },
+  {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "main.rs line 42 has a TODO; 3 matches in total."
+      }
+    ]
+  }
+]
