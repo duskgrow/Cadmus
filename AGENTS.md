@@ -21,7 +21,7 @@
 ## Environment
 
 - Toolchains come from flake.nix: `direnv allow` or `nix develop`. `rust-toolchain.toml` is the version SSOT — no other file may restate toolchain versions.
-- The agent terminal spawns a bare shell without the direnv hook, so `.envrc` never loads and `cargo`/`just` resolve to the user profile instead of flake.nix. Prefix such commands with `direnv exec .` when the flake toolchain is needed (e.g. `direnv exec . just ci`).
+- The agent terminal spawns a bare shell without the direnv hook, so `.envrc` never loads and `cargo`/`just` resolve to the user profile instead of flake.nix. Prefix such commands with `direnv exec .` when the flake toolchain is needed (e.g. `direnv exec . just ci`); this includes `git commit`, whose prek hooks run `just fmt` and `just lint`.
 - `just deny` needs network access to fetch the RustSec advisory DB; when offline, skip that one item and run the rest.
 - Native Windows development goes through WSL2 (Nix has no native Windows support); CI's windows job consumes the same `rust-toolchain.toml` / `Cargo.lock`.
 
