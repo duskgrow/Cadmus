@@ -88,17 +88,17 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 
 ## CI map
 
-| job / workflow | purpose |
-|---|---|
-| `ci.yml` → quality-gate | `prek run --all-files`, same source as local git hooks |
-| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci` |
-| `ci.yml` → test (windows) | native rustup route, same `rust-toolchain.toml` |
-| `commits.yml` | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle |
-| `ci.yml` → dist-drift | consistency between generated release.yml and `dist-workspace.toml` |
-| `release-plz.yml` | Release PR + tag (crates.io publish is opt-in) |
-| `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs |
-| `flake-update.yml` | weekly flake.lock upgrade PR |
-| `toolchain-update.yml` | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`) |
+| job / workflow                 | purpose                                                                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `ci.yml` → quality-gate        | `prek run --all-files`, same source as local git hooks                                               |
+| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                             |
+| `ci.yml` → test (windows)      | native rustup route, same `rust-toolchain.toml`                                                      |
+| `commits.yml`                  | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle |
+| `ci.yml` → dist-drift          | consistency between generated release.yml and `dist-workspace.toml`                                  |
+| `release-plz.yml`              | Release PR + tag (crates.io publish is opt-in)                                                       |
+| `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs                              |
+| `flake-update.yml`             | weekly flake.lock upgrade PR                                                                         |
+| `toolchain-update.yml`         | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`)                                |
 
 ## Repository settings (one-time, GitHub side)
 
@@ -122,7 +122,7 @@ gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_
 
 Every command CI runs is already locally reproducible (`just ci`, `prek run --all-files`, `just dist-check`) — that is by design. The workflow YAML itself is statically checked: `just lint` includes actionlint. Dynamic replay of the orchestration (e.g. with act/Docker) was evaluated and deliberately rejected: the added fidelity doesn't justify the Docker dependency when the task layer is already the single source of truth.
 
-Jobs needing secrets/OIDC (release-plz publish, crates.io Trusted Publishing) cannot run locally *by design* — their pre-merge seam is the Release PR plus `dist plan` on every PR.
+Jobs needing secrets/OIDC (release-plz publish, crates.io Trusted Publishing) cannot run locally _by design_ — their pre-merge seam is the Release PR plus `dist plan` on every PR.
 
 ## Agent-assisted development
 

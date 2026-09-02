@@ -6,13 +6,13 @@ description: "Use after implementing a change and before committing or staging i
 # Self-review (before the commit exists)
 
 The machine gates check syntax, lint, types and tests. This is the judgment
-pass over the *working diff* before it becomes a commit — minutes here save a
+pass over the _working diff_ before it becomes a commit — minutes here save a
 review round-trip at PR time. Stay fast; depth belongs to `pr-preflight`.
 
 ## 0. Read the whole diff
 
 `git diff` + `git diff --cached` — every hunk must be intentional and part of
-*this* change. Remove drive-by edits, debug leftovers, commented-out code.
+_this_ change. Remove drive-by edits, debug leftovers, commented-out code.
 One clause that pays for itself: no tokens, keys or `.env` contents — catching
 a secret here beats rotating it later.
 
@@ -34,20 +34,20 @@ a secret here beats rotating it later.
 
 - Tests reveal intent: does the change ship with behavior tests at the lowest
   layer that can catch the bug? Would they actually fail if the code regressed?
-- What did *you* actually run? Never report green without the run — the
+- What did _you_ actually run? Never report green without the run — the
   Validation discipline in AGENTS.md applies to commit-time claims too.
 
 ## 3. Label findings by severity (even to yourself)
 
-| Prefix | Meaning | Before committing |
-|---|---|---|
-| Critical | broken / insecure | must fix |
-| Required (no prefix) | must address | fix now |
-| Nit / Optional | taste | your call — never let nits delay a sound commit |
+| Prefix               | Meaning           | Before committing                               |
+| -------------------- | ----------------- | ----------------------------------------------- |
+| Critical             | broken / insecure | must fix                                        |
+| Required (no prefix) | must address      | fix now                                         |
+| Nit / Optional       | taste             | your call — never let nits delay a sound commit |
 
 Order fixes by leverage: correctness first, structure next, cosmetics last. A
 few high-conviction findings beat a long list — if you found one structural
-problem and ten nits, the structural problem *is* the review.
+problem and ten nits, the structural problem _is_ the review.
 
 ## 4. Size sanity
 
@@ -57,9 +57,9 @@ Refactor and feature are two commits — cleanup always rides separately.
 
 ## Rationalizations that fail this review
 
-| Rationalization | Reality |
-|---|---|
-| "The tests pass" | Tests can't see architecture, readability or missing edge cases. |
-| "It's only a small change" | Judge the resulting structure, not the diff size. |
-| "I'll clean it up later" | Later never comes — the commit is the quality gate. |
+| Rationalization                 | Reality                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| "The tests pass"                | Tests can't see architecture, readability or missing edge cases.          |
+| "It's only a small change"      | Judge the resulting structure, not the diff size.                         |
+| "I'll clean it up later"        | Later never comes — the commit is the quality gate.                       |
 | "I wrote it, I know it's right" | Authors are blind to their own assumptions; that is why this pass exists. |

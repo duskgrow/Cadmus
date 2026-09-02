@@ -25,7 +25,7 @@ is wrong, fix the gate in its own PR.
 Each commit should already have passed the `self-review` skill (the code axes);
 this section is the process gate over the assembled PR.
 
-- `git diff <base>...HEAD` — read the *entire* diff. Every hunk must be
+- `git diff <base>...HEAD` — read the _entire_ diff. Every hunk must be
   intentional and related to the task; remove drive-by edits, debug leftovers,
   commented-out code.
 - Scan for secrets: tokens, private keys, `.env` contents, hardcoded
@@ -40,12 +40,12 @@ this section is the process gate over the assembled PR.
   AGENTS.md / snapshots updated **in this PR**? The English version is
   canonical; `*.zh-CN.md` translations follow it.
 - New hand-written prose must pass the three-question filter: can code state
-  it (delete or generate)? Does it answer *why* (ADR/explanation)? Is it an
+  it (delete or generate)? Does it answer _why_ (ADR/explanation)? Is it an
   entry point (runnable command)? Anything else is a future drift source.
 
 ## 3. Snapshots
 
-- Read every `.snap` diff. Each change must be an *intended* consequence of
+- Read every `.snap` diff. Each change must be an _intended_ consequence of
   this PR — not noise, not an accident of environment. Nondeterministic
   fields (timestamps, paths, UUIDs) must be filtered before snapshotting.
 - Snapshots are approved by humans via `just snapshot-review`; the agent

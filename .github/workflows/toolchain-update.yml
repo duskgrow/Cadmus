@@ -32,7 +32,7 @@ jobs:
       # rewrites rust-toolchain.toml, `just ci` validates with the NEW one
       - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
         with:
-          tool: just,nextest,cargo-deny
+          tool: just,nextest,cargo-deny,dprint
       # actionlint is not in install-action's manifest (its cargo-binstall
       # fallback fails for a Go tool); the runner ships Go, so install directly
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest

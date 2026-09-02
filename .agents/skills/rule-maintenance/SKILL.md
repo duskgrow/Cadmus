@@ -15,7 +15,7 @@ of being re-corrected in chat every session.
   thing, or a human had to re-explain something in a new session. That is a
   missing or wrong rule.
 - **A rule goes stale** — it references a deleted file/command/dependency.
-  Fix or delete it in the *same PR that caused the staleness*.
+  Fix or delete it in the _same PR that caused the staleness_.
 - **Tooling changes** — the justfile changed → sync the Commands section of
   AGENTS.md; a new generated file or a new workflow appeared → sync the NEVER
   section; a new skill is added → it is auto-discovered, AGENTS.md only needs
@@ -26,7 +26,7 @@ of being re-corrected in chat every session.
 ## The filter (apply before adding ANY rule)
 
 From the empirical research on agent context files: their value is
-*incremental information density*, not length. Ask: **"Would an agent make a
+_incremental information density_, not length. Ask: **"Would an agent make a
 mistake without this rule?"** If no — do not add it; if an existing rule
 fails this test — delete it. Never restate what code, config, or `just
 --list` already says; never write codebase overviews (agents explore faster
@@ -36,8 +36,8 @@ than they read).
 
 - AGENTS.md stays lean — the always-on budget is ~200 lines; one line per
   rule where possible.
-- Each rule carries its *reason* and, when one exists, its *enforcement
-  pointer* (the lint / CI job / drift check that bites if violated). A rule
+- Each rule carries its _reason_ and, when one exists, its _enforcement
+  pointer_ (the lint / CI job / drift check that bites if violated). A rule
   without an enforcement point will rot — say so explicitly when accepting
   one.
 - Keep the freshness comment at the top of AGENTS.md current (what each

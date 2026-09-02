@@ -13,7 +13,7 @@ Hand-written docs carry exactly three things: **intent** (why), **rationale**
 1. Can code/config state this fact? → delete the prose, or make it generated /
    referenced (version numbers, command lists, help text, parameter tables are
    never hand-copied).
-2. Does it answer *why*? → it belongs in an ADR (`docs/decisions/`) or an
+2. Does it answer _why_? → it belongs in an ADR (`docs/decisions/`) or an
    explanation section — write it once, reference it elsewhere by number.
 3. Is it an entry point? → write it as an executable command that CI or a
    doctest can keep honest.

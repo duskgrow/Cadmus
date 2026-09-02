@@ -21,18 +21,20 @@ setup:
 # In CI the pre-commit framework fails the job if files were modified by this
 # (see the quality-gate job), so the check-mode twin is only exercised there.
 
-# Format all Rust code (write mode)
+# Format Rust (rustfmt) and markdown (dprint; config: dprint.json) — write mode
 fmt:
     cargo fmt --all
+    dprint fmt
 
 # The two ignored shellcheck codes are style hints from the dist-generated
 # release.yml, which we must not hand-edit (drift check); accepted policy.
 # No path argument: actionlint discovers .github/workflows/ itself, because
 # the Windows shell (PowerShell) does not expand globs for native commands.
 
-# Static checks: rustfmt --check, clippy (-D warnings), actionlint on workflow YAML
+# Static checks: rustfmt --check, dprint check (markdown), clippy (-D warnings), actionlint on workflow YAML
 lint:
     cargo fmt --all -- --check
+    dprint check
     cargo clippy --workspace --all-targets -- -D warnings
     actionlint -ignore 'SC2086' -ignore 'SC2129'
 

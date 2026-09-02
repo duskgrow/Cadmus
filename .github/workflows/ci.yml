@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
         with:
-          tool: nextest,just,cargo-deny
+          tool: nextest,just,cargo-deny,dprint
       # actionlint is not in install-action's manifest (its cargo-binstall
       # fallback fails for a Go tool); the runner ships Go, so install directly
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
@@ -81,4 +81,3 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
       - run: nix develop -c just dist-check
-

@@ -15,7 +15,7 @@ unreviewable and bisect-hostile.
   layer. Two similar blocks: leave them; the wrong abstraction costs more than
   duplication.
 - **Dead code** — unused `pub` items, unreachable branches, features nobody
-  enables, tests of deleted behavior. Untested *and* unreachable code is a
+  enables, tests of deleted behavior. Untested _and_ unreachable code is a
   deletion candidate, not a test-writing candidate.
 - **Speculative abstraction** — a trait with one implementation, a helper used
   exactly once, a parameter "for future flexibility". Inline or delete; add

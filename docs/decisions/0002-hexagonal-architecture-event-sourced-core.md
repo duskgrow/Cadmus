@@ -17,8 +17,8 @@ the machine that started it (e.g. the work computer), while other devices get
 **full client parity** — everything agent-related the local client can do
 (observe progress, converse, submit tasks, approve, steer) a remote client
 can do too — explicitly **not** task migration. This preserves the
-single-writer discipline (report §5.3): many *command producers*, exactly one
-*state writer* — the node owning the task is the only process that appends to
+single-writer discipline (report §5.3): many _command producers_, exactly one
+_state writer_ — the node owning the task is the only process that appends to
 the event log and mutates the store. The report's state-sync design (§5.3,
 Syncthing snapshots) answers a different question (sequential use across
 machines) and is deferred.
@@ -44,7 +44,7 @@ are scaffolded via `just new-crate` and stay `publish = false`):
 The agent loop is **event-sourced**: every step appends to the same
 append-only log that is the trajectory asset (report §5.2). Every client
 operation — approvals, conversation messages, task submission, steering — is
-a *command* the owning node validates, orders and appends to that log;
+a _command_ the owning node validates, orders and appends to that log;
 commands carry unique IDs so retries over an unreliable transport apply
 idempotently. Approval gates are first-class loop primitives. The local CLI
 and future remote clients are the same kind of client — subscribe to the
@@ -63,9 +63,10 @@ low-frequency IO ports.
 Deliberately **not** split (report §3.2.2): the agent loop and the eval
 harness stay in the core — no port buys anything there. Every split carries a
 written trigger signal (e.g. transport: a second machine joins; vector store:
->300k vectors or query p95 >100ms). Dependency direction is enforced by an
-xtask architecture test in CI (report §9.1.2): a whitelist violation fails
-the build.
+
+> 300k vectors or query p95 >100ms). Dependency direction is enforced by an
+> xtask architecture test in CI (report §9.1.2): a whitelist violation fails
+> the build.
 
 ## Consequences
 

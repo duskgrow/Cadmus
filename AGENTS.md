@@ -10,7 +10,7 @@
 ## Commands (just is the only entry point; never bypass the quality gates)
 
 - Full quality gate: `just ci` (local green ≡ CI green; run before every commit)
-- Format / static checks: `just fmt` / `just lint` (includes actionlint on workflow YAML)
+- Format / static checks: `just fmt` / `just lint` (rustfmt + dprint for markdown; actionlint on workflow YAML)
 - All tests: `just test`; single test: `cargo nextest run -p cadmus <name>`
 - Iterate with the narrowest loop first (`cargo check -p <crate>`, scoped nextest); finish with `just ci`
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)

@@ -28,6 +28,7 @@
             rustToolchain # cargo/rustc/rustfmt/clippy/rust-analyzer — version: rust-toolchain.toml
           ] ++ (with pkgs; [
             just # task-layer entry point
+            dprint # markdown formatter (config: dprint.json)
             prek # git hook runner (reads .pre-commit-config.yaml)
             cargo-nextest # test runner (process isolation / sharding)
             cargo-insta # snapshot review

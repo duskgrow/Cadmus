@@ -12,7 +12,7 @@ decide "merge or hold". The agent gathers and judges; **the human merges**
 ## What the Release PR should contain
 
 - Version bump in the root `Cargo.toml`'s `[workspace.package] version` —
-  touched *only* by release-plz (hand edits are a red flag).
+  touched _only_ by release-plz (hand edits are a red flag).
 - `CHANGELOG.md` entries generated from Conventional Commits since the last
   tag. Hand-written day-to-day entries are a red flag (hand-polish of already
   released sections is fine).

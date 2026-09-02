@@ -86,17 +86,17 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 
 ## CI 地图
 
-| job / workflow | 作用 |
-|---|---|
-| `ci.yml` → quality-gate | `prek run --all-files`，与本地 git 钩子同源 |
-| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci` |
-| `ci.yml` → test (windows) | rustup 原生路线，消费同一 `rust-toolchain.toml` |
-| `commits.yml` | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑 |
-| `ci.yml` → dist-drift | release.yml 生成物与 `dist-workspace.toml` 的一致性 |
-| `release-plz.yml` | Release PR + tag（crates.io 发布为可选启用） |
-| `release.yml`（dist 生成） | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan` |
-| `flake-update.yml` | 每周 flake.lock 升级 PR |
-| `toolchain-update.yml` | 每周 rust-toolchain.toml 升级 PR（由 job 内 `just ci` 验证） |
+| job / workflow                 | 作用                                                                                   |
+| ------------------------------ | -------------------------------------------------------------------------------------- |
+| `ci.yml` → quality-gate        | `prek run --all-files`，与本地 git 钩子同源                                            |
+| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                               |
+| `ci.yml` → test (windows)      | rustup 原生路线，消费同一 `rust-toolchain.toml`                                        |
+| `commits.yml`                  | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑 |
+| `ci.yml` → dist-drift          | release.yml 生成物与 `dist-workspace.toml` 的一致性                                    |
+| `release-plz.yml`              | Release PR + tag（crates.io 发布为可选启用）                                           |
+| `release.yml`（dist 生成）     | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan`                               |
+| `flake-update.yml`             | 每周 flake.lock 升级 PR                                                                |
+| `toolchain-update.yml`         | 每周 rust-toolchain.toml 升级 PR（由 job 内 `just ci` 验证）                           |
 
 ## 仓库设置（一次性，GitHub 侧）
 
