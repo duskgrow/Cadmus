@@ -1,6 +1,11 @@
 # AGENTS.md
 
-<!-- Freshness: Commands tracks the justfile; NEVER tracks the generated-file list and .github/; Skills tracks .agents/skills/. Last reviewed: 2026-09 -->
+<!-- Freshness: Orientation tracks docs/; Commands tracks the justfile; NEVER tracks the generated-file list and .github/; Skills tracks .agents/skills/. Last reviewed: 2026-09 -->
+
+## Orientation (read first in a fresh session)
+
+- `docs/roadmap.md` — the six-phase tracker; phase kickoff follows its ritual (re-read report §10.2.N, re-verify time-sensitive claims, then write the phase's ADR).
+- `docs/decisions/` — ADRs are the architecture-decision SSOT; they win over `docs/research/` (frozen exhibit material, never edited).
 
 ## Commands (just is the only entry point; never bypass the quality gates)
 
@@ -15,6 +20,7 @@
 ## Environment
 
 - Toolchains come from flake.nix: `direnv allow` or `nix develop`. `rust-toolchain.toml` is the version SSOT — no other file may restate toolchain versions.
+- The agent terminal spawns a bare shell without the direnv hook, so `.envrc` never loads and `cargo`/`just` resolve to the user profile instead of flake.nix. Prefix such commands with `direnv exec .` when the flake toolchain is needed (e.g. `direnv exec . just ci`).
 - `just deny` needs network access to fetch the RustSec advisory DB; when offline, skip that one item and run the rest.
 - Native Windows development goes through WSL2 (Nix has no native Windows support); CI's windows job consumes the same `rust-toolchain.toml` / `Cargo.lock`.
 
