@@ -96,6 +96,10 @@ impl AgentLoop {
             let request = base.clone().with_messages(messages.clone());
             let mut stream = self.provider.chat_stream(&request).await?;
             let mut assembler = MessageAssembler::new();
+            // User-facing streaming is deliberately deferred: the seam is an
+            // observer sink right before `push` (TextDelta / ToolCallStarted /
+            // TurnCompleted events), leaving the assembler the single owner of
+            // aggregation semantics.
             while let Some(item) = stream.next().await {
                 assembler.push(item?);
             }
