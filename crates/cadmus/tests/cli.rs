@@ -23,29 +23,12 @@ fn help_output() {
     insta::assert_snapshot!(stdout);
 }
 
-#[test]
-fn greet_defaults_to_world() {
-    cli()
-        .arg("greet")
-        .assert()
-        .success()
-        .stdout("Hello, world!\n");
-}
-
-#[test]
-fn greet_json_is_machine_readable() {
-    cli()
-        .args(["greet", "ferris", "--json"])
-        .assert()
-        .success()
-        .stdout("{\"greeting\":\"Hello, ferris!\"}\n");
-}
-
 /// Failure-path discipline: diagnostics go to stderr, stdout stays clean,
-/// and the exit code is non-zero.
+/// and the exit code is non-zero. Runs before any API-key or network logic,
+/// so it is environment-independent.
 #[test]
-fn empty_name_fails_cleanly() {
-    let assert = cli().args(["greet", ""]).assert().failure().code(1);
+fn chat_requires_a_prompt() {
+    let assert = cli().arg("chat").assert().failure().code(1);
     let output = assert.get_output();
     assert!(
         output.stdout.is_empty(),
@@ -53,7 +36,35 @@ fn empty_name_fails_cleanly() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("name must not be empty"),
+        stderr.contains("a prompt is required"),
         "stderr should contain the error message, got: {stderr}"
+    );
+}
+
+#[test]
+fn chat_rejects_unknown_provider() {
+    let assert = cli()
+        .args(["chat", "--provider", "bogus", "hi"])
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("not one of: kimi, deepseek, custom"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn chat_custom_requires_model_and_base_url() {
+    let assert = cli()
+        .args(["chat", "--provider", "custom", "hi"])
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("requires --model and --base-url"),
+        "got: {stderr}"
     );
 }

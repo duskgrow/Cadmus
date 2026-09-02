@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cadmus.svg)](https://crates.io/crates/cadmus)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
 
-TODO: one-line description of what this project does (also update `description` in crates/cadmus/Cargo.toml).
+A self-evolving coding agent in Rust: self-built agent loop, OpenAI-compatible provider dialects, read-only coding tools — currently phase 0 of the [roadmap](docs/roadmap.md).
 
 ## Install
 
@@ -20,7 +20,10 @@ or install from crates.io:
 
 ## Usage
 
-See `cadmus --help`.
+    export MOONSHOT_API_KEY=sk-…   # or DEEPSEEK_API_KEY for --provider deepseek
+    cadmus chat "explain crates/cadmus-core/src/agent.rs"
+
+The coding tools (`read_file`, `grep`, `list_dir`) are read-only and confined to the current directory. See `cadmus --help` for all options.
 
 ## Development
 

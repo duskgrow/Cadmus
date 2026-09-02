@@ -2,13 +2,13 @@
 source: crates/cadmus/tests/cli.rs
 expression: stdout
 ---
-TODO: one-line description of cadmus
+Self-evolving coding agent: self-built loop, OpenAI-compatible dialects, read-only coding tools (phase 0)
 
 Usage: cadmus <COMMAND>
 
 Commands:
-  greet  Print a greeting
-  help   Print this message or the help of the given subcommand(s)
+  chat  Chat with the agent (one shot: prompt in, final answer out), with read-only coding tools confined to the current directory
+  help  Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

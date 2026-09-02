@@ -237,11 +237,16 @@ name = "cadmus"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "async-trait",
+ "cadmus-contract",
+ "cadmus-core",
+ "cadmus-llm-openai",
  "clap",
  "insta",
  "miette",
  "serde_json",
  "thiserror",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
