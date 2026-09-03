@@ -211,10 +211,13 @@ impl AgentTool for Grep {
             let Ok(text) = fs::read_to_string(&file) else {
                 continue;
             };
-            let display = file.strip_prefix(&self.root).map_or_else(
-                |_| file.display().to_string(),
-                |rel| rel.display().to_string(),
-            );
+            // Agent-facing paths use `/` on every OS (`Path::display` would
+            // emit `\` on Windows).
+            let display = file
+                .strip_prefix(&self.root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             for (line_number, line) in text.lines().enumerate() {
                 if line.contains(pattern) {
                     matches.push(format!("{display}:{}: {line}", line_number + 1));
