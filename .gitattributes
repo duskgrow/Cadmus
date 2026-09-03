@@ -1,5 +1,7 @@
-# cross-platform line-ending consistency for snapshots and scripts
-# (Windows contributors work through WSL2)
+# cross-platform line-ending consistency for snapshots, scripts and markdown
+# (Windows contributors work through WSL2; the Windows CI job checks out with
+# native git where core.autocrlf=true, and dprint expects LF in markdown)
 *.snap text eol=lf
 *.sh text eol=lf
 justfile text eol=lf
+*.md text eol=lf
