@@ -1,0 +1,20 @@
+[package]
+name = "cadmus-memory"
+description = "Trajectory store adapter: append-only date-sharded JSONL event logs (ADR-0005); the SQL derived index arrives with phase 2"
+# Internal crates carry no semver burden. To publish later, switch to
+# version.workspace = true, drop publish = false, and register the package
+# in release-plz.toml — see CONTRIBUTING.md.
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cadmus-contract.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

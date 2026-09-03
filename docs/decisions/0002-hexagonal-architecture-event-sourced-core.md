@@ -37,7 +37,7 @@ are scaffolded via `just new-crate` and stay `publish = false`):
 - `cadmus-contract` — port traits + wire types + `ModelProfile` (see ADR-0003)
 - `cadmus-core` — agent loop, evals, skill orchestration; pure logic, no IO
 - `cadmus-llm-openai` — OpenAI-compatible provider adapter + per-vendor dialects
-- `cadmus-memory` — SQLite store adapter (phase 1)
+- `cadmus-memory` — trajectory store adapter: append-only JSONL event log first (phase 1), SQL derived index in phase 2 (narrowed by ADR-0005; originally "SQLite store adapter (phase 1)")
 - `cadmus-sandbox` — subprocess sandbox adapter (phase 0: confirmation gates; phase 3: Landlock)
 - `cadmus-transport` — transport port; in-process channel first (phase 1), CF Tunnel / iroh later (phase 5)
 

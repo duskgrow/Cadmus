@@ -21,4 +21,8 @@ pub enum LogError {
     Serialize(#[from] serde_json::Error),
     #[error("event log write failed: {0}")]
     Io(#[from] std::io::Error),
+    /// The JSONL adapter computes a trace's shard path from its id; an id
+    /// without a parseable date is rejected instead of silently misplaced.
+    #[error("trace id `{0}` carries no shard date (expected `tr-YYYYMMDD-…`)")]
+    InvalidTraceId(String),
 }
