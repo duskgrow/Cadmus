@@ -19,6 +19,32 @@ git_tag_name = "v{{ version }}"
 # the GitHub Release (with cross-platform binaries and installers) is created
 # by cargo-dist — release-plz must not create a second one
 git_release_enable = false
+# The Release PR body is also the squash-merge commit body (repo setting
+# PR_TITLE/PR_BODY): keep it commit-clean by construction — no HTML comments
+# (check-commit rejects them), no <details> scaffolding, no generator footer.
+pr_body = """
+{%- for release in releases %}
+{%- if releases | length > 1 -%}
+## `{{ release.package }}`
+{% endif -%}
+{%- if release.title and release.changelog -%}
+## {{ release.title }}
+{% if release.semver_check == "incompatible" -%}
+> ⚠ cargo-semver-checks: API breaking changes
+{% elif release.semver_check == "compatible" -%}
+> cargo-semver-checks: API compatible
+{% endif -%}
+{{ release.changelog }}
+{%- if release.breaking_changes %}
+### ⚠ breaking changes
+
+```text
+{{ release.breaking_changes }}
+```
+{%- endif %}
+{%- endif %}
+{% endfor -%}
+"""
 # changelog: generated from commit messages, grouped by module (the commit
 # convention's scope). Never hand-edit released sections.
 [changelog]
@@ -41,6 +67,9 @@ body = """
 {% endfor %}
 """
 trim = true
+# HTML comments must never reach a rendered release section: the Release PR
+# body lands as the squash commit body, and check-commit rejects `<!--`.
+postprocessors = [{ pattern = "(?s)<!--.*?-->", replace = "" }]
 
 [[package]]
 name = "cadmus"
