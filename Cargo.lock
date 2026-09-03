@@ -256,6 +256,7 @@ name = "cadmus-contract"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "insta",
  "serde",
  "serde_json",
  "thiserror",

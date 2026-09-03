@@ -1,0 +1,83 @@
+---
+source: crates/cadmus-core/tests/trajectory.rs
+expression: first
+---
+RunState {
+    trace_id: "tr_test",
+    provider: Some(
+        "kimi",
+    ),
+    model: Some(
+        "kimi-k3",
+    ),
+    messages: [
+        Message {
+            role: User,
+            content: [
+                Text {
+                    text: "look up TODOs in main.rs",
+                },
+            ],
+            tool_call_id: None,
+            opaque: None,
+        },
+        Message {
+            role: Assistant,
+            content: [
+                ToolCall {
+                    call: ToolCall {
+                        id: "call_1",
+                        name: "read_file",
+                        arguments: Object {
+                            "path": String("src/main.rs"),
+                        },
+                    },
+                },
+            ],
+            tool_call_id: None,
+            opaque: None,
+        },
+        Message {
+            role: Tool,
+            content: [
+                Text {
+                    text: "fn main() {\n    // TODO\n}",
+                },
+            ],
+            tool_call_id: Some(
+                "call_1",
+            ),
+            opaque: None,
+        },
+        Message {
+            role: Assistant,
+            content: [
+                Text {
+                    text: "There is one TODO at line 2.",
+                },
+            ],
+            tool_call_id: None,
+            opaque: None,
+        },
+    ],
+    turns: 2,
+    warnings: [],
+    scores: [
+        ScoreEvent {
+            case_id: "find-todo",
+            metric: "answer_contains_line",
+            score: 1.0,
+            passed: Some(
+                true,
+            ),
+        },
+    ],
+    dangling_tool_calls: [],
+    finished: Some(
+        FinishRecord {
+            turns: 2,
+            status: Ok,
+            error: None,
+        },
+    ),
+}

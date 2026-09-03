@@ -1,0 +1,40 @@
+---
+source: crates/cadmus-contract/tests/event.rs
+expression: sample_event()
+---
+{
+  "id": "e3",
+  "trace_id": "tr_01JZKX9A",
+  "span_id": "s2",
+  "parent_span_id": "s1",
+  "time_unix_ms": 1757200000042,
+  "kind": "llm_response",
+  "message": {
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "There is one TODO at line 42."
+      }
+    ]
+  },
+  "usage": {
+    "input": 1280,
+    "cache_read": 512,
+    "cache_write": 0,
+    "output": 42,
+    "reasoning": 0,
+    "raw": null
+  },
+  "finish": "stop",
+  "outcome": "content",
+  "warnings": [
+    "tool call call_9 has malformed arguments; call quarantined"
+  ],
+  "status": "ok",
+  "attributes": {
+    "selfevol.model": "kimi-k3",
+    "selfevol.provider": "kimi",
+    "selfevol.turn": 1
+  }
+}
