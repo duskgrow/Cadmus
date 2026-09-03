@@ -47,7 +47,9 @@
             if [ -e .git ] && [ -z "''${CI:-}" ]; then
               prek install --hook-type pre-commit --hook-type commit-msg >/dev/null 2>&1 || true
             fi
-            echo "devShell ready. Entry point: just --list (git hooks arm themselves on shell entry)"
+            # Banner goes to stderr: stdout of `nix develop -c <cmd>` must stay
+            # clean for output-capturing callers (rust-cache's cmd-format parses it).
+            echo "devShell ready. Entry point: just --list (git hooks arm themselves on shell entry)" >&2
           '';
         };
 
