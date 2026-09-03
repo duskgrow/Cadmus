@@ -28,7 +28,7 @@
 ## Skills (procedures live in .agents/skills/; constraints stay in this file)
 
 - `pr-preflight` — the judgment-layer review before opening/updating a PR (also the frame for reviewing others' PRs)
-- `self-review` — the pre-commit judgment pass over your own working diff (five axes, severity labels, size sanity)
+- `self-review` — the pre-commit pass over your working diff: mechanical sweep yourself, judgment pass delegated to a fresh subagent (author blindness is structural)
 - `adding-dependencies` — required procedure before touching any third-party dependency
 - `rule-maintenance` — how to update AGENTS.md and skills when rules change or mistakes repeat
 - `doc-maintenance` — writing/reviewing docs: three-question filter, EN-canonical translation sync, drift hunting
