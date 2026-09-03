@@ -43,6 +43,23 @@ labeled by §3; you fix or push back.
 5. **Performance** — only obvious hot-path waste; micro-tuning is out of scope
    here.
 
+Then the adversarial trio. The prompt MUST include them verbatim, and the
+review must be framed as an attack, never as a conformance check — "verify
+consistency with X" anchors the reviewer to the author's own assumptions,
+which is how author blindness survives delegation:
+
+6. **Capacity & growth** — what grows without bound? Do the order-of-magnitude
+   math (per run, per day, per year). Quadratic anywhere is a finding.
+7. **Redundancy** — is anything stored or recomputed that the rest of the
+   system can already reconstruct? Duplicated truth rots or bloats.
+8. **Premise attack** — do not just verify the diff conforms to the ADR/spec;
+   attack the design itself: if you owned this code, what would you delete or
+   simplify?
+
+Also out of the author's tunnel: the reviewer looks at the _resulting state_
+of touched files, not only the diff hunks — pre-existing patterns the change
+leans on are in scope.
+
 ## 2. Tests first, then verify your verification
 
 - Tests reveal intent: does the change ship with behavior tests at the lowest
