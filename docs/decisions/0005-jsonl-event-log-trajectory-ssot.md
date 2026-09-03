@@ -37,9 +37,16 @@ survive **relocation/tiering** (e.g. moving old data from SSD to HDD).
    configurable root, date-sharded (`traces/YYYY/MM/DD/<trace-id>.jsonl`).
    One self-describing JSON event per line; events reference each other by
    `trace_id`/`span_id`/`parent_span_id`, never by file path. Full
-   request/response text stays inline (the Meta-Harness full-text evidence is
-   preserved; §5.2.1's content-addressed blob table dies with the medium
-   change). Readers tolerate a torn trailing line after a crash.
+   request/response text stays inline **at message granularity** — the
+   start_run base plus the response/result events carry the complete history
+   and the fold reconstructs any turn's exact request, so per-turn request
+   snapshots are deliberately not duplicated (they would grow a trace
+   quadratically in turns; the Meta-Harness full-text evidence is preserved,
+   and §5.2.1's content-addressed blob table dies with the medium change).
+   Trace ids carry the UTC run-start date (`tr-YYYYMMDD-…`), making the
+   shard path a pure function of the id — no directory scans, and file names
+   are immutable and time-ordered by construction. Readers tolerate a torn
+   trailing line after a crash.
 2. **Retention: never auto-delete** (Claude Code's 30-day default is a
    product policy hostile to an evolution asset). Deletion is explicit-only.
    Hot/cold tiering = moving shard directories and adding a symlink or an

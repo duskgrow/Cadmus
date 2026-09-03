@@ -55,9 +55,7 @@ fn serializes_to_a_single_line() {
 #[test]
 fn every_kind_round_trips() {
     let kinds = vec![
-        EventKind::LlmRequest {
-            request: Box::new(ChatRequest::user_text("look up TODOs", 4_096)),
-        },
+        EventKind::LlmRequest,
         sample_event().kind,
         EventKind::ToolCall {
             call: ToolCall {

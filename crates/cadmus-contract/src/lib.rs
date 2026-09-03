@@ -21,7 +21,7 @@ pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Sup
 pub use error::ModelError;
 pub use event::{
     Clock, Command, Event, EventError, EventKind, IdSequence, ScoreEvent, Status, TurnOutcome,
-    attrs,
+    attrs, error_kinds,
 };
 pub use log::{EventSink, LogError};
 pub use message::{ContentPart, Message, Role, ToolCall};

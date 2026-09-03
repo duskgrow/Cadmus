@@ -241,6 +241,7 @@ dependencies = [
  "cadmus-contract",
  "cadmus-core",
  "cadmus-llm-openai",
+ "cadmus-memory",
  "clap",
  "insta",
  "miette",

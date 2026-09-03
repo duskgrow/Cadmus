@@ -92,7 +92,7 @@ pub fn replay_trace(events: &[Event]) -> RunState {
                 state.provider = string_attr(event, attrs::PROVIDER);
                 state.model = string_attr(event, attrs::MODEL);
             }
-            EventKind::LlmRequest { .. } => {}
+            EventKind::LlmRequest => {}
             EventKind::LlmResponse {
                 message, warnings, ..
             } => {

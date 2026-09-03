@@ -23,6 +23,19 @@ fn help_output() {
     insta::assert_snapshot!(stdout);
 }
 
+/// Same guard for the `chat` subcommand — its flags are the operational
+/// surface (provider, limits, trajectory root).
+#[test]
+fn chat_help_output() {
+    let assert = cli().args(["chat", "--help"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let stdout = stdout.replace(
+        &format!("{}.exe", env!("CARGO_PKG_NAME")),
+        env!("CARGO_PKG_NAME"),
+    );
+    insta::assert_snapshot!(stdout);
+}
+
 /// Failure-path discipline: diagnostics go to stderr, stdout stays clean,
 /// and the exit code is non-zero. Runs before any API-key or network logic,
 /// so it is environment-independent.

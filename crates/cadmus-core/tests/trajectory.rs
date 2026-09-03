@@ -2,12 +2,17 @@
 //! state — asserted by folding twice — snapshot-locked, and tolerant of
 //! crash-truncated logs (dangling spans, missing terminal record).
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use cadmus_contract::{
     ChatRequest, Command, ContentPart, Event, EventError, EventKind, FinishReason, Message, Role,
-    ScoreEvent, Status, ToolCall, TurnOutcome, Usage, attrs,
+    ScoreEvent, Status, StreamChunk, ToolCall, ToolSpec, TurnOutcome, Usage, attrs,
 };
-use cadmus_core::replay_trace;
-use serde_json::json;
+use cadmus_core::{
+    AgentLoop, AgentTool, ReplayProvider, ToolError, replay_trace, testing::test_telemetry,
+};
+use serde_json::{Value, json};
 
 /// Fixed envelope: deterministic ids, spans and timeline — replay tests are
 /// data tests, nothing here may read a clock.
@@ -46,19 +51,12 @@ fn full_log() -> Vec<Event> {
             1,
             1,
             EventKind::Command(Command::StartRun {
-                base: Box::new(base.clone()),
+                base: Box::new(base),
             }),
         )
         .with_attribute(attrs::PROVIDER, "kimi")
         .with_attribute(attrs::MODEL, "kimi-k3"),
-        envelope(
-            2,
-            2,
-            EventKind::LlmRequest {
-                request: Box::new(base),
-            },
-        )
-        .with_attribute(attrs::TURN, 1),
+        envelope(2, 2, EventKind::LlmRequest).with_attribute(attrs::TURN, 1),
         envelope(
             3,
             2,
@@ -94,14 +92,7 @@ fn full_log() -> Vec<Event> {
                 result: json!("fn main() {\n    // TODO\n}"),
             },
         ),
-        envelope(
-            6,
-            4,
-            EventKind::LlmRequest {
-                request: Box::new(ChatRequest::user_text("…second turn…", 4_096)),
-            },
-        )
-        .with_attribute(attrs::TURN, 2),
+        envelope(6, 4, EventKind::LlmRequest).with_attribute(attrs::TURN, 2),
         envelope(
             7,
             4,
@@ -280,4 +271,157 @@ fn empty_log_is_an_empty_state() {
     assert!(state.messages.is_empty());
     assert_eq!(state.turns, 0);
     assert!(state.finished.is_none());
+}
+
+/// The phase-1 acceptance that ties the loop to the replayer (ADR-0005 §4):
+/// the events the loop appends fold back into exactly the run's outcome.
+struct EchoTool;
+
+#[async_trait]
+impl AgentTool for EchoTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "echo".into(),
+            description: "echoes back the input".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
+        Ok(arguments)
+    }
+}
+
+/// Drives a fixed two-turn run (tool call, then text) through the loop with
+/// recording telemetry, returning the emitted events and the outcome.
+async fn run_two_turn_loop() -> (Vec<Event>, cadmus_core::RunOutcome) {
+    let provider = Arc::new(ReplayProvider::new([
+        ReplayProvider::script(vec![
+            StreamChunk::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "echo".into(),
+            },
+            StreamChunk::ToolArgsDelta {
+                index: 0,
+                fragment: "{\"text\":\"ping\"}".into(),
+            },
+            StreamChunk::ToolCallEnd { index: 0 },
+            StreamChunk::Done {
+                finish: FinishReason::ToolCalls,
+            },
+        ]),
+        ReplayProvider::script(vec![
+            StreamChunk::TextDelta("pong".into()),
+            StreamChunk::Done {
+                finish: FinishReason::Stop,
+            },
+        ]),
+    ]));
+    let (mut telemetry, sink) = test_telemetry("tr-loop");
+    telemetry
+        .run_attributes
+        .insert(attrs::PROVIDER.into(), "test-provider".into());
+    telemetry
+        .run_attributes
+        .insert(attrs::MODEL.into(), "test-model".into());
+    telemetry
+        .run_attributes
+        .insert(attrs::CADMUS_VERSION.into(), "0.0.0-test".into());
+    let agent = AgentLoop::new(provider, vec![Arc::new(EchoTool)], 8, telemetry);
+    let outcome = agent
+        .run(&ChatRequest::user_text("say ping", 1_024))
+        .await
+        .expect("run");
+    (sink.events(), outcome)
+}
+
+/// The phase-1 acceptance that ties the loop to the replayer (ADR-0005 §4):
+/// the events the loop appends fold back into exactly the run's outcome.
+#[tokio::test]
+async fn loop_events_replay_to_the_run_state() {
+    let (events, outcome) = run_two_turn_loop().await;
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| match &event.kind {
+            EventKind::Command(Command::StartRun { .. }) => "start_run",
+            EventKind::LlmRequest => "llm_request",
+            EventKind::LlmResponse { .. } => "llm_response",
+            EventKind::ToolCall { .. } => "tool_call",
+            EventKind::ToolResult { .. } => "tool_result",
+            EventKind::EvalScore(_) => "eval_score",
+            EventKind::RunFinished { .. } => "run_finished",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "start_run",
+            "llm_request",
+            "llm_response",
+            "tool_call",
+            "tool_result",
+            "llm_request",
+            "llm_response",
+            "run_finished"
+        ]
+    );
+    // The idempotent-retry seam relies on minted ids being unique.
+    let mut ids: Vec<&str> = events.iter().map(|event| event.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), events.len(), "event ids must be unique");
+
+    let state = replay_trace(&events);
+    assert_eq!(state.trace_id, "tr-loop");
+    assert_eq!(state.messages, outcome.messages);
+    assert_eq!(state.turns, u32::try_from(outcome.turns).expect("turns"));
+    assert!(state.dangling_tool_calls.is_empty());
+    assert_eq!(
+        state.finished.as_ref().map(|finish| finish.status),
+        Some(Status::Ok)
+    );
+}
+
+/// Span and attribute discipline of the emitted trace: request/response and
+/// tool call/result pairs share one span each, the run root brackets the
+/// trace, and provenance rides the start-run event. This is what phase-2
+/// projections and `dangling_tool_calls` group by.
+#[tokio::test]
+async fn loop_events_keep_span_and_attribute_discipline() {
+    let (events, _outcome) = run_two_turn_loop().await;
+    let root = events[0].span_id.clone();
+    assert_eq!(events[0].parent_span_id, None, "start_run opens the root");
+    assert_eq!(events[1].span_id, events[2].span_id, "turn-1 llm pair");
+    assert_eq!(events[3].span_id, events[4].span_id, "tool pair");
+    assert_eq!(events[5].span_id, events[6].span_id, "turn-2 llm pair");
+    assert_ne!(
+        events[1].span_id, events[5].span_id,
+        "turns are distinct spans"
+    );
+    for event in &events[1..7] {
+        assert_eq!(event.parent_span_id.as_deref(), Some(root.as_str()));
+    }
+    assert_eq!(events[7].span_id, root, "run_finished closes the root");
+    assert_eq!(events[7].parent_span_id, None);
+    // Turn attributes: 1-based, shared by the turn's llm and tool events.
+    for event in &events[1..5] {
+        assert_eq!(event.attributes.get(attrs::TURN), Some(&json!(1)));
+    }
+    for event in &events[5..7] {
+        assert_eq!(event.attributes.get(attrs::TURN), Some(&json!(2)));
+    }
+    // Run-level provenance rides the start-run event.
+    assert_eq!(
+        events[0].attributes.get(attrs::PROVIDER),
+        Some(&json!("test-provider"))
+    );
+    assert_eq!(
+        events[0].attributes.get(attrs::MODEL),
+        Some(&json!("test-model"))
+    );
+    assert_eq!(
+        events[0].attributes.get(attrs::CADMUS_VERSION),
+        Some(&json!("0.0.0-test"))
+    );
 }

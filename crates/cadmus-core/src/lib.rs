@@ -11,9 +11,10 @@
 mod agent;
 mod assembler;
 mod replay;
+pub mod testing;
 mod trajectory;
 
-pub use agent::{AgentError, AgentLoop, AgentTool, RunOutcome, ToolError};
+pub use agent::{AgentError, AgentLoop, AgentTool, RunOutcome, Telemetry, ToolError};
 pub use assembler::{AssembledTurn, MessageAssembler};
 // The trajectory's llm_response events carry the outcome (ADR-0005), so the
 // enum moved to the contract crate; re-exported here for continuity.

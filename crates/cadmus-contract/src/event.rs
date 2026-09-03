@@ -1,6 +1,8 @@
 //! Trajectory event types (ADR-0005): the per-trace append-only JSONL event
 //! log is the trajectory SSOT. One self-describing event per line, full
-//! request/response text inline, references by id — never by file path.
+//! request/response text inline at message granularity (the start-run base
+//! plus response/result events; per-turn request snapshots are deliberately
+//! not duplicated), references by id — never by file path.
 //!
 //! Schema evolution is additive-only (self-describing events plus rebuildable
 //! projections downgrade the report's §11.1 irreversibility risk): new
@@ -27,9 +29,15 @@ pub struct Event {
     /// [`IdSequence`].
     pub id: String,
     pub trace_id: String,
-    /// The span this event belongs to (`s3`); request/response and
-    /// call/result pairs share one span.
+    /// The span this event belongs to (`s3`). An event is a point in time;
+    /// a span is an interval — never itself a line in the log — delimited by
+    /// the events sharing its id: request opens it, response closes it;
+    /// tool call/result likewise. Duration is the pair's timestamp delta.
     pub span_id: String,
+    /// Spans form a tree: turn and tool spans hang off the run's root span
+    /// (which `start_run` opens and `run_finished` closes). Phase 1's tree
+    /// is two levels deep; the link exists so deeper trees (cascade retries,
+    /// control-plane commands) need no format change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
     /// Milliseconds since the Unix epoch, from the injected [`Clock`] — the
@@ -96,10 +104,15 @@ impl Event {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
-    /// The exact request handed to the provider, full text inline (the
-    /// Meta-Harness evidence: never store hashes instead of text). Asset-only
-    /// — replaying it changes no run state.
-    LlmRequest { request: Box<ChatRequest> },
+    /// Span-open marker for one provider call (its close is the matching
+    /// `llm_response` on the same span): the pair gives duration, and an
+    /// unclosed span is the "call never returned" crash signal. Deliberately
+    /// no request snapshot — the fold reconstructs the exact per-turn
+    /// history from `start_run` + message-level events, so duplicating it per
+    /// turn would grow the log quadratically in turns. Per-call parameters
+    /// arrive as attributes when cascade routing (phase 3) makes them vary
+    /// within a run.
+    LlmRequest,
     /// The assembled assistant turn. `status == error` with a partial
     /// `message` records a stream that died mid-flight.
     LlmResponse {
@@ -108,6 +121,9 @@ pub enum EventKind {
         /// terminal record means truncation, not a zero-usage success).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
+        /// May be the assembler's default (`stop`) when the stream died
+        /// before a terminal record — `outcome` and the envelope `status`
+        /// carry the truncation truth, not this field.
         finish: FinishReason,
         outcome: TurnOutcome,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,9 +157,10 @@ pub struct ScoreEvent {
     pub passed: Option<bool>,
 }
 
-/// A validated client operation (ADR-0002's command seam). Phase 1 knows
-/// only the run-opening command; approvals, messages and steering arrive
-/// with the control plane.
+/// A validated client operation (ADR-0002's command seam): the only event
+/// kind a client may ever produce — the control plane's trust boundary is
+/// this type. Phase 1 knows only the run-opening command; approvals,
+/// messages and steering arrive with the control plane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
@@ -200,16 +217,39 @@ pub trait IdSequence: Send + Sync {
     fn next(&self) -> u64;
 }
 
+/// Stable machine strings for [`EventError::kind`] — the failure vocabulary
+/// that projections and (phase 3) cascade routing branch on.
+pub mod error_kinds {
+    // ModelError mappings:
+    pub const RATE_LIMITED: &str = "rate_limited";
+    pub const SERVER: &str = "server";
+    pub const NETWORK: &str = "network";
+    pub const PROTOCOL: &str = "protocol";
+    pub const INVALID_REQUEST: &str = "invalid_request";
+    pub const CAPABILITY_MISMATCH: &str = "capability_mismatch";
+    pub const AUTH: &str = "auth";
+    pub const CONTEXT_LENGTH: &str = "context_length";
+    /// Assistant turn with no text, reasoning or tool calls.
+    pub const EMPTY_TURN: &str = "empty_turn";
+    /// Assistant turn limit exceeded.
+    pub const TURN_LIMIT: &str = "turn_limit";
+    /// A wired tool's invocation returned an error.
+    pub const TOOL: &str = "tool";
+    /// The model named a tool that is not wired in.
+    pub const UNKNOWN_TOOL: &str = "unknown_tool";
+}
+
 /// Well-known attribute-bag keys — the SSOT of the long-lived `selfevol.*`
 /// vocabulary (`OTel` `gen_ai.*` naming as reference).
 pub mod attrs {
-    /// Provider id as wired (`kimi`, `deepseek`, `custom`, …) — on the
-    /// start-run command and each llm request.
+    /// Provider id as wired (`kimi`, `deepseek`, `custom`, …) — recorded on
+    /// the start-run command.
     pub const PROVIDER: &str = "selfevol.provider";
     /// Model id as sent on the wire.
     pub const MODEL: &str = "selfevol.model";
     /// Binary version that wrote the trace.
     pub const CADMUS_VERSION: &str = "selfevol.cadmus.version";
-    /// 1-based assistant-turn index within the run.
+    /// 1-based assistant-turn index within the run — on llm request/response
+    /// and tool call/result events.
     pub const TURN: &str = "selfevol.turn";
 }
