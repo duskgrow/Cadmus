@@ -30,11 +30,23 @@ jobs:
       # zero-config binary cache; for stricter requirements switch to FlakeHub
       # Cache or Cachix (see docs/decisions/0004)
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
-      # cargo registry + target/ cache; cmd-format routes rustc/cargo through the
-      # nix devShell (no ambient rustc exists in nix jobs)
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          cmd-format: nix develop -c {0}
+          # otherwise the action probes FlakeHub Cache (the paid hosted sibling)
+          # whenever determinate-nixd is present, erroring noisily before
+          # falling back to the free GitHub Actions cache
+          use-flakehub: false
+      # cargo registry + target/ cache. Not rust-cache: its key detection shells
+      # out through `nix develop -c` (~75s of flake eval per job); a static key
+      # over the lockfile + toolchain pin expresses the same identity instantly.
+      # (test-windows keeps rust-cache: rustup is native there, detection free.)
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: v0-rust-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v0-rust-${{ github.job }}-${{ runner.os }}-
       - run: nix develop -c prek run --all-files --show-diff-on-failure
 
   test:
@@ -48,9 +60,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          cmd-format: nix develop -c {0}
+          use-flakehub: false # see the quality-gate job
+      # cargo registry + target/ cache; actions/cache over rust-cache for the
+      # same reason as the quality-gate job (no `nix develop -c` detection tax)
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: v0-rust-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: v0-rust-${{ github.job }}-${{ runner.os }}-
       - run: nix develop -c just ci
 
   # Nix has no native Windows support: this job takes the rustup native route
@@ -80,4 +101,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
       - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+        with:
+          use-flakehub: false # see the quality-gate job in ci.yml
       - run: nix develop -c just dist-check
