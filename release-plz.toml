@@ -20,8 +20,9 @@ git_tag_name = "v{{ version }}"
 # by cargo-dist — release-plz must not create a second one
 git_release_enable = false
 # The Release PR body is also the squash-merge commit body (repo setting
-# PR_TITLE/PR_BODY): keep it commit-clean by construction — no HTML comments
-# (check-commit rejects them), no <details> scaffolding, no generator footer.
+# PR_TITLE/PR_BODY): keep it landable as a whole by construction — no HTML
+# comments, no task lists, no `---` lines (check-commit rejects all three),
+# no <details> scaffolding, no generator footer.
 pr_body = """
 {%- for release in releases %}
 {%- if releases | length > 1 -%}

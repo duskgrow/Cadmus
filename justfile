@@ -75,6 +75,12 @@ agent-check:
 toolchain-bump:
     cargo run -q -p xtask -- bump-toolchain
 
+# Human-gate for PRs: secret scan of the diff + required acknowledgment labels
+# (.github/ ⇒ github-ok, dep manifests ⇒ deps-ok, *.snap ⇒ snapshots-ok).
+# Needs gh authenticated against the repo; the pr-guard.yml workflow is the CI caller.
+pr-guard pr="":
+    cargo run -q -p xtask -- pr-guard {{pr}}
+
 # The local full quality gate ≡ CI (modulo matrix dimensions); run before committing
 ci: lint test doc deny agent-check
     @echo "just ci: all green ✅"

@@ -29,8 +29,11 @@ this section is the process gate over the assembled PR.
   intentional and related to the task; remove drive-by edits, debug leftovers,
   commented-out code.
 - Scan for secrets: tokens, private keys, `.env` contents, hardcoded
-  credentials — in code, tests, snapshots, and docs. A leaked secret requires
-  rotation, not just deletion.
+  credentials — in code, tests, snapshots, and docs. The machine half runs by
+  itself (the `pr guard` CI check scans the PR diff; a pre-commit hook scans
+  the staged diff) — what remains here is judgment: contexts the patterns
+  miss, and the call when something real turns up (rotation, not just
+  deletion).
 - Change-size sanity: if the diff is large, could it be split into reviewable
   stages? Recommend the split instead of forcing a giant PR.
 
@@ -49,7 +52,9 @@ this section is the process gate over the assembled PR.
   this PR — not noise, not an accident of environment. Nondeterministic
   fields (timestamps, paths, UUIDs) must be filtered before snapshotting.
 - Snapshots are approved by humans via `just snapshot-review`; the agent
-  prepares and explains the diff, the human accepts.
+  prepares and explains the diff, the human accepts. On the PR, the
+  `snapshots-ok` label is the logged acknowledgment (the `pr guard` check
+  requires it when `*.snap` files change).
 
 ## 4. Commits are version intent
 
@@ -60,10 +65,10 @@ this section is the process gate over the assembled PR.
   messages — a wrong type is a wrong release.
 - Merge strategy is squash-only, landing **the PR title as the commit header
   and the PR body as the commit body**; CI checks both. Help the human get the
-  title right; the body may be any language, the title may not. Body hygiene:
-  delete the template's HTML comments before opening (CI rejects them); at
-  merge time, cut everything below the `---` line (checklist etc.) in the
-  merge dialog.
+  title right; the body may be any language, the title may not. The body is
+  landable as a whole — CI rejects HTML comments, task-list lines (`- [ ]`)
+  and bare `---` lines, so the merge dialog needs zero edits: delete the
+  template's guidance comment before opening and write the rest commit-ready.
 - PR messages are authored on GitHub and never pass the local commit-msg
   hook — CI is otherwise the first gate that sees them. Before opening or
   editing a PR, run the assembled message through the checker locally:
@@ -84,9 +89,12 @@ decision, cite the number (`see ADR-0003`) — never restate its rationale.
 ## 6. Security & boundary pass
 
 - New third-party dependency in the diff? It must have gone through the
-  `adding-dependencies` skill (and the human said yes).
+  `adding-dependencies` skill (and the human said yes) — on the PR, the
+  `deps-ok` label is the logged acknowledgment (the `pr guard` check requires
+  it when dependency manifests change).
 - `.github/` touched? That requires explicit human approval (AGENTS.md ASK
-  rule) — confirm it happened.
+  rule) — on the PR, the `github-ok` label is the logged acknowledgment
+  (required by the `pr guard` check).
 - `unsafe` code is forbidden workspace-wide; if the diff somehow needs it,
   stop and escalate.
 

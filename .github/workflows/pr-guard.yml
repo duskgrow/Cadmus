@@ -1,15 +1,17 @@
-# Commit messages are the version-intent SSOT (modified Conventional Commits —
-# the input release-plz derives versions and the changelog from). Squash merge
-# makes the PR title+body the landed commit message, so both are checked here;
-# the commit-msg hook covers local commits.
-# A separate workflow so `edited` re-runs only this cheap check, not ci.yml's
-# whole test matrix: retitling a PR (e.g. dependabot's "Bump ..." titles)
-# re-triggers the gate automatically.
-name: commits
+# Human gates for PRs: agents self-check via skills, humans get red buttons.
+# What can't be machine-checked compiles into a mechanical trigger plus a
+# label the human applies as their conscious, timeline-logged acknowledgment:
+#   .github/ touched        ⇒ `github-ok` label required
+#   dep manifests touched   ⇒ `deps-ok` (Cargo.toml, Cargo.lock, deny.toml)
+#   *.snap touched          ⇒ `snapshots-ok`
+# plus a hard-fail secret scan of the diff (no label escape hatch).
+# A separate workflow (like commits.yml) so `labeled`/`unlabeled` re-runs only
+# this cheap gate, not ci.yml's whole test matrix.
+name: pr-guard
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, reopened, synchronize, labeled, unlabeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,9 +21,12 @@ permissions:
   contents: read
 
 jobs:
-  commits:
-    name: conventional commits
+  pr-guard:
+    name: pr guard
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # gh pr view / gh pr diff
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -38,10 +43,8 @@ jobs:
             target
           key: v0-rust-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: v0-rust-${{ github.job }}-${{ runner.os }}-
-      # via env vars, never interpolated into shell (the title is user-controlled)
+      # the PR number travels via env var, never interpolated into shell
       - env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > pr-message.txt
-          nix develop -c cargo run -q -p xtask -- check-commit pr-message.txt
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: nix develop -c just pr-guard "$PR_NUMBER"

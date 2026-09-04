@@ -17,7 +17,7 @@ All day-to-day commands: `just --list` (living documentation, evolves with the r
 
 ## Merging and commit messages
 
-Merge strategy is **squash merge only** (set in repository settings — see "Repository settings"). main's history stays one-line-one-meaning, and the PR title + body become the landed commit message — so **the PR title must follow the commit convention**, and CI checks it.
+Merge strategy is **squash merge only** (set in repository settings — see "Repository settings"). main's history stays one-line-one-meaning, and the PR title + body become the landed commit message — so **the PR title must follow the commit convention**, and CI checks it. The merge flow is: review on the web → green checks → merge. The squash dialog pre-fills the PR title + body and needs **zero edits** — the whole body is landable by construction.
 
 Commit convention — modified Conventional Commits:
 
@@ -26,7 +26,7 @@ Commit convention — modified Conventional Commits:
 - `type`: one of `feat fix docs style refactor perf test build ci chore revert` (lowercase)
 - `scope`: optional, lowercase (crate name, `cli`, …); `!` marks breaking (or a `BREAKING CHANGE:` footer). Scope doubles as the changelog's module section (release notes are grouped by scope, Zed-style), so prefer setting it
 - `subject`: pure-ASCII English; the whole header is at most 100 chars
-- body: any language, no line-width limit; separated from the header by one blank line; no HTML comments — the squash merge lands the PR body verbatim, so template comments must be deleted, not merged. Keep it readable: a prose paragraph runs at most 7 lines — split longer bodies into paragraphs or use lists (list items, blockquotes and fenced code are exempt; enforced by check-commit)
+- body: any language, no line-width limit; separated from the header by one blank line. The whole body lands in history verbatim, so it must be landable as a whole: no HTML comments (delete the template's guidance comment, don't merge it), no task lists (`- [ ]`), no bare `---` lines — process scaffolding is rejected outright (enforced by check-commit). Keep it readable: a prose paragraph runs at most 7 lines — split longer bodies into paragraphs or use lists (list items, blockquotes and fenced code are exempt)
 - footer (`TOKEN: value` / `TOKEN #value`): the block is preceded by a blank line. Blessed tokens: `Closes #N` (GitHub auto-closes the issue on merge) and `BREAKING CHANGE:` (semver-MAJOR signal). GitHub itself appends `Co-authored-by:` for multi-author PRs; tooling-attribution trailers stay banned (see AGENTS.md)
 
 Semver mapping: `fix` → PATCH, `feat` → MINOR, `!` → MAJOR. Version derivation and the CHANGELOG are generated from these messages — a wrong type is a wrong release.
@@ -40,7 +40,15 @@ Notes:
 
 - GitHub appends ` (#NNN)` to the squash-merge commit title — expected, leave it.
 - `git revert`'s default `Revert "…"` header doesn't match the convention — rewrite it as `revert: <what>`.
-- The PR template is two zones split by a `---` cut line: above it, the commit body (written commit-ready — CI rejects HTML comments); below it, process scaffolding (checklist etc.). When squash-merging, delete from the `---` line down in the merge dialog; the title must stay convention-clean.
+- The PR template is a single zone: everything below its HTML guidance comment lands as the commit body (delete the comment before opening — CI rejects it). AI assistance is disclosed with the `ai-assisted` label, not in the message.
+
+### PR gates and labels
+
+Agents self-check against the skills; for human-authored PRs the judgment rules compile into machine gates — the `pr guard` check (`.github/workflows/pr-guard.yml`, logic in the `pr-guard` subcommand of `crates/xtask`):
+
+- **Secret scan** of the PR diff — hard fail, no label escape hatch (a leaked secret needs rotation, not a label). Documented _example_ secrets can carry a `pr-guard:allow` marker on their line (visible in review). The same scan runs locally as a pre-commit hook over the staged diff.
+- **Acknowledgment labels**: touching `.github/` requires `github-ok`; dependency manifests (`Cargo.toml`, `Cargo.lock`, `deny.toml`) require `deps-ok`; `*.snap` snapshots require `snapshots-ok`. A red check names the missing label — applying it (once you've actually looked) re-runs the gate and logs the acknowledgment on the PR timeline.
+- `ai-assisted`: disclosure label for PRs co-authored with generative AI (the `pr-preflight` skill was run, or the diff was reviewed against it).
 
 ## Adding a dependency
 
@@ -88,24 +96,25 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 
 ## CI map
 
-| job / workflow                 | purpose                                                                                              |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `ci.yml` → quality-gate        | `prek run --all-files`, same source as local git hooks                                               |
-| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                             |
-| `ci.yml` → test (windows)      | native rustup route, same `rust-toolchain.toml`                                                      |
-| `commits.yml`                  | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle |
-| `ci.yml` → dist-drift          | consistency between generated release.yml and `dist-workspace.toml`                                  |
-| `release-plz.yml`              | Release PR + tag (crates.io publish is opt-in)                                                       |
-| `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs                              |
-| `flake-update.yml`             | weekly flake.lock upgrade PR                                                                         |
-| `toolchain-update.yml`         | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`)                                |
+| job / workflow                 | purpose                                                                                                                            |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `ci.yml` → quality-gate        | `prek run --all-files`, same source as local git hooks                                                                             |
+| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                                                           |
+| `ci.yml` → test (windows)      | native rustup route, same `rust-toolchain.toml`                                                                                    |
+| `commits.yml`                  | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle                               |
+| `pr-guard.yml`                 | human gates on PRs: secret scan of the diff + acknowledgment labels (github-ok / deps-ok / snapshots-ok); re-runs on label changes |
+| `ci.yml` → dist-drift          | consistency between generated release.yml and `dist-workspace.toml`                                                                |
+| `release-plz.yml`              | Release PR + tag (crates.io publish is opt-in)                                                                                     |
+| `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs                                                            |
+| `flake-update.yml`             | weekly flake.lock upgrade PR                                                                                                       |
+| `toolchain-update.yml`         | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`)                                                              |
 
 ## Repository settings (one-time, GitHub side)
 
 These live in GitHub settings rather than in code; set them once when the repo is created:
 
 - General → Pull Requests: **squash merge only** (disable merge commits and rebase merge); set the squash commit message to "Default to pull request title and description"; enable "Automatically delete head branches".
-- Branches → protect `main`: require a pull request before merging; require status checks `quality gate (prek)`, `test (ubuntu-latest)`, `test (macos-latest)`, `test (windows)`, `conventional commits`, `release.yml drift check`; require branches to be up to date.
+- Branches → protect `main`: require a pull request before merging; require status checks `quality gate (prek)`, `test (ubuntu-latest)`, `test (macos-latest)`, `test (windows)`, `conventional commits`, `pr guard`, `release.yml drift check`; require branches to be up to date.
 - Actions → General: workflow permissions per the release setup above.
 
 The same settings as a one-shot `gh` block (run inside the repo, authenticated as yourself with `gh auth login` — `{owner}`/`{repo}` auto-resolve from the remote). This is deliberately a documented command block rather than a shipped script: it runs once per repository, needs your admin credentials, and a copy-paste block cannot rot silently the way a shipped one-off script would.
@@ -113,7 +122,11 @@ The same settings as a one-shot `gh` block (run inside the repo, authenticated a
 ```bash
 gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-message=pr-title-description
 gh api repos/{owner}/{repo}/actions/permissions/workflow -X PUT -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
-gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
+gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=pr guard' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
+gh label create ai-assisted --color 8250df --description "Generative AI co-authored this PR; the pr-preflight judgment pass was run"
+gh label create github-ok --color b60205 --description "Human acknowledgment: .github/ changes in this PR were consciously reviewed"
+gh label create deps-ok --color b60205 --description "Human acknowledgment: dependency manifest changes in this PR were consciously reviewed"
+gh label create snapshots-ok --color b60205 --description "Human acknowledgment: snapshot changes in this PR were consciously reviewed"
 ```
 
 Settings live outside git and can drift — verify with:
