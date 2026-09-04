@@ -24,7 +24,7 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 - `type`：`feat fix docs style refactor perf test build ci chore revert` 之一（小写）
 - `scope`：可选，小写（crate 名、`cli` 等）；`!` 标记破坏性变更（或 footer `BREAKING CHANGE:`）。scope 同时是 changelog 的模块小节名（release notes 按 scope 分组，Zed 风格），建议填写
 - `subject`：纯英文 ASCII；整个 header 不超过 100 字符
-- body：随意——可中文、不限行宽；与 header 之间空一行；不写 HTML 注释——squash 合并会原样落地 PR 正文，模板注释必须删掉，不能合进历史
+- body：可中文、不限行宽；与 header 之间空一行；不写 HTML 注释——squash 合并会原样落地 PR 正文，模板注释必须删掉，不能合进历史。保持可读：叙述段落最多 7 行——更长就分段或用列表（列表项、引用块、代码块不计；check-commit 强制）
 - footer（`TOKEN: value` / `TOKEN #value`）：整个块前留空行。推荐 token：`Closes #N`（合并时 GitHub 自动关闭对应 issue）与 `BREAKING CHANGE:`（semver MAJOR 信号）。多作者 PR 的 `Co-authored-by:` 由 GitHub 自动追加；工具署名类 trailer 依旧禁止（见 AGENTS.md）
 
 语义化版本映射：`fix` → PATCH，`feat` → MINOR，`!` → MAJOR。版本号推导与 CHANGELOG 都以提交信息为输入——type 写错等于版本发错。

@@ -10,13 +10,19 @@
 //!   body:    free-form (any language), separated from the header by one blank
 //!            line; no HTML comments — the squash merge lands the PR body as
 //!            the commit body verbatim, so template comments must be deleted,
-//!            not merged into history
+//!            not merged into history; a prose paragraph runs at most
+//!            [`BODY_PROSE_RUN_MAX`] lines — longer bodies must be split into
+//!            paragraphs or formatted as lists (walls of text read badly in
+//!            `git log`; list items, blockquotes and fenced code are exempt)
 //!   footer:  `TOKEN: value` / `TOKEN #value` (incl. `BREAKING CHANGE:`) must
 //!            start the footer block, preceded by a blank line
 
 use std::process::ExitCode;
 
 const HEADER_MAX: usize = 100;
+/// Longest tolerated run of consecutive prose lines in a body. Set from the
+/// evidence on main: the longest paragraph in an accepted body is 7 lines.
+const BODY_PROSE_RUN_MAX: usize = 7;
 const TYPES: [&str; 11] = [
     "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
 ];
@@ -128,7 +134,50 @@ pub fn check(text: &str) -> Vec<String> {
             ));
         }
     }
+    let mut in_fence = false;
+    let mut run_start = 0;
+    let mut run_len = 0;
+    for (index, line) in lines.iter().enumerate().skip(2) {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            run_len = 0;
+            continue;
+        }
+        if in_fence || !is_prose_line(trimmed) {
+            run_len = 0;
+            continue;
+        }
+        if run_len == 0 {
+            run_start = index;
+        }
+        run_len += 1;
+        if run_len == BODY_PROSE_RUN_MAX + 1 {
+            errors.push(format!(
+                "body paragraph at line {} runs past {BODY_PROSE_RUN_MAX} prose lines — split it into shorter paragraphs or use a list",
+                run_start + 1
+            ));
+        }
+    }
     errors
+}
+
+/// Whether a body line reads as flowing prose. Formatted content is exempt —
+/// list items, blockquotes and the `---` cut line stay readable at any length.
+fn is_prose_line(trimmed: &str) -> bool {
+    if trimmed.is_empty()
+        || trimmed == "---"
+        || trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("+ ")
+        || trimmed.starts_with("> ")
+    {
+        return false;
+    }
+    let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    let rest = &trimmed[digits..];
+    let numbered = digits > 0 && (rest.starts_with(". ") || rest.starts_with(") "));
+    !numbered
 }
 
 /// Split `type(scope)!: subject` into `(type, subject)`, validating the
@@ -229,6 +278,48 @@ mod tests {
         assert!(!errors_of("feat: x\n\nbody\n\n<!-- template note -->").is_empty());
         assert!(!errors_of("feat: x\n\n<!-- lone comment -->").is_empty());
         assert!(errors_of("feat: x\n\nbody without comments").is_empty());
+    }
+
+    #[test]
+    fn long_prose_paragraphs_must_be_split() {
+        let prose = |n: usize| {
+            (1..=n)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // the boundary follows the longest paragraph in an accepted main body
+        assert!(errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX))).is_empty());
+        assert!(!errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX + 1))).is_empty());
+        // splitting the same text into two paragraphs is fine
+        let split = format!("feat: x\n\n{}\n\n{}", prose(4), prose(4));
+        assert!(errors_of(&split).is_empty());
+        // one violation per run, not one per line
+        assert_eq!(
+            errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX + 3))).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn formatted_body_blocks_are_not_prose() {
+        let bullets = (1..=10)
+            .map(|i| format!("- item {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(errors_of(&format!("feat: x\n\n{bullets}")).is_empty());
+        let numbered = (1..=10)
+            .map(|i| format!("{i}. item"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(errors_of(&format!("feat: x\n\n{numbered}")).is_empty());
+        let quote = (1..=10)
+            .map(|i| format!("> note {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(errors_of(&format!("feat: x\n\n{quote}")).is_empty());
+        let fence = format!("feat: x\n\n```text\n{}\n```", "log line\n".repeat(10));
+        assert!(errors_of(&fence).is_empty());
     }
 
     #[test]

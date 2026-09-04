@@ -64,6 +64,13 @@ this section is the process gate over the assembled PR.
   delete the template's HTML comments before opening (CI rejects them); at
   merge time, cut everything below the `---` line (checklist etc.) in the
   merge dialog.
+- PR messages are authored on GitHub and never pass the local commit-msg
+  hook — CI is otherwise the first gate that sees them. Before opening or
+  editing a PR, run the assembled message through the checker locally:
+  `printf '%s\n\n%s\n' "$TITLE" "$BODY" | cargo run -q -p xtask -- check-commit -`.
+  Structure is judgment on top of that: a one-two-sentence what/why up front,
+  then short paragraphs or lists — no wall of text (check-commit rejects
+  prose paragraphs over 7 lines; readable beats barely-legal).
 - No agent-attribution footers (`Co-Authored-By`, `Generated-with`) in
   commits or PRs — see AGENTS.md.
 
