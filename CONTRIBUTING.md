@@ -26,7 +26,7 @@ Commit convention — modified Conventional Commits:
 - `type`: one of `feat fix docs style refactor perf test build ci chore revert` (lowercase)
 - `scope`: optional, lowercase (crate name, `cli`, …); `!` marks breaking (or a `BREAKING CHANGE:` footer). Scope doubles as the changelog's module section (release notes are grouped by scope, Zed-style), so prefer setting it
 - `subject`: pure-ASCII English; the whole header is at most 100 chars
-- body: free-form — any language, no line-width limit; separated from the header by one blank line; no HTML comments — the squash merge lands the PR body verbatim, so template comments must be deleted, not merged
+- body: any language, no line-width limit; separated from the header by one blank line; no HTML comments — the squash merge lands the PR body verbatim, so template comments must be deleted, not merged. Keep it readable: a prose paragraph runs at most 7 lines — split longer bodies into paragraphs or use lists (list items, blockquotes and fenced code are exempt; enforced by check-commit)
 - footer (`TOKEN: value` / `TOKEN #value`): the block is preceded by a blank line. Blessed tokens: `Closes #N` (GitHub auto-closes the issue on merge) and `BREAKING CHANGE:` (semver-MAJOR signal). GitHub itself appends `Co-authored-by:` for multi-author PRs; tooling-attribution trailers stay banned (see AGENTS.md)
 
 Semver mapping: `fix` → PATCH, `feat` → MINOR, `!` → MAJOR. Version derivation and the CHANGELOG are generated from these messages — a wrong type is a wrong release.
