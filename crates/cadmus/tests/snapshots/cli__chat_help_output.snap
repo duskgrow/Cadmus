@@ -1,0 +1,20 @@
+---
+source: crates/cadmus/tests/cli.rs
+expression: stdout
+---
+Chat with the agent (one shot: prompt in, final answer out), with read-only coding tools confined to the current directory
+
+Usage: cadmus chat [OPTIONS] [PROMPT]...
+
+Arguments:
+  [PROMPT]...  The prompt; read from stdin when omitted
+
+Options:
+      --provider <PROVIDER>      Provider to use (registry dialect, or `custom` for an explicit OpenAI-compatible endpoint) [default: kimi]
+      --model <MODEL>            Model name (required for --provider custom; registry dialects pin their model)
+      --base-url <BASE_URL>      Endpoint base URL (required for --provider custom; key comes from `CADMUS_CUSTOM_API_KEY`)
+      --max-tokens <MAX_TOKENS>  Maximum output tokens per assistant turn [default: 4096]
+      --max-turns <MAX_TURNS>    Maximum assistant turns before the run fails [default: 16]
+      --trace-root <TRACE_ROOT>  Directory the trajectory JSONL log is written under (default: the `CADMUS_TRACE_ROOT` env var, else the platform data dir)
+      --json                     Emit the full message sequence as JSON on stdout
+  -h, --help                     Print help

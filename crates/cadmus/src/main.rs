@@ -39,6 +39,10 @@ enum Commands {
         /// Maximum assistant turns before the run fails
         #[arg(long, default_value_t = 16)]
         max_turns: usize,
+        /// Directory the trajectory JSONL log is written under (default: the
+        /// `CADMUS_TRACE_ROOT` env var, else the platform data dir)
+        #[arg(long)]
+        trace_root: Option<std::path::PathBuf>,
         /// Emit the full message sequence as JSON on stdout
         #[arg(long)]
         json: bool,
@@ -58,6 +62,7 @@ async fn main() -> miette::Result<()> {
             base_url,
             max_tokens,
             max_turns,
+            trace_root,
             json,
             prompt,
         } => {
@@ -73,6 +78,7 @@ async fn main() -> miette::Result<()> {
                 base_url,
                 max_tokens,
                 max_turns,
+                trace_root,
             };
             let prompt = resolve_prompt(&prompt)?;
             let result = cadmus::run_chat(&prompt, &config).await?;
@@ -96,6 +102,8 @@ async fn main() -> miette::Result<()> {
                     "turns": result.turns,
                     "usage": result.usage,
                     "warnings": result.warnings,
+                    "trace_id": result.trace_id,
+                    "trace_path": result.trace_path,
                 });
                 println!("{out}");
             } else {

@@ -241,6 +241,7 @@ dependencies = [
  "cadmus-contract",
  "cadmus-core",
  "cadmus-llm-openai",
+ "cadmus-memory",
  "clap",
  "insta",
  "miette",
@@ -256,6 +257,7 @@ name = "cadmus-contract"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "insta",
  "serde",
  "serde_json",
  "thiserror",
@@ -291,6 +293,16 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "cadmus-memory"
+version = "0.0.0"
+dependencies = [
+ "cadmus-contract",
+ "serde_json",
+ "thiserror",
  "tracing",
 ]
 

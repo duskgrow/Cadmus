@@ -28,7 +28,7 @@
 ## Skills (procedures live in .agents/skills/; constraints stay in this file)
 
 - `pr-preflight` — the judgment-layer review before opening/updating a PR (also the frame for reviewing others' PRs)
-- `self-review` — the pre-commit judgment pass over your own working diff (five axes, severity labels, size sanity)
+- `self-review` — the pre-commit pass over your working diff: mechanical sweep yourself, judgment pass delegated to a fresh subagent (author blindness is structural)
 - `adding-dependencies` — required procedure before touching any third-party dependency
 - `rule-maintenance` — how to update AGENTS.md and skills when rules change or mistakes repeat
 - `doc-maintenance` — writing/reviewing docs: three-question filter, EN-canonical translation sync, drift hunting
@@ -51,6 +51,7 @@ Done = `just ci` green + the `pr-preflight` checklist clean.
 ## Style (the part lints can't enforce)
 
 - Time / randomness / IO are always injected as constructor parameters; no hidden `now()` / `rand()` / global state (test determinism depends on this seam).
+- When the maintainer asks what a piece of code means or why it exists, the explanation lands as a brief comment at that spot in the same change — chat answers rot. Comments still pass the SSOT bar: intent, constraints and tradeoffs, never a restatement of mechanism.
 - Error split: library crates use `thiserror` enums (callers branch on failure modes); the binary's top level reports with `miette` (three-part `code` + `help`); functions that propagate errors don't log — log once at the handling site.
 - Commit messages: modified Conventional Commits — `type(scope): subject`, lowercase type/scope, pure-ASCII English subject, header ≤ 100 chars, blank line before body/footer (`fix`→PATCH, `feat`→MINOR, `!`→MAJOR). Enforced at the commit-msg hook and by the PR CI check (SSOT: the `check-commit` subcommand of `crates/xtask`); merge strategy is squash-only with the PR title+body landing as the commit message — the PR title must obey the same rules, and the body must be commit-ready (fill the template's summary zone; CI rejects HTML comments).
 - Docs and code are English-first; `*.zh-CN.md` files are translations and English is canonical — update the English version first. Translations exist only for external-facing docs (README, CONTRIBUTING); ADRs, AGENTS.md and skills stay English-only.

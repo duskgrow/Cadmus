@@ -1,6 +1,6 @@
 [package]
-name = "cadmus-contract"
-description = "Port traits, wire types, Capabilities and ModelProfile — the only crate where serializable boundary types live (ADR-0002/0003)"
+name = "cadmus-memory"
+description = "Trajectory store adapter: append-only date-sharded JSONL event logs (ADR-0005); the SQL derived index arrives with phase 2"
 # Internal crates carry no semver burden. To publish later, switch to
 # version.workspace = true, drop publish = false, and register the package
 # in release-plz.toml — see CONTRIBUTING.md.
@@ -14,11 +14,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
+cadmus-contract.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-async-trait.workspace = true
-tokio-stream.workspace = true
-
-[dev-dependencies]
-insta = { workspace = true, features = ["json"] }
+tracing.workspace = true

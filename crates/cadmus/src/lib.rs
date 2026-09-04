@@ -5,6 +5,7 @@
 
 mod chat;
 mod error;
+mod telemetry;
 mod tools;
 
 pub use chat::{ChatConfig, ChatResult, run_chat};

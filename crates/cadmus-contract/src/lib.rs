@@ -1,5 +1,5 @@
-//! Boundary contract of Cadmus: port traits, wire types, [`Capabilities`] and
-//! [`ModelProfile`].
+//! Boundary contract of Cadmus: port traits, wire types, [`Capabilities`],
+//! [`ModelProfile`] and the trajectory event schema (ADR-0005).
 //!
 //! This is the only crate where serializable boundary types live (ADR-0002):
 //! the core never `use`s an external capability directly, and adapters never
@@ -8,6 +8,8 @@
 
 mod capabilities;
 mod error;
+mod event;
+mod log;
 mod message;
 mod profile;
 mod provider;
@@ -17,6 +19,11 @@ pub mod testing;
 
 pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Support};
 pub use error::ModelError;
+pub use event::{
+    Clock, Command, Event, EventError, EventKind, IdSequence, ScoreEvent, Status, TurnOutcome,
+    attrs, error_kinds,
+};
+pub use log::{EventSink, LogError};
 pub use message::{ContentPart, Message, Role, ToolCall};
 pub use profile::{CacheHints, FewShotFormat, ModelProfile, ToolDescriptionStyle};
 pub use provider::{ChunkStream, Provider};

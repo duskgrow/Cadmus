@@ -40,6 +40,7 @@ genai = "0.6.5"
 cadmus-contract = { path = "crates/cadmus-contract" }
 cadmus-core = { path = "crates/cadmus-core" }
 cadmus-llm-openai = { path = "crates/cadmus-llm-openai" }
+cadmus-memory = { path = "crates/cadmus-memory" }
 
 # ---- dev dependencies ----
 insta = "1"

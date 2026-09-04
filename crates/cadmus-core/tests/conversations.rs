@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cadmus_contract::{ChatRequest, FinishReason, ModelError, StreamChunk, ToolSpec};
-use cadmus_core::{AgentLoop, AgentTool, ReplayProvider, ToolError};
+use cadmus_core::{AgentLoop, AgentTool, ReplayProvider, ToolError, testing::test_telemetry};
 use serde_json::{Value, json};
 
 struct ReadFileTool;
@@ -90,7 +90,8 @@ fn tool_turn(calls: &[(&str, &str, &str)]) -> Vec<Result<StreamChunk, ModelError
 async fn run(scripts: Vec<Vec<Result<StreamChunk, ModelError>>>) -> Vec<cadmus_contract::Message> {
     let provider = Arc::new(ReplayProvider::new(scripts));
     let tools: Vec<Arc<dyn AgentTool>> = vec![Arc::new(ReadFileTool), Arc::new(GrepTool)];
-    let agent = AgentLoop::new(provider, tools, 8);
+    let (telemetry, _sink) = test_telemetry("tr-conversations");
+    let agent = AgentLoop::new(provider, tools, 8, telemetry);
     let outcome = agent
         .run(&ChatRequest::user_text("look up TODOs in main.rs", 4_096))
         .await

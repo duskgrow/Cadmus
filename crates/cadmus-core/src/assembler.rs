@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use cadmus_contract::{ContentPart, FinishReason, Message, Role, StreamChunk, ToolCall, Usage};
+use cadmus_contract::{
+    ContentPart, FinishReason, Message, Role, StreamChunk, ToolCall, TurnOutcome, Usage,
+};
 use serde_json::Value;
 
 /// The result of folding one provider stream into a domain turn.
@@ -16,21 +18,6 @@ pub struct AssembledTurn {
     /// truncated calls, fragments without a start, overwritten indexes…
     pub warnings: Vec<String>,
     pub outcome: TurnOutcome,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnOutcome {
-    /// Text and/or tool calls present.
-    Content,
-    /// The stream ended with open tool calls or without a terminal record —
-    /// truncated, not a zero-usage success (pitfall #8).
-    Truncated,
-    /// No text, no reasoning, no tool calls. Legitimate result or error is
-    /// decided by the finish reason (pitfall #5): a reasoning model that
-    /// spends its whole budget on hidden thinking returns empty content with
-    /// `Length`, which is retryable/escalatable, while `Stop` is a protocol
-    /// anomaly.
-    Empty,
 }
 
 struct PartialCall {

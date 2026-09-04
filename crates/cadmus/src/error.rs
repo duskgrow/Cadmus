@@ -93,6 +93,23 @@ pub enum Error {
         help("run cadmus from inside the workspace the tools should see")
     )]
     Workdir(std::io::Error),
+
+    /// No trajectory root could be resolved: no flag, no env, no platform
+    /// data dir.
+    #[error("no trajectory root found")]
+    #[diagnostic(
+        code(cadmus::trace_root),
+        help("pass `--trace-root <dir>` or export CADMUS_TRACE_ROOT")
+    )]
+    TraceRoot,
+
+    /// The trajectory log directory could not be created or opened.
+    #[error("cannot open the trajectory log: {0}")]
+    #[diagnostic(
+        code(cadmus::trace_log),
+        help("check that the trace root is writable (--trace-root / CADMUS_TRACE_ROOT)")
+    )]
+    TraceLog(std::io::Error),
 }
 
 /// Convenience alias for library results.
