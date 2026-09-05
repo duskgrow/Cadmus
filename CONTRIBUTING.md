@@ -41,6 +41,7 @@ Notes:
 - GitHub appends ` (#NNN)` to the squash-merge commit title — expected, leave it.
 - `git revert`'s default `Revert "…"` header doesn't match the convention — rewrite it as `revert: <what>`.
 - The PR template is a single zone: everything below its HTML guidance comment lands as the commit body (delete the comment before opening — CI rejects it). AI assistance is disclosed with the `ai-assisted` label, not in the message.
+- Dependabot PRs: the generated body is not landable as-is (HTML comments, long prose runs, a metadata block) — rewrite it to a one-line summary before merging; the generated title already follows the convention.
 
 ### PR gate: secret scan
 
