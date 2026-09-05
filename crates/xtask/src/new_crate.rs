@@ -50,6 +50,9 @@ pub fn run(args: &[String]) -> ExitCode {
     println!(
         "to depend on it from another crate: register {{ path = \"crates/{name}\" }} in the root [workspace.dependencies] and inherit with workspace = true."
     );
+    println!(
+        "new crates inherit the adapter posture (internal deps: the contract only, core fakes in dev) — `just arch-test` fails only if it is a different kind of crate; postures live in crates/xtask/src/arch.rs."
+    );
     ExitCode::SUCCESS
 }
 

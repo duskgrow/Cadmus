@@ -83,6 +83,21 @@ survive **relocation/tiering** (e.g. moving old data from SSD to HDD).
 Phase-1 scope is thereby: event model + log writer port + replayer, eval set
 v1, and the architecture test in CI.
 
+## Amendment — 2026-09-06: forbidden edges replace the name whitelist
+
+Item 6's "dependency whitelist" was drafted as a per-crate name whitelist
+and narrowed during review, before landing: routine dependency churn
+(adapters, the binary) would have to edit the table without any real
+decision happening, and a whitelist left out of sync on removals degrades
+to forbidden edges anyway. The arch test enforces forbidden edges by
+category — the contract takes no internal crate and its third-party deps
+are a closed set (every crate links it transitively), the core takes the
+contract alone (plus a short runtime/IO tripwire list), adapters take the
+contract alone (core fakes in dev), and new crates default to the adapter
+posture — so dependency churn never touches the table; only a new _kind_ of
+crate does. The version-SSOT and serialization-boundary invariants are
+unchanged.
+
 ## Consequences
 
 - Deviations from the frozen report (recorded here per roadmap rules):

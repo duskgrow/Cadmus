@@ -53,6 +53,7 @@ Notes:
 1. Declare the version in the root `Cargo.toml`'s `[workspace.dependencies]` (the only place in the repo);
 2. Member crates inherit with `dep.workspace = true` and may only add `features` / `optional`;
 3. `just deny` enforces license and source policy; a new license requires a PR discussion before extending the `deny.toml` allow-list.
+4. `just arch-test` gates the direction: forbidden edges live in `crates/xtask/src/arch.rs` (the contract takes no workspace crate and its third-party deps are a closed set, the core no adapter or runtime/IO crate, adapters only the contract). Routine adds never touch it — a rejection there is an architecture inversion surfacing; a genuinely intended new edge earns a deliberate posture edit.
 
 ## Adding a crate
 
@@ -61,6 +62,8 @@ just new-crate <name>
 ```
 
 This creates an **internal crate** (`version = "0.0.0"`, `publish = false`) with no semver burden. To publish a crate: switch to `version.workspace = true`, drop `publish = false`, and register it as `[[package]]` in `release-plz.toml`. Note: a published crate may only depend on path dependencies that carry a version (a hard `cargo publish` requirement).
+
+New crates inherit the adapter posture (internal deps limited to the contract); `just arch-test` fails only when the crate is a new _kind_ — that edit in `crates/xtask/src/arch.rs` is the direction decision.
 
 ## Tests and snapshots
 

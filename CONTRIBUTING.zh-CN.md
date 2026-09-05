@@ -51,6 +51,7 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 1. 版本号写进根 `Cargo.toml` 的 `[workspace.dependencies]`（全仓唯一位置）；
 2. 成员 crate 用 `dep.workspace = true` 继承，只允许追加 `features` / `optional`；
 3. `just deny` 会通过许可证与来源检查；新许可证需要先在 PR 中讨论再扩 `deny.toml` 白名单。
+4. `just arch-test` 守护依赖方向：禁边规则在 `crates/xtask/src/arch.rs`（contract 不得依赖任何 workspace crate 且其三方依赖是封闭集合，core 不得依赖 adapter 与运行时/IO 库，adapter 只能连 contract）。常规添加不会碰到它——在那里被拒绝说明有边反转了架构；确实有意的新边，值得一次刻意的 posture 编辑。
 
 ## 添加 crate
 
@@ -59,6 +60,8 @@ just new-crate <name>
 ```
 
 默认创建**内部 crate**（`version = "0.0.0"`, `publish = false`），不承担 semver 负担。若某个 crate 要对外发布：改为 `version.workspace = true`、去掉 `publish = false`，并在 `release-plz.toml` 登记 `[[package]]`。注意：被发布 crate 依赖的 path 依赖必须带版本号（cargo publish 的硬性要求）。
+
+新 crate 默认继承 adapter 姿态（内部依赖仅限 contract）；只有当它是新*种类*的 crate 时 `just arch-test` 才会失败——那次对 `crates/xtask/src/arch.rs` 的编辑就是方向决策本身。
 
 ## 测试与快照
 
