@@ -8,6 +8,7 @@
 use std::process::ExitCode;
 
 mod agent_docs;
+mod arch;
 mod bump_toolchain;
 mod commit;
 mod new_crate;
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
     match command.as_str() {
         "check-commit" => commit::run(&rest),
         "agent-check" => agent_docs::run(&rest),
+        "arch-test" => arch::run(&rest),
         "new-crate" => new_crate::run(&rest),
         "bump-toolchain" => bump_toolchain::run(&rest),
         "pr-guard" => pr_guard::run(&rest),
@@ -34,7 +36,7 @@ fn main() -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: cargo run -q -p xtask -- <check-commit [FILE] | agent-check | new-crate <name> | bump-toolchain | pr-guard [PR] | pr-guard --staged>"
+        "usage: cargo run -q -p xtask -- <check-commit [FILE] | agent-check | arch-test | new-crate <name> | bump-toolchain | pr-guard [PR] | pr-guard --staged>"
     );
     ExitCode::from(2)
 }

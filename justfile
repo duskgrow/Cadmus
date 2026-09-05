@@ -70,6 +70,11 @@ snapshot-review:
 agent-check:
     cargo run -q -p xtask -- agent-check
 
+# Architecture test: forbidden dependency edges + version SSOT + the
+# serialization boundary (ADR-0002/0005). Std-only Rust in crates/xtask.
+arch-test:
+    cargo run -q -p xtask -- arch-test
+
 # Bump rust-toolchain.toml's channel to the latest stable release. The weekly
 # toolchain-update workflow wraps this in a validated PR; requires curl.
 toolchain-bump:
@@ -82,7 +87,7 @@ pr-guard pr="":
     cargo run -q -p xtask -- pr-guard {{pr}}
 
 # The local full quality gate ≡ CI (modulo matrix dimensions); run before committing
-ci: lint test doc deny agent-check
+ci: lint test doc deny agent-check arch-test
     @echo "just ci: all green ✅"
 
 # Add an internal crate (unpublished by default; rules in CONTRIBUTING.md "Adding a crate")
