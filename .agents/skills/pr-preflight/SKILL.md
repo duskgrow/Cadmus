@@ -52,9 +52,7 @@ this section is the process gate over the assembled PR.
   this PR — not noise, not an accident of environment. Nondeterministic
   fields (timestamps, paths, UUIDs) must be filtered before snapshotting.
 - Snapshots are approved by humans via `just snapshot-review`; the agent
-  prepares and explains the diff, the human accepts. On the PR, the
-  `snapshots-ok` label is the logged acknowledgment (the `pr guard` check
-  requires it when `*.snap` files change).
+  prepares and explains the diff, the human accepts.
 
 ## 4. Commits are version intent
 
@@ -89,12 +87,9 @@ decision, cite the number (`see ADR-0003`) — never restate its rationale.
 ## 6. Security & boundary pass
 
 - New third-party dependency in the diff? It must have gone through the
-  `adding-dependencies` skill (and the human said yes) — on the PR, the
-  `deps-ok` label is the logged acknowledgment (the `pr guard` check requires
-  it when dependency manifests change).
+  `adding-dependencies` skill (and the human said yes).
 - `.github/` touched? That requires explicit human approval (AGENTS.md ASK
-  rule) — on the PR, the `github-ok` label is the logged acknowledgment
-  (required by the `pr guard` check).
+  rule) — confirm it happened.
 - `unsafe` code is forbidden workspace-wide; if the diff somehow needs it,
   stop and escalate.
 

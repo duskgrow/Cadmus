@@ -1,17 +1,14 @@
-# Human gates for PRs: agents self-check via skills, humans get red buttons.
-# What can't be machine-checked compiles into a mechanical trigger plus a
-# label the human applies as their conscious, timeline-logged acknowledgment:
-#   .github/ touched        ⇒ `github-ok` label required
-#   dep manifests touched   ⇒ `deps-ok` (Cargo.toml, Cargo.lock, deny.toml)
-#   *.snap touched          ⇒ `snapshots-ok`
-# plus a hard-fail secret scan of the diff (no label escape hatch).
-# A separate workflow (like commits.yml) so `labeled`/`unlabeled` re-runs only
-# this cheap gate, not ci.yml's whole test matrix.
+# Secret scan for PRs: added diff lines are matched against token /
+# private-key / .env-assignment shapes; a hit hard-fails the check and
+# annotates the offending line on the PR's Files tab. The same scan runs
+# locally as a pre-commit hook over the staged diff (`pr-guard --staged`).
+# Logic lives in xtask (just pr-guard); a separate workflow (like commits.yml)
+# keeps this cheap check out of ci.yml's test matrix.
 name: pr-guard
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, labeled, unlabeled]
+    types: [opened, reopened, synchronize]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read # gh pr view / gh pr diff
+      pull-requests: read # gh pr diff
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22

@@ -42,13 +42,10 @@ Notes:
 - `git revert`'s default `Revert "…"` header doesn't match the convention — rewrite it as `revert: <what>`.
 - The PR template is a single zone: everything below its HTML guidance comment lands as the commit body (delete the comment before opening — CI rejects it). AI assistance is disclosed with the `ai-assisted` label, not in the message.
 
-### PR gates and labels
+### PR gate: secret scan
 
-Agents self-check against the skills; for human-authored PRs the judgment rules compile into machine gates — the `pr guard` check (`.github/workflows/pr-guard.yml`, logic in the `pr-guard` subcommand of `crates/xtask`):
-
-- **Secret scan** of the PR diff — hard fail, no label escape hatch (a leaked secret needs rotation, not a label). Documented _example_ secrets can carry a `pr-guard:allow` marker on their line (visible in review). The same scan runs locally as a pre-commit hook over the staged diff.
-- **Acknowledgment labels**: touching `.github/` requires `github-ok`; dependency manifests (`Cargo.toml`, `Cargo.lock`, `deny.toml`) require `deps-ok`; `*.snap` snapshots require `snapshots-ok`. A red check names the missing label — applying it (once you've actually looked) re-runs the gate and logs the acknowledgment on the PR timeline.
-- `ai-assisted`: disclosure label for PRs co-authored with generative AI (the `pr-preflight` skill was run, or the diff was reviewed against it).
+- **Secret scan** of the PR diff (added lines matched against token / private-key / `.env`-assignment shapes) — hard fail; the offending line is annotated right on the PR's Files tab. A leaked secret needs rotation, not just deletion. Documented _example_ secrets can carry a `pr-guard:allow` marker on their line (visible in review). The same scan runs locally as a pre-commit hook over the staged diff (SSOT: the `pr-guard` subcommand of `crates/xtask`).
+- `ai-assisted`: disclosure label for PRs co-authored with generative AI (the `pr-preflight` skill was run, or the diff was reviewed against it). Metadata, not a gate — nothing enforces it.
 
 ## Adding a dependency
 
@@ -96,18 +93,18 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 
 ## CI map
 
-| job / workflow                 | purpose                                                                                                                            |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `ci.yml` → quality-gate        | `prek run --all-files`, same source as local git hooks                                                                             |
-| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                                                           |
-| `ci.yml` → test (windows)      | native rustup route, same `rust-toolchain.toml`                                                                                    |
-| `commits.yml`                  | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle                               |
-| `pr-guard.yml`                 | human gates on PRs: secret scan of the diff + acknowledgment labels (github-ok / deps-ok / snapshots-ok); re-runs on label changes |
-| `ci.yml` → dist-drift          | consistency between generated release.yml and `dist-workspace.toml`                                                                |
-| `release-plz.yml`              | Release PR + tag (crates.io publish is opt-in)                                                                                     |
-| `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs                                                            |
-| `flake-update.yml`             | weekly flake.lock upgrade PR                                                                                                       |
-| `toolchain-update.yml`         | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`)                                                              |
+| job / workflow                 | purpose                                                                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `ci.yml` → quality-gate        | `prek run --all-files`, same source as local git hooks                                               |
+| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                             |
+| `ci.yml` → test (windows)      | native rustup route, same `rust-toolchain.toml`                                                      |
+| `commits.yml`                  | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle |
+| `pr-guard.yml`                 | secret scan of the PR diff — hard fail, the hit is annotated on the PR's Files tab                   |
+| `ci.yml` → dist-drift          | consistency between generated release.yml and `dist-workspace.toml`                                  |
+| `release-plz.yml`              | Release PR + tag (crates.io publish is opt-in)                                                       |
+| `release.yml` (dist-generated) | tag-triggered cross-platform build + GitHub Release; `dist plan` on PRs                              |
+| `flake-update.yml`             | weekly flake.lock upgrade PR                                                                         |
+| `toolchain-update.yml`         | weekly rust-toolchain.toml upgrade PR (validated in-job by `just ci`)                                |
 
 ## Repository settings (one-time, GitHub side)
 
@@ -124,9 +121,6 @@ gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-m
 gh api repos/{owner}/{repo}/actions/permissions/workflow -X PUT -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
 gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=pr guard' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
 gh label create ai-assisted --color 8250df --description "Generative AI co-authored this PR; the pr-preflight judgment pass was run"
-gh label create github-ok --color b60205 --description "Human acknowledgment: .github/ changes in this PR were consciously reviewed"
-gh label create deps-ok --color b60205 --description "Human acknowledgment: dependency manifest changes in this PR were consciously reviewed"
-gh label create snapshots-ok --color b60205 --description "Human acknowledgment: snapshot changes in this PR were consciously reviewed"
 ```
 
 Settings live outside git and can drift — verify with:

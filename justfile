@@ -75,9 +75,9 @@ agent-check:
 toolchain-bump:
     cargo run -q -p xtask -- bump-toolchain
 
-# Human-gate for PRs: secret scan of the diff + required acknowledgment labels
-# (.github/ ⇒ github-ok, dep manifests ⇒ deps-ok, *.snap ⇒ snapshots-ok).
-# Needs gh authenticated against the repo; the pr-guard.yml workflow is the CI caller.
+# Secret scan of a PR's diff (added lines): token / private-key / .env shapes,
+# hard fail. The pr-guard.yml workflow is the CI caller (needs gh + GH_TOKEN);
+# `pr-guard --staged` is the local pre-commit half.
 pr-guard pr="":
     cargo run -q -p xtask -- pr-guard {{pr}}
 

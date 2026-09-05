@@ -40,13 +40,10 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 - `git revert` 默认的 `Revert "…"` 头不符合规范——改写成 `revert: <什么>`。
 - PR 模板只有一区：HTML 引导注释以下的内容会原样成为 commit body（打开前删掉注释——CI 会拒绝）。AI 辅助通过 `ai-assisted` 标签披露，不写进提交信息。
 
-### PR 门禁与标签
+### PR 门禁：密钥扫描
 
-agent 依据 skills 自检；对人编写的 PR，判断层规则会编译成机器门禁——`pr guard` 检查（`.github/workflows/pr-guard.yml`，逻辑在 `crates/xtask` 的 `pr-guard` 子命令）：
-
-- **密钥扫描**：对 PR diff 做硬失败扫描，无标签豁免（泄露的密钥需要轮换，不是打标签）。文档中的*示例*密钥可以在该行带 `pr-guard:allow` 标记（评审中可见）。同一扫描也作为本地 pre-commit 钩子运行在暂存 diff 上。
-- **确认标签**：改动 `.github/` 需要 `github-ok`；依赖清单（`Cargo.toml`、`Cargo.lock`、`deny.toml`）需要 `deps-ok`；`*.snap` 快照需要 `snapshots-ok`。红色的检查会点名缺失的标签——（确认看过之后）打上标签会重跑门禁，并在 PR 时间线上留下确认记录。
-- `ai-assisted`：生成式 AI 共同编写的 PR 的披露标签（已运行 `pr-preflight` skill，或对照它评审过 diff）。
+- **密钥扫描**：对 PR diff 的新增行做模式匹配（token / 私钥 / `.env` 赋值），命中即硬失败；命中的行会直接标注在 PR 的 Files 页上。泄露的密钥需要轮换，不是删掉就行。文档中的*示例*密钥可以在该行带 `pr-guard:allow` 标记（评审中可见）。同一扫描也作为本地 pre-commit 钩子运行在暂存 diff 上（SSOT：`crates/xtask` 的 `pr-guard` 子命令）。
+- `ai-assisted`：生成式 AI 共同编写的 PR 的披露标签（已运行 `pr-preflight` skill，或对照它评审过 diff）。纯元数据，不是门禁——没有机器强制。
 
 ## 添加依赖
 
@@ -94,18 +91,18 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 
 ## CI 地图
 
-| job / workflow                 | 作用                                                                                              |
-| ------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `ci.yml` → quality-gate        | `prek run --all-files`，与本地 git 钩子同源                                                       |
-| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                          |
-| `ci.yml` → test (windows)      | rustup 原生路线，消费同一 `rust-toolchain.toml`                                                   |
-| `commits.yml`                  | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑            |
-| `pr-guard.yml`                 | PR 上的人类门禁：diff 密钥扫描 + 确认标签（github-ok / deps-ok / snapshots-ok）；改标签会自动重跑 |
-| `ci.yml` → dist-drift          | release.yml 生成物与 `dist-workspace.toml` 的一致性                                               |
-| `release-plz.yml`              | Release PR + tag（crates.io 发布为可选启用）                                                      |
-| `release.yml`（dist 生成）     | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan`                                          |
-| `flake-update.yml`             | 每周 flake.lock 升级 PR                                                                           |
-| `toolchain-update.yml`         | 每周 rust-toolchain.toml 升级 PR（由 job 内 `just ci` 验证）                                      |
+| job / workflow                 | 作用                                                                                   |
+| ------------------------------ | -------------------------------------------------------------------------------------- |
+| `ci.yml` → quality-gate        | `prek run --all-files`，与本地 git 钩子同源                                            |
+| `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                               |
+| `ci.yml` → test (windows)      | rustup 原生路线，消费同一 `rust-toolchain.toml`                                        |
+| `commits.yml`                  | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑 |
+| `pr-guard.yml`                 | PR diff 密钥扫描——硬失败，命中行直接标注在 PR 的 Files 页上                            |
+| `ci.yml` → dist-drift          | release.yml 生成物与 `dist-workspace.toml` 的一致性                                    |
+| `release-plz.yml`              | Release PR + tag（crates.io 发布为可选启用）                                           |
+| `release.yml`（dist 生成）     | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan`                               |
+| `flake-update.yml`             | 每周 flake.lock 升级 PR                                                                |
+| `toolchain-update.yml`         | 每周 rust-toolchain.toml 升级 PR（由 job 内 `just ci` 验证）                           |
 
 ## 仓库设置（一次性，GitHub 侧）
 
@@ -122,9 +119,6 @@ gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-m
 gh api repos/{owner}/{repo}/actions/permissions/workflow -X PUT -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
 gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=pr guard' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
 gh label create ai-assisted --color 8250df --description "Generative AI co-authored this PR; the pr-preflight judgment pass was run"
-gh label create github-ok --color b60205 --description "Human acknowledgment: .github/ changes in this PR were consciously reviewed"
-gh label create deps-ok --color b60205 --description "Human acknowledgment: dependency manifest changes in this PR were consciously reviewed"
-gh label create snapshots-ok --color b60205 --description "Human acknowledgment: snapshot changes in this PR were consciously reviewed"
 ```
 
 设置在 git 之外，可能漂移——校验命令：

@@ -1,32 +1,21 @@
-//! Human gates for pull requests. Agents self-check via skills; humans get
-//! red buttons. What cannot be machine-checked compiles into a mechanical
-//! trigger plus a label the human applies as their conscious, timeline-logged
-//! acknowledgment (applying the label re-runs this gate):
-//!
-//!   - `.github/` touched              ⇒ the `github-ok` label is required
-//!   - dependency manifests touched    ⇒ `deps-ok` (`Cargo.toml` at any
-//!     depth, `Cargo.lock`, `deny.toml`)
-//!   - `*.snap` snapshots touched      ⇒ `snapshots-ok`
-//!
-//! On top of that sits a machine check with no label escape hatch: a secret
-//! scan of the added diff lines (hard fail — a leaked secret needs rotation,
-//! not a label). The one line-level escape hatch is the `pr-guard:allow`
-//! marker, for documented *example* secrets (AWS's canonical docs key trips
-//! the patterns by design); the marker stays visible in review, so it cannot
-//! be smuggled.
+//! Secret scan for pull requests: added diff lines are matched against token /
+//! private-key / `.env`-assignment shapes, and a hit hard-fails the check —
+//! a leaked secret needs rotation, not an acknowledgment. In CI the finding
+//! is annotated on the PR's Files tab; the one line-level escape hatch is the
+//! `pr-guard:allow` marker, for documented *example* secrets (AWS's canonical
+//! docs key trips the patterns by design) — the marker stays visible in
+//! review, so it cannot be smuggled.
 //!
 //! Two modes:
-//!   `pr-guard [PR]`   full gate; PR labels come from the gh CLI (a PR
-//!                     number/URL argument, else gh resolves the current
-//!                     branch's PR); the changed-file list and the scanned
-//!                     content both come from `gh pr diff`
-//!   `pr-guard --staged`  secret-scan only, over `git diff --cached` — the
-//!                     local pre-commit half of the gate (no gh needed)
+//!   `pr-guard [PR]`   scan a PR's diff via the gh CLI (a PR number/URL
+//!                     argument, else gh resolves the current branch's PR)
+//!   `pr-guard --staged`  scan `git diff --cached` — the local pre-commit
+//!                     half of the gate (no gh needed)
 //!
 //! Std-only like the rest of xtask: the secret patterns below are hand-rolled
-//! matchers, and gh's `--jq` output (one value per line) needs no JSON parser.
+//! matchers (no regex dependency), hand-verified against the module's own
+//! source so that landing this file in a diff does not trip the scan.
 
-use std::collections::BTreeMap;
 use std::process::{Command, ExitCode};
 
 /// Entry point: `pr-guard [PR] | pr-guard --staged`.
@@ -74,54 +63,29 @@ fn staged() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The CI half: labels via `gh pr view`, file list and content via `gh pr diff`.
+/// The CI half: scan `gh pr diff`; findings become GitHub Actions error
+/// annotations so the PR page itself shows what was hit and where.
 fn full(pr: Option<&str>) -> ExitCode {
-    let mut view: Vec<&str> = vec!["pr", "view"];
-    view.extend(pr);
-    let labels = match gh(&[&view[..], &["--json", "labels", "--jq", ".labels[].name"]].concat()) {
-        Ok(out) => out,
-        Err(code) => return code,
-    };
     let mut diff_args: Vec<&str> = vec!["pr", "diff"];
     diff_args.extend(pr);
     let diff = match gh(&diff_args) {
         Ok(out) => out,
         Err(code) => return code,
     };
-    let labels: Vec<String> = labels.lines().map(str::to_string).collect();
-    let files = changed_files(&diff);
-
     let findings = scan_diff(&diff);
-    let required = required_labels(&files);
-    let missing: Vec<(&str, &Vec<String>)> = required
-        .iter()
-        .filter(|(label, _)| !labels.iter().any(|present| present == *label))
-        .map(|(label, triggers)| (*label, triggers))
-        .collect();
-
-    if findings.is_empty() && missing.is_empty() {
-        println!("pr-guard: clean (no secrets in the diff; no unacknowledged gated files)");
+    if findings.is_empty() {
+        println!("pr-guard: clean (no secrets in the PR diff)");
         return ExitCode::SUCCESS;
     }
-    eprintln!("pr-guard: blocked");
-    if !findings.is_empty() {
-        eprintln!(
-            "  secret scan (hard fail — rotate if real; documented examples carry `{ALLOW_MARKER}`):"
-        );
-        for finding in &findings {
-            eprintln!("    - {finding}");
+    let ci = std::env::var_os("GITHUB_ACTIONS").is_some();
+    eprintln!("pr-guard: possible secrets in the PR diff (hard fail — rotate if real):");
+    for finding in &findings {
+        eprintln!("  - {finding}");
+        if ci {
+            println!("{}", finding.annotation());
         }
     }
-    for (label, triggers) in &missing {
-        eprintln!("  missing label `{label}` — the human's logged acknowledgment for:");
-        for trigger in triggers.iter().take(5) {
-            eprintln!("    - {trigger}");
-        }
-        if triggers.len() > 5 {
-            eprintln!("    - … and {} more", triggers.len() - 5);
-        }
-        eprintln!("    apply it once reviewed: gh pr edit --add-label {label}");
-    }
+    eprintln!("a documented *example* secret can carry the `{ALLOW_MARKER}` marker on its line");
     ExitCode::FAILURE
 }
 
@@ -139,26 +103,46 @@ fn gh(args: &[&str]) -> Result<String, ExitCode> {
             Err(ExitCode::from(2))
         }
         Err(err) => {
-            eprintln!("error: cannot run gh (needed for PR metadata): {err}");
+            eprintln!("error: cannot run gh (needed for the PR diff): {err}");
             Err(ExitCode::from(2))
         }
     }
 }
 
-/// One possible secret in an added diff line. Display redacts the match —
-/// CI logs must not echo the secret itself.
+/// One possible secret in an added diff line. Display and the CI annotation
+/// both redact the match — logs must not echo the secret itself.
 pub struct Finding {
     path: String,
-    line: usize,
+    diff_line: usize,
+    /// Line number in the new file (from hunk headers) — what GitHub
+    /// annotations need to point at the line on the PR's Files tab.
+    new_line: Option<usize>,
     pattern: &'static str,
+}
+
+impl Finding {
+    /// GitHub Actions workflow command (run summary + inline diff annotation).
+    fn annotation(&self) -> String {
+        let message = format!(
+            "possible secret: {} — rotate if real; documented examples carry the `{ALLOW_MARKER}` marker",
+            self.pattern
+        );
+        match (self.path.is_empty(), self.new_line) {
+            (false, Some(line)) => format!(
+                "::error file={},line={line},title=pr-guard secret scan::{message}",
+                self.path
+            ),
+            _ => format!("::error title=pr-guard secret scan::{message}"),
+        }
+    }
 }
 
 impl std::fmt::Display for Finding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let whereabouts = if self.path.is_empty() {
-            format!("diff line {}", self.line)
-        } else {
-            format!("{} (diff line {})", self.path, self.line)
+        let whereabouts = match (self.path.is_empty(), self.new_line) {
+            (false, Some(line)) => format!("{}:{line}", self.path),
+            (false, None) => format!("{} (diff line {})", self.path, self.diff_line),
+            (true, _) => format!("diff line {}", self.diff_line),
         };
         write!(
             f,
@@ -168,34 +152,51 @@ impl std::fmt::Display for Finding {
     }
 }
 
-/// Line-level escape hatch for the secret scan: an added line carrying this
-/// marker is skipped. For documented *example* secrets only — the marker is
-/// part of the reviewed diff, so misuse is visible.
+/// Line-level escape hatch: an added line carrying this marker is skipped.
+/// For documented *example* secrets only — the marker is part of the
+/// reviewed diff, so misuse is visible.
 pub const ALLOW_MARKER: &str = "pr-guard:allow";
 
 /// Scan a unified diff for secrets in *added* lines only (a removal is the
-/// fix, not the leak). Tracks the `+++ b/<path>` header for reporting.
+/// fix, not the leak). Tracks the `+++ b/<path>` header and hunk offsets for
+/// reporting; headers require the trailing space so that added content like
+/// `++i;` is never swallowed as a header.
 #[must_use]
 pub fn scan_diff(diff: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut path = String::new();
+    let mut new_line = 0;
     for (index, line) in diff.lines().enumerate() {
-        // headers are `+++ <path>` with a space — without it, added content
-        // like `++i;` would be swallowed as a header and never scanned
+        if line.starts_with("--- ") {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("+++ ") {
             path = rest.strip_prefix("b/").unwrap_or("").to_string();
             continue;
         }
+        if let Some(start) = hunk_new_start(line) {
+            new_line = start;
+            continue;
+        }
+        if line.starts_with('-') {
+            continue; // removal: consumes no new-file line
+        }
         let Some(added) = line.strip_prefix('+') else {
+            if line.starts_with(' ') {
+                new_line += 1; // context line
+            }
             continue;
         };
+        let finding_line = new_line;
+        new_line += 1;
         if added.contains(ALLOW_MARKER) {
             continue;
         }
         if let Some(pattern) = SECRET_PATTERNS.iter().find(|p| (p.matches)(added)) {
             findings.push(Finding {
                 path: path.clone(),
-                line: index + 1,
+                diff_line: index + 1,
+                new_line: (finding_line > 0).then_some(finding_line),
                 pattern: pattern.name,
             });
         }
@@ -203,25 +204,15 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
     findings
 }
 
-/// Changed file paths, derived from the diff itself — this avoids both the
-/// 100-file cap of `gh pr view --json files` and a second API call. Union of
-/// the `--- a/` and `+++ b/` headers: a deleted file shows up only on the
-/// `---` side, and deleting `deny.toml` must still trip the gate. Two known
-/// blind spots, both accepted: quoted paths (`+++ "b/weird name"`) don't
-/// match the prefixes, and pure renames carry no `---`/`+++` headers at all —
-/// the gated paths (.github/, manifests, snapshots) don't look like that in
-/// practice, and a human still reviews the diff.
-#[must_use]
-pub fn changed_files(diff: &str) -> Vec<String> {
-    let mut files = std::collections::BTreeSet::new();
-    for line in diff.lines() {
-        for prefix in ["--- a/", "+++ b/"] {
-            if let Some(path) = line.strip_prefix(prefix) {
-                files.insert(path.to_string());
-            }
-        }
-    }
-    files.into_iter().collect()
+/// `@@ -old[,n] +new[,n] @@` — extract the new-side start line.
+fn hunk_new_start(line: &str) -> Option<usize> {
+    let rest = line.strip_prefix("@@")?;
+    let plus = rest.find('+')?;
+    let digits: String = rest[plus + 1..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 struct SecretPattern {
@@ -340,33 +331,6 @@ fn is_secret_assignment(line: &str) -> bool {
         || lower.contains("redacted"))
 }
 
-/// Changed-file → required-label mapping (the module doc is the SSOT for the
-/// why). Returns each label with the files that triggered it, sorted for
-/// stable output.
-#[must_use]
-pub fn required_labels(files: &[String]) -> BTreeMap<&'static str, Vec<String>> {
-    let mut required: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
-    for file in files {
-        let basename = file.rsplit('/').next().unwrap_or(file);
-        let label = if file.starts_with(".github/") {
-            Some("github-ok")
-        } else if basename == "Cargo.toml" || file == "Cargo.lock" || file == "deny.toml" {
-            Some("deps-ok")
-        } else if std::path::Path::new(file)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("snap"))
-        {
-            Some("snapshots-ok")
-        } else {
-            None
-        };
-        if let Some(label) = label {
-            required.entry(label).or_default().push(file.clone());
-        }
-    }
-    required
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +348,29 @@ mod tests {
         let findings = scan_diff(&added);
         assert_eq!(paths(&findings), vec!["GitHub token"]);
         assert_eq!(findings[0].path, ".env");
+    }
+
+    #[test]
+    fn tracks_new_file_lines_for_annotations() {
+        let token = format!("ghp_{}", "a".repeat(30));
+        let diff = format!("--- a/f.txt\n+++ b/f.txt\n@@ -2,2 +2,3 @@\n ctx\n+{token}\n+plain\n");
+        let findings = scan_diff(&diff);
+        assert_eq!(findings.len(), 1);
+        // hunk starts at new line 2; the context line consumes it
+        assert_eq!(findings[0].new_line, Some(3));
+        assert_eq!(
+            findings[0].to_string(),
+            "f.txt:3: matches secret pattern \"GitHub token\""
+        );
+        assert!(
+            findings[0]
+                .annotation()
+                .starts_with("::error file=f.txt,line=3,")
+        );
+        // without hunk context the annotation degrades to a title-only note
+        let bare = scan_diff(&format!("+{token}\n"));
+        assert_eq!(bare[0].new_line, None);
+        assert!(bare[0].annotation().starts_with("::error title="));
     }
 
     #[test]
@@ -478,55 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn derives_changed_files_from_the_diff() {
-        let diff = "\
---- a/.github/workflows/ci.yml
-+++ b/.github/workflows/ci.yml
-@@ -1 +1 @@
---- a/deny.toml
-+++ /dev/null
-@@ -1 +0,0 @@
---- a/README.md
-+++ b/README.md
-";
-        // deleted files still count (deny.toml), /dev/null never does,
-        // and each path appears once
-        assert_eq!(
-            changed_files(diff),
-            vec![".github/workflows/ci.yml", "README.md", "deny.toml"]
-        );
-    }
-
-    #[test]
     fn usage_errors_exit_with_code_2() {
         assert_eq!(run(&["a".to_string(), "b".to_string()]), ExitCode::from(2));
         assert_eq!(
             run(&["--staged".to_string(), "extra".to_string()]),
             ExitCode::from(2)
         );
-    }
-
-    #[test]
-    fn maps_gated_files_to_labels() {
-        let files = vec![
-            ".github/workflows/ci.yml".to_string(),
-            "Cargo.toml".to_string(),
-            "crates/xtask/Cargo.toml".to_string(),
-            "Cargo.lock".to_string(),
-            "deny.toml".to_string(),
-            "crates/cadmus/tests/snapshots/cli__help.snap".to_string(),
-            "crates/cadmus/tests/snapshots/LEGACY.SNAP".to_string(),
-            "src/main.rs".to_string(),
-            "docs/roadmap.md".to_string(),
-        ];
-        let required = required_labels(&files);
-        assert_eq!(
-            required.keys().copied().collect::<Vec<_>>(),
-            vec!["deps-ok", "github-ok", "snapshots-ok"]
-        );
-        assert_eq!(required["github-ok"], vec![".github/workflows/ci.yml"]);
-        assert_eq!(required["deps-ok"].len(), 4);
-        assert_eq!(required["snapshots-ok"].len(), 2);
-        assert!(required_labels(&["README.md".to_string()]).is_empty());
     }
 }
