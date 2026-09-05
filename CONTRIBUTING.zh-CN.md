@@ -39,6 +39,7 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 - GitHub 会给 squash 合并的标题自动追加 ` (#NNN)`——预期行为，保留即可。
 - `git revert` 默认的 `Revert "…"` 头不符合规范——改写成 `revert: <什么>`。
 - PR 模板只有一区：HTML 引导注释以下的内容会原样成为 commit body（打开前删掉注释——CI 会拒绝）。AI 辅助通过 `ai-assisted` 标签披露，不写进提交信息。
+- Dependabot PR：自动生成的正文不能直接落地（HTML 注释、超长段落、元数据块）——合并前改写成一两行摘要；自动标题本身已符合规范。
 
 ### PR 门禁：密钥扫描
 
