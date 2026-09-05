@@ -75,6 +75,12 @@ agent-check:
 toolchain-bump:
     cargo run -q -p xtask -- bump-toolchain
 
+# Secret scan of a PR's diff (added lines): token / private-key / .env shapes,
+# hard fail. The pr-guard.yml workflow is the CI caller (needs gh + GH_TOKEN);
+# `pr-guard --staged` is the local pre-commit half.
+pr-guard pr="":
+    cargo run -q -p xtask -- pr-guard {{pr}}
+
 # The local full quality gate ≡ CI (modulo matrix dimensions); run before committing
 ci: lint test doc deny agent-check
     @echo "just ci: all green ✅"

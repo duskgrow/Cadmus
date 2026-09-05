@@ -23,3 +23,12 @@ repos:
         entry: cargo run -q -p xtask -- check-commit
         language: unsupported
         stages: [commit-msg]
+      # the local half of the pr-guard gate: secrets never reach a commit.
+      # (no-op in the CI quality-gate job — fresh checkout, empty staged
+      # diff; the PR-diff coverage lives in .github/workflows/pr-guard.yml)
+      - id: secret-scan
+        name: secret scan (staged diff)
+        entry: cargo run -q -p xtask -- pr-guard --staged
+        language: unsupported
+        pass_filenames: false
+        stages: [pre-commit]

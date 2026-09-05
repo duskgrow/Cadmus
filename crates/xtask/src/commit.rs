@@ -8,9 +8,13 @@
 //!            `[a-z0-9-]+` scope, optional `!` breaking marker; subject pure
 //!            ASCII; whole header at most 100 chars
 //!   body:    free-form (any language), separated from the header by one blank
-//!            line; no HTML comments — the squash merge lands the PR body as
-//!            the commit body verbatim, so template comments must be deleted,
-//!            not merged into history; a prose paragraph runs at most
+//!            line. The squash merge lands the PR body as the commit body
+//!            verbatim — the whole body must be landable, so process
+//!            scaffolding is rejected outright: no HTML comments (delete the
+//!            template's comments instead of merging them), no task-list items
+//!            (`- [ ]`) and no bare `---` lines (the two-zone template with a
+//!            cut line is gone); these three checks apply to every line,
+//!            fenced code blocks included. A prose paragraph runs at most
 //!            [`BODY_PROSE_RUN_MAX`] lines — longer bodies must be split into
 //!            paragraphs or formatted as lists (walls of text read badly in
 //!            `git log`; list items, blockquotes and fenced code are exempt)
@@ -117,14 +121,7 @@ pub fn check(text: &str) -> Vec<String> {
     if lines.len() > 1 && !lines[1].is_empty() {
         errors.push("header and body must be separated by a blank line".to_string());
     }
-    for (index, line) in lines.iter().enumerate() {
-        if line.contains("<!--") {
-            errors.push(format!(
-                "line {} contains an HTML comment (`<!--`) — delete the template's comments instead of merging them",
-                index + 1
-            ));
-        }
-    }
+    scaffolding_errors(&lines, &mut errors);
     for (index, line) in lines.iter().enumerate().skip(1) {
         if is_footer_start(line) && !lines[index - 1].is_empty() {
             let preview: String = line.chars().take(30).collect();
@@ -162,8 +159,39 @@ pub fn check(text: &str) -> Vec<String> {
     errors
 }
 
+/// Lines that must never land in history: HTML template comments, task-list
+/// items and bare `---` cut lines (the PR body is merged verbatim, so process
+/// scaffolding is rejected outright).
+fn scaffolding_errors(lines: &[&str], errors: &mut Vec<String>) {
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if line.contains("<!--") {
+            errors.push(format!(
+                "line {} contains an HTML comment (`<!--`) — delete the template's comments instead of merging them",
+                index + 1
+            ));
+        }
+        if trimmed.starts_with("- [ ]")
+            || trimmed.starts_with("- [x]")
+            || trimmed.starts_with("- [X]")
+        {
+            errors.push(format!(
+                "line {} is a task-list item (`- [ ]`) — checklist scaffolding must not land in history",
+                index + 1
+            ));
+        }
+        if trimmed == "---" {
+            errors.push(format!(
+                "line {} is a bare `---` — the cut-line convention is gone; the whole PR body lands as the commit body",
+                index + 1
+            ));
+        }
+    }
+}
+
 /// Whether a body line reads as flowing prose. Formatted content is exempt —
-/// list items, blockquotes and the `---` cut line stay readable at any length.
+/// list items and blockquotes stay readable at any length. (`---` stays
+/// exempt here so a rejected cut line doesn't double-report as prose.)
 fn is_prose_line(trimmed: &str) -> bool {
     if trimmed.is_empty()
         || trimmed == "---"
@@ -320,6 +348,18 @@ mod tests {
         assert!(errors_of(&format!("feat: x\n\n{quote}")).is_empty());
         let fence = format!("feat: x\n\n```text\n{}\n```", "log line\n".repeat(10));
         assert!(errors_of(&fence).is_empty());
+    }
+
+    #[test]
+    fn rejects_task_lists_and_cut_lines() {
+        // scaffolding from the old two-zone template must not land in history
+        assert!(!errors_of("feat: x\n\nbody\n\n- [ ] open item").is_empty());
+        assert!(!errors_of("feat: x\n\nbody\n\n- [x] done item").is_empty());
+        assert!(!errors_of("feat: x\n\nbody\n\n  - [X] nested item").is_empty());
+        assert!(!errors_of("feat: x\n\nbody\n\n---").is_empty());
+        assert!(!errors_of("feat: x\n\nbody\n\n\n---\n\nmore").is_empty());
+        // plain lists, prose and em-dash usage stay legal
+        assert!(errors_of("feat: x\n\nbody\n\n- plain item\n- another --- with text").is_empty());
     }
 
     #[test]

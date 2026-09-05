@@ -11,6 +11,7 @@ mod agent_docs;
 mod bump_toolchain;
 mod commit;
 mod new_crate;
+mod pr_guard;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -23,6 +24,7 @@ fn main() -> ExitCode {
         "agent-check" => agent_docs::run(&rest),
         "new-crate" => new_crate::run(&rest),
         "bump-toolchain" => bump_toolchain::run(&rest),
+        "pr-guard" => pr_guard::run(&rest),
         other => {
             eprintln!("error: unknown subcommand {other:?}");
             usage()
@@ -32,7 +34,7 @@ fn main() -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: cargo run -q -p xtask -- <check-commit [FILE] | agent-check | new-crate <name> | bump-toolchain>"
+        "usage: cargo run -q -p xtask -- <check-commit [FILE] | agent-check | new-crate <name> | bump-toolchain | pr-guard [PR] | pr-guard --staged>"
     );
     ExitCode::from(2)
 }

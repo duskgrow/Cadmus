@@ -15,7 +15,7 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 
 ## 合并策略与提交信息
 
-合并策略为 **squash merge only**（在仓库设置中强制——见「仓库设置」）。main 的历史一线一义；PR 标题 + 正文会成为落地 commit 的 message——所以 **PR 标题必须遵循提交规范**，CI 会检查。
+合并策略为 **squash merge only**（在仓库设置中强制——见「仓库设置」）。main 的历史一线一义；PR 标题 + 正文会成为落地 commit 的 message——所以 **PR 标题必须遵循提交规范**，CI 会检查。合并流程：网页上评审 → 检查全绿 → 合并。squash 对话框会预填 PR 标题 + 正文，**无需任何编辑**——整个正文按构造即可落地。
 
 提交规范 —— 修改版 Conventional Commits：
 
@@ -24,7 +24,7 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 - `type`：`feat fix docs style refactor perf test build ci chore revert` 之一（小写）
 - `scope`：可选，小写（crate 名、`cli` 等）；`!` 标记破坏性变更（或 footer `BREAKING CHANGE:`）。scope 同时是 changelog 的模块小节名（release notes 按 scope 分组，Zed 风格），建议填写
 - `subject`：纯英文 ASCII；整个 header 不超过 100 字符
-- body：可中文、不限行宽；与 header 之间空一行；不写 HTML 注释——squash 合并会原样落地 PR 正文，模板注释必须删掉，不能合进历史。保持可读：叙述段落最多 7 行——更长就分段或用列表（列表项、引用块、代码块不计；check-commit 强制）
+- body：可中文、不限行宽；与 header 之间空一行。整个正文会原样入历史，因此必须整体可落地：不写 HTML 注释（模板的引导注释要在打开前删掉，不能合进历史）、不写任务列表（`- [ ]`）、不写单独的 `---` 行——流程脚手架一律拒绝（check-commit 强制）。保持可读：叙述段落最多 7 行——更长就分段或用列表（列表项、引用块、代码块不计）
 - footer（`TOKEN: value` / `TOKEN #value`）：整个块前留空行。推荐 token：`Closes #N`（合并时 GitHub 自动关闭对应 issue）与 `BREAKING CHANGE:`（semver MAJOR 信号）。多作者 PR 的 `Co-authored-by:` 由 GitHub 自动追加；工具署名类 trailer 依旧禁止（见 AGENTS.md）
 
 语义化版本映射：`fix` → PATCH，`feat` → MINOR，`!` → MAJOR。版本号推导与 CHANGELOG 都以提交信息为输入——type 写错等于版本发错。
@@ -38,7 +38,12 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 
 - GitHub 会给 squash 合并的标题自动追加 ` (#NNN)`——预期行为，保留即可。
 - `git revert` 默认的 `Revert "…"` 头不符合规范——改写成 `revert: <什么>`。
-- PR 模板以 `---` 分割线为界分两区：线上是 commit body（写成可直接入历史的样子——CI 拒绝 HTML 注释）；线下是流程脚手架（checklist 等）。squash 合并时在合并对话框里把 `---` 及以下删掉；标题必须保持规范。
+- PR 模板只有一区：HTML 引导注释以下的内容会原样成为 commit body（打开前删掉注释——CI 会拒绝）。AI 辅助通过 `ai-assisted` 标签披露，不写进提交信息。
+
+### PR 门禁：密钥扫描
+
+- **密钥扫描**：对 PR diff 的新增行做模式匹配（token / 私钥 / `.env` 赋值），命中即硬失败；命中的行会直接标注在 PR 的 Files 页上。泄露的密钥需要轮换，不是删掉就行。文档中的*示例*密钥可以在该行带 `pr-guard:allow` 标记（评审中可见）。同一扫描也作为本地 pre-commit 钩子运行在暂存 diff 上（SSOT：`crates/xtask` 的 `pr-guard` 子命令）。
+- `ai-assisted`：生成式 AI 共同编写的 PR 的披露标签（已运行 `pr-preflight` skill，或对照它评审过 diff）。纯元数据，不是门禁——没有机器强制。
 
 ## 添加依赖
 
@@ -92,6 +97,7 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 | `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                               |
 | `ci.yml` → test (windows)      | rustup 原生路线，消费同一 `rust-toolchain.toml`                                        |
 | `commits.yml`                  | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑 |
+| `pr-guard.yml`                 | PR diff 密钥扫描——硬失败，命中行直接标注在 PR 的 Files 页上                            |
 | `ci.yml` → dist-drift          | release.yml 生成物与 `dist-workspace.toml` 的一致性                                    |
 | `release-plz.yml`              | Release PR + tag（crates.io 发布为可选启用）                                           |
 | `release.yml`（dist 生成）     | tag 触发跨平台构建与 GitHub Release；PR 上跑 `dist plan`                               |
@@ -103,7 +109,7 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 这些项在 GitHub 设置里而非代码中，建仓库时设一次：
 
 - General → Pull Requests：**仅 squash merge**（禁用 merge commit 与 rebase merge）；squash 提交信息选 "Default to pull request title and description"；开启 "Automatically delete head branches"。
-- Branches → 保护 `main`：要求经 PR 合入；要求状态检查 `quality gate (prek)`、`test (ubuntu-latest)`、`test (macos-latest)`、`test (windows)`、`conventional commits`、`release.yml drift check`；要求分支保持最新。
+- Branches → 保护 `main`：要求经 PR 合入；要求状态检查 `quality gate (prek)`、`test (ubuntu-latest)`、`test (macos-latest)`、`test (windows)`、`conventional commits`、`pr guard`、`release.yml drift check`；要求分支保持最新。
 - Actions → General：按上文「发布」设置 workflow 权限。
 
 同样的设置也有一份一次性 `gh` 命令块（在仓库目录内执行，需先用 `gh auth login` 登录你本人的账号——`{owner}`/`{repo}` 会从 remote 自动解析）。刻意写成文档里的命令块而不是随仓库分发的脚本：它每个仓库只跑一次、需要你本人的管理员凭据，而随仓库分发的一次性脚本只会悄悄腐烂。
@@ -111,7 +117,8 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 ```bash
 gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-message=pr-title-description
 gh api repos/{owner}/{repo}/actions/permissions/workflow -X PUT -F default_workflow_permissions=write -F can_approve_pull_request_reviews=true
-gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
+gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F 'required_status_checks[strict]=true' -F 'required_status_checks[contexts][]=quality gate (prek)' -F 'required_status_checks[contexts][]=test (ubuntu-latest)' -F 'required_status_checks[contexts][]=test (macos-latest)' -F 'required_status_checks[contexts][]=test (windows)' -F 'required_status_checks[contexts][]=conventional commits' -F 'required_status_checks[contexts][]=pr guard' -F 'required_status_checks[contexts][]=release.yml drift check' -F 'required_pull_request_reviews[required_approving_review_count]=0' -F enforce_admins=null -F restrictions=null
+gh label create ai-assisted --color 8250df --description "Generative AI co-authored this PR; the pr-preflight judgment pass was run"
 ```
 
 设置在 git 之外，可能漂移——校验命令：

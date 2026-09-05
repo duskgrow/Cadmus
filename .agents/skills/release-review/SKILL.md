@@ -34,8 +34,10 @@ decide "merge or hold". The agent gathers and judges; **the human merges**
    and the generated `release.yml` are in sync (`just dist-check`); the tag
    format still matches dist's trigger (`v*`).
 5. **Green CI** on the Release PR, including `dist plan`. `conventional
-   commits` passes by construction (`pr_body` + the changelog postprocessor in
-   `release-plz.toml`); a failure there means the template regressed — fix the
+   commits` passes by construction — the `pr_body` template in
+   `release-plz.toml` generates a body that is landable as a whole (no HTML
+   comments, task lists or `---` lines; the changelog postprocessor strips
+   stray comments). A failure there means the template regressed — fix the
    template, never hand-edit the generated body.
 
 ## Verdict
