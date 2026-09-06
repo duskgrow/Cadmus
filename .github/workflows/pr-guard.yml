@@ -27,9 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
-          use-flakehub: false # see the quality-gate job in ci.yml
+          name: cadmus
+          skipPush: ${{ github.event_name == 'pull_request' }} # see the quality-gate job in ci.yml
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # target/ cache for the xtask compile; actions/cache over rust-cache for
       # the same reason as ci.yml (no `nix develop -c` key detection tax)
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
