@@ -2,7 +2,7 @@
 
 [English](./README.md)（如有出入以英文版为准）
 
-用 Rust 编写的自进化 coding agent：自研 agent 循环、OpenAI 兼容的 provider 方言层、只读编码工具集——当前处于[路线图](docs/roadmap.md)的阶段 0。
+用 Rust 编写的自进化 coding agent：自研 agent 循环、OpenAI 兼容的 provider 方言层、只读编码工具集——[路线图](docs/roadmap.md)阶段 0 已完成，阶段 1 进行中。
 
 ## 安装
 
