@@ -80,6 +80,17 @@ survive **relocation/tiering** (e.g. moving old data from SSD to HDD).
    writes a score file; per-run scores are also recorded as score events in
    that run's log.
 
+## Amendment — 2026-09-06: zero-dependency claim scoped to the data foundation
+
+Item 6's "Phase 1 adds zero third-party dependencies" and the phase-1 scope
+sentence above describe the data-foundation workstream as decided on
+2026-09-03. The capability track (docs/roadmap.md, ADR-0008/0011/0012)
+adds a second phase-1 workstream — write tools, approval gates, the TUI —
+which necessarily takes third-party dependencies (TUI framework, markdown
+rendering), each admitted through the `adding-dependencies` skill. The
+data foundation's zero-dependency property is unchanged and stays
+arch-test-enforceable.
+
 Phase-1 scope is thereby: event model + log writer port + replayer, eval set
 v1, and the architecture test in CI.
 

@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cadmus.svg)](https://crates.io/crates/cadmus)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./LICENSE-MIT)
 
-A self-evolving coding agent in Rust: self-built agent loop, OpenAI-compatible provider dialects, read-only coding tools — currently phase 0 of the [roadmap](docs/roadmap.md).
+A self-evolving coding agent in Rust: self-built agent loop, OpenAI-compatible provider dialects, read-only coding tools — phase 0 of the [roadmap](docs/roadmap.md) is complete; phase 1 is in progress.
 
 ## Install
 

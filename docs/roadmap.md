@@ -13,9 +13,27 @@ Details live in the report and in the ADRs; this file only tracks where we are.
 | 4. Distillation pipeline               | accumulated trajectories → LoRA adapters                                                                       | not started | —                                                                                                                                                                         |
 | 5. Remote control plane                | daemon + remote attach client; CF Tunnel → iroh evolution                                                      | not started | [0002](decisions/0002-hexagonal-architecture-event-sourced-core.md) (control-plane seam)                                                                                  |
 
+Capability track — what users can do once a phase lands (ADR-0011: a
+capability is not landed until its UX is landed). Details live in the ADRs;
+this matrix only assigns per-phase ownership.
+
+| Capability                                   | Phase 1                                                                                                                                                            | Phase 2                                                                                                           | Phase 3                 | Phase 5                                    |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | ----------------------- | ------------------------------------------ |
+| Interaction (ADR-0011/0012)                  | TUI: streaming render, interrupt + steering, approval modes, checkpoint/rewind, resume/fork, status line, slash commands; headless `chat --json` + CLI citizenship | evolution review UX (delta diffs, gate results, counters)                                                         | sandbox-aware approvals | remote attach = same client, new transport |
+| Tool surface (ADR-0008, [catalog](tools.md)) | `write_file` + `edit_file` behind L0–L3 gates                                                                                                                      | frozen                                                                                                            | `shell_exec` in sandbox | —                                          |
+| Context pipeline (ADR-0007)                  | frozen prefix + `AGENTS.md` + status bar + mechanical compaction                                                                                                   | LLM archival compaction (trigger-driven)                                                                          | —                       | —                                          |
+| Memory (ADR-0009)                            | project instructions in prefix                                                                                                                                     | user-memory write path (human-approved diffs); episodic projection lands with the store (retrieval trigger-gated) | —                       | —                                          |
+| Skills (ADR-0006)                            | static load + catalog injection (human-authored)                                                                                                                   | evolution loop v1 (reflect → delta → gate → merge)                                                                | —                       | —                                          |
+| MCP (ADR-0004)                               | deferred — triggers only                                                                                                                                           | same                                                                                                              | same                    | same                                       |
+
+Phases 0 and 4 add no user-facing capability rows (0 is complete; 4 is an
+offline pipeline).
+
 Rules for this file:
 
-- Update it when a phase starts or completes — nothing else.
+- The status table is updated when a phase starts or completes; the
+  capability track is updated when a capability lands or moves phases —
+  nothing else.
 - Deviations from the report are recorded as new ADRs, never by editing the
   report. Phase-kickoff ritual: re-read report §10.2.N, re-verify its
   time-sensitive claims, then write the phase's ADR(s).

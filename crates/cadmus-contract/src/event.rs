@@ -160,7 +160,8 @@ pub struct ScoreEvent {
 /// A validated client operation (ADR-0002's command seam): the only event
 /// kind a client may ever produce — the control plane's trust boundary is
 /// this type. Phase 1 knows only the run-opening command; approvals,
-/// messages and steering arrive with the control plane.
+/// messages and steering arrive with the interactive clients (ADR-0011)
+/// and later the remote control plane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
