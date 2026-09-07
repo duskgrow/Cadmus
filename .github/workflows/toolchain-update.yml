@@ -30,7 +30,7 @@ jobs:
       # rustup route (no nix): the runner ships rustup, which auto-installs
       # the pinned toolchain on first cargo invocation — after the bump step
       # rewrites rust-toolchain.toml, `just ci` validates with the NEW one
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: just,nextest,cargo-deny,dprint
       # actionlint is not in install-action's manifest (its cargo-binstall
