@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-events-column-count",
+  "split": "search",
+  "fixture": "data-pipeline",
+  "prompt": "How many columns does the fct_events table have? Answer with the number only.",
+  "note": "schema/events.sql CREATE TABLE lists 7 columns: event_id, session_id, user_id, page_path, referrer, user_agent, clicked_at.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "7"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "peridot-deploy-command",
+  "split": "holdout",
+  "fixture": "docs-site",
+  "prompt": "What single command builds the site and uploads it to the configured hosting target? Answer with the command only.",
+  "note": "docs/deployment.md 'The deploy command' section.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "peridot deploy"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

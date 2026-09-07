@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-dropped-user-agent",
+  "split": "search",
+  "fixture": "data-pipeline",
+  "prompt": "Which user-agent does the cleaning step remove from the raw events, and why? Answer in one short sentence.",
+  "note": "transforms/clean_events.sql DELETEs rows matching '%molebot/2.3%'; the comment says the crawler's clicks are not real traffic.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "molebot/2.3"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

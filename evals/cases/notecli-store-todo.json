@@ -1,0 +1,20 @@
+{
+  "id": "notecli-store-todo",
+  "split": "search",
+  "fixture": "rust-cli",
+  "prompt": "What TODO comment is left in the store module? Answer with the TODO's text only.",
+  "note": "src/store.rs, right below the consts.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "export to markdown"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

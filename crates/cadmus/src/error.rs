@@ -110,6 +110,59 @@ pub enum Error {
         help("check that the trace root is writable (--trace-root / CADMUS_TRACE_ROOT)")
     )]
     TraceLog(std::io::Error),
+
+    /// The eval corpus is unreadable or invalid (unparseable case file,
+    /// duplicate id, missing fixture, no expectations).
+    #[error("invalid eval corpus: {0}")]
+    #[diagnostic(
+        code(cadmus::eval_corpus),
+        help(
+            "cases are JSON files under evals/cases/, fixtures are directories under evals/fixtures/ — the corpus test checks the same rules: cargo nextest run -p cadmus"
+        )
+    )]
+    EvalCorpus(String),
+
+    /// Preparing a case's scratch workspace (fixture copy) failed. The case
+    /// id travels with the error — a bare io error would not say which case.
+    #[error("cannot prepare the workspace for case `{case}`: {source}")]
+    #[diagnostic(
+        code(cadmus::eval_workspace),
+        help(
+            "the fixture is copied to a scratch dir under the OS temp dir — check temp-dir writability"
+        )
+    )]
+    EvalWorkspace {
+        /// The case whose fixture copy failed.
+        case: String,
+        /// The underlying IO failure.
+        source: std::io::Error,
+    },
+
+    /// Reading back a run's trace for scoring failed (corrupt log content;
+    /// a missing trace scores the empty fold instead).
+    #[error("cannot read back the trace for scoring: {0}")]
+    #[diagnostic(
+        code(cadmus::eval_trace_read),
+        help("a corrupt trace is corruption evidence — inspect the file before deleting it")
+    )]
+    EvalTraceRead(cadmus_memory::ReadError),
+
+    /// Appending a score event to the run's trace failed — the set stops
+    /// rather than producing unrecorded scores.
+    #[error("cannot record a score event: {0}")]
+    #[diagnostic(
+        code(cadmus::eval_log),
+        help("check that the trace root is writable (--trace-root / CADMUS_TRACE_ROOT)")
+    )]
+    EvalLog(cadmus_contract::LogError),
+
+    /// Writing the aggregate score file failed.
+    #[error("cannot write the score file: {0}")]
+    #[diagnostic(
+        code(cadmus::eval_score_file),
+        help("check the --out path is writable (default: target/eval/latest.json)")
+    )]
+    EvalScoreFile(std::io::Error),
 }
 
 /// Convenience alias for library results.

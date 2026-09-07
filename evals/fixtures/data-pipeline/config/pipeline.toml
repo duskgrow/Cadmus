@@ -1,0 +1,11 @@
+# fenwick pipeline configuration.
+
+[ingest]
+incoming_dir = "data/incoming"
+batch_size = 5000       # rows per insert batch
+
+[storage]
+retention_days = 90     # purge fct_events rows older than this
+
+[rollups]
+timezone = "Etc/UTC"    # day boundaries for fct_daily_rollups

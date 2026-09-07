@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-search-location",
+  "split": "search",
+  "fixture": "python-lib",
+  "prompt": "Which source file defines the `find_observations` function? Answer with the file path only.",
+  "note": "src/birdlog/search.py; README project layout lists the same path.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "src/birdlog/search.py"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

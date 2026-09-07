@@ -7,6 +7,7 @@
 - `docs/roadmap.md` — the six-phase tracker; phase kickoff follows its ritual (re-read report §10.2.N, re-verify time-sensitive claims, then write the phase's ADR).
 - `docs/decisions/` — ADRs are the architecture-decision SSOT; they win over `docs/research/` (frozen exhibit material, never edited).
 - `docs/tools.md` — the built-in tool catalog: plan, tiers, and admission record (principles in ADR-0008).
+- `docs/open-items.md` — field findings awaiting their consuming change; delete items as consumed.
 
 ## Commands (just is the only entry point; never bypass the quality gates)
 
@@ -15,6 +16,7 @@
 - All tests: `just test`; single test: `cargo nextest run -p cadmus <name>`
 - Iterate with the narrowest loop first (`cargo check -p <crate>`, scoped nextest); finish with `just ci`
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)
+- Eval set v1: `just eval` (live provider, full set, score file at `target/eval/latest.json`; corpus rules in `evals/README.md`)
 - New crate: `just new-crate <name>`
 - Dependency policy: `just deny`; docs build: `just doc`; release-artifact drift check: `just dist-check`; agent-doc smoke check: `just agent-check`; architecture test: `just arch-test`
 - Toolchain bump: `just toolchain-bump` (also run weekly by CI, which opens a validated PR)

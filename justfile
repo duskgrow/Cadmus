@@ -64,6 +64,10 @@ dist-check:
 snapshot-review:
     cargo insta review
 
+# Run eval set v1 against a live provider (default kimi): full set, score file at target/eval/latest.json
+eval:
+    cargo run -q -p cadmus -- eval
+
 # Smoke check for agent-facing docs: SKILL.md frontmatter, size budgets, and
 # pointer integrity (AGENTS.md / CLAUDE.md / .claude/skills). Std-only Rust in
 # crates/xtask; runs on every platform `just ci` runs on.

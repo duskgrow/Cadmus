@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-rollups-table-location",
+  "split": "holdout",
+  "fixture": "data-pipeline",
+  "prompt": "In this workspace, which file defines the fct_daily_rollups table? Answer with the file path only.",
+  "note": "schema/daily_rollups.sql holds the CREATE TABLE for fct_daily_rollups; docs/conventions.md states the mapping verbatim.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "schema/daily_rollups.sql"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

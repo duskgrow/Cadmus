@@ -1,0 +1,20 @@
+{
+  "id": "gateway-config-location",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "Which file defines the gateway service's listen port and rate limit? Answer with the file name only.",
+  "note": "services/gateway/gateway.toml; gateway's main.rs loads it by name and the root README layout points at it.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "gateway.toml"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

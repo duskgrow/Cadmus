@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-python-version",
+  "split": "holdout",
+  "fixture": "python-lib",
+  "prompt": "What is the minimum Python version this project requires? Answer with the version number only.",
+  "note": "pyproject.toml requires-python = \">=3.10\".",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "3.10"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

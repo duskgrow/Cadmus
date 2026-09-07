@@ -5,9 +5,12 @@
 
 mod chat;
 mod error;
+mod eval;
+pub mod provider;
 mod telemetry;
 mod tools;
 
 pub use chat::{ChatConfig, ChatResult, run_chat};
 pub use error::{Error, Result};
+pub use eval::{EvalConfig, corpus_digest, load_cases, run_eval};
 pub use tools::coding_tools;

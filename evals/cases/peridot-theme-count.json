@@ -1,0 +1,20 @@
+{
+  "id": "peridot-theme-count",
+  "split": "search",
+  "fixture": "docs-site",
+  "prompt": "How many themes are bundled with peridot? Answer with the number only.",
+  "note": "docs/themes.md: '3 bundled themes' (citrine, lapis, malachite).",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "3"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

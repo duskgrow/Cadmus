@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-added-column",
+  "split": "search",
+  "fixture": "data-pipeline",
+  "prompt": "According to the changelog, which column was added to the fct_events table on 2026-06-14? Answer with the column name only.",
+  "note": "docs/changelog.md 2026-06-14 entry names the added column; the column is present in schema/events.sql.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "referrer"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

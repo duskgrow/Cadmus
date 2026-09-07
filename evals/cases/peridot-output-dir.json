@@ -1,0 +1,20 @@
+{
+  "id": "peridot-output-dir",
+  "split": "search",
+  "fixture": "docs-site",
+  "prompt": "What directory does `peridot build` write the rendered site into by default? Answer with the directory name only.",
+  "note": "docs/configuration.md `output_dir` default `public/`; docs/cli.md `build` agrees.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "public"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-release-count",
+  "split": "search",
+  "fixture": "python-lib",
+  "prompt": "How many releases does the project's CHANGELOG.md document? Answer with the number only.",
+  "note": "CHANGELOG.md has 4 release sections: 1.4.2, 1.4.1, 1.2.0, 1.0.0.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "4"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

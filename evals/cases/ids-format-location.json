@@ -1,0 +1,20 @@
+{
+  "id": "ids-format-location",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "Which source file defines the `format_parcel_id` function? Answer with the file path only.",
+  "note": "The shared id library lives in libs/ids/src/lib.rs; the root README layout lists that path.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "libs/ids/src/lib.rs"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

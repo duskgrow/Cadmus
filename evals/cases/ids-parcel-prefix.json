@@ -1,0 +1,20 @@
+{
+  "id": "ids-parcel-prefix",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "When the shared ids library formats a parcel id, what prefix does the resulting id start with? Answer with the prefix only.",
+  "note": "PARCEL_PREFIX and the doc example in libs/ids/src/lib.rs; root README shows an example parcel id.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "pcl-"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

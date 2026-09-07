@@ -7,7 +7,7 @@
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use cadmus::{ChatConfig, Error};
+use cadmus::{ChatConfig, Error, EvalConfig};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -49,6 +49,42 @@ enum Commands {
         /// The prompt; read from stdin when omitted
         prompt: Vec<String>,
     },
+    /// Run the eval set (evals/cases) against the fixture workspaces and
+    /// write the aggregate score file; each run's scores are also recorded
+    /// as score events in that run's trajectory log
+    Eval {
+        /// Provider to use (registry dialect, or `custom` for an explicit
+        /// OpenAI-compatible endpoint)
+        #[arg(long, default_value = "kimi")]
+        provider: String,
+        /// Model name (required for --provider custom; registry dialects pin
+        /// their model)
+        #[arg(long)]
+        model: Option<String>,
+        /// Endpoint base URL (required for --provider custom; key comes from
+        /// `CADMUS_CUSTOM_API_KEY`)
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Maximum output tokens per assistant turn
+        #[arg(long, default_value_t = 4_096)]
+        max_tokens: u32,
+        /// Maximum assistant turns before a case's run fails
+        #[arg(long, default_value_t = 16)]
+        max_turns: usize,
+        /// Directory the trajectory JSONL logs are written under (default:
+        /// the `CADMUS_TRACE_ROOT` env var, else the platform data dir)
+        #[arg(long)]
+        trace_root: Option<std::path::PathBuf>,
+        /// Directory of eval case JSON files
+        #[arg(long, default_value = "evals/cases")]
+        set: std::path::PathBuf,
+        /// Fixture workspaces root
+        #[arg(long, default_value = "evals/fixtures")]
+        fixtures: std::path::PathBuf,
+        /// The aggregate score file to write
+        #[arg(long, default_value = "target/eval/latest.json")]
+        out: std::path::PathBuf,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -66,12 +102,7 @@ async fn main() -> miette::Result<()> {
             json,
             prompt,
         } => {
-            // Validate the provider name before any prompt resolution — a
-            // bare `cadmus chat --provider bogus` must fail fast instead of
-            // blocking on stdin.
-            if !cadmus_llm_openai::dialect_names().contains(&provider.as_str()) {
-                return Err(Error::UnknownProvider(provider).into());
-            }
+            ensure_known_provider(&provider)?;
             let config = ChatConfig {
                 provider,
                 model,
@@ -111,7 +142,63 @@ async fn main() -> miette::Result<()> {
             }
             Ok(())
         }
+        Commands::Eval {
+            provider,
+            model,
+            base_url,
+            max_tokens,
+            max_turns,
+            trace_root,
+            set,
+            fixtures,
+            out,
+        } => {
+            ensure_known_provider(&provider)?;
+            // Validate the corpus before any provider work: a corpus error is
+            // local and fixable without an API key, so it wins over
+            // MissingApiKey. run_eval loads again — the reload of ~50 small
+            // files is negligible against a live run.
+            cadmus::load_cases(&set, &fixtures)?;
+            let (wired, wire_model) =
+                cadmus::provider::build(&provider, model.as_deref(), base_url.as_deref())?;
+            let config = EvalConfig {
+                set,
+                fixtures,
+                max_tokens,
+                max_turns,
+                trace_root,
+                out,
+            };
+            let report =
+                cadmus::run_eval(&config, std::sync::Arc::new(wired), &provider, &wire_model)
+                    .await?;
+            for result in &report.results {
+                println!(
+                    "{} {} ({})",
+                    if result.passed { "pass" } else { "FAIL" },
+                    result.case_id,
+                    result.trace_id
+                );
+            }
+            println!(
+                "{}/{} passed — score file: {}",
+                report.passed,
+                report.total,
+                config.out.display()
+            );
+            Ok(())
+        }
     }
+}
+
+/// Validates the provider name before any other work — a bare
+/// `cadmus chat --provider bogus` must fail fast instead of blocking on
+/// stdin, and `cadmus eval --provider bogus` before touching the corpus.
+fn ensure_known_provider(provider: &str) -> miette::Result<()> {
+    if !cadmus_llm_openai::dialect_names().contains(&provider) {
+        return Err(Error::UnknownProvider(provider.to_string()).into());
+    }
+    Ok(())
 }
 
 /// Trailing arguments joined with spaces; when empty, stdin is the prompt.

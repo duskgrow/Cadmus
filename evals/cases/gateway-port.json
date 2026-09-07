@@ -1,0 +1,20 @@
+{
+  "id": "gateway-port",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "In this workspace, what port does the gateway service listen on? Answer with the port number only.",
+  "note": "port in services/gateway/gateway.toml; services/gateway/README.md agrees.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "8421"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

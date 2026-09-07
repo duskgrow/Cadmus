@@ -1,0 +1,13 @@
+[build-system]
+requires = ["nestbuild"]
+build-backend = "nestbuild.api"
+
+[project]
+name = "birdlog"
+version = "1.4.2"
+description = "A small library and CLI for birding observation logs."
+requires-python = ">=3.10"
+dependencies = ["featherfmt>=2.1"]
+
+[project.scripts]
+birdlog = "birdlog.cli:main"
