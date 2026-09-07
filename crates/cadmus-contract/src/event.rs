@@ -253,4 +253,8 @@ pub mod attrs {
     /// 1-based assistant-turn index within the run — on llm request/response
     /// and tool call/result events.
     pub const TURN: &str = "selfevol.turn";
+    /// The eval isolation split (`search` / `holdout`, ADR-0010 §4): on every
+    /// eval run's start-run command and every score event, so reflection
+    /// input selection excludes holdout traces by construction.
+    pub const EVAL_SPLIT: &str = "selfevol.eval_split";
 }

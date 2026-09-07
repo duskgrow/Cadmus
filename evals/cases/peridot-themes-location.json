@@ -1,0 +1,20 @@
+{
+  "id": "peridot-themes-location",
+  "split": "search",
+  "fixture": "docs-site",
+  "prompt": "Which document lists the bundled themes? Answer with the file path only.",
+  "note": "The theme list is docs/themes.md; the README layout section maps it.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "docs/themes.md"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

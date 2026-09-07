@@ -1,0 +1,20 @@
+{
+  "id": "notecli-version",
+  "split": "search",
+  "fixture": "rust-cli",
+  "prompt": "In this workspace, what is the latest released version of the project? Answer with the version number only.",
+  "note": "Cargo.toml [package] version; the CHANGELOG.md top entry agrees.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "0.3.1"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

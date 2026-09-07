@@ -1,0 +1,20 @@
+{
+  "id": "notecli-031-fix",
+  "split": "search",
+  "fixture": "rust-cli",
+  "prompt": "What bug did version 0.3.1 fix? Answer in one short sentence.",
+  "note": "CHANGELOG.md 0.3.1 entry: panic on empty-query search.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "panic"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

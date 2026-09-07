@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-rollup-target",
+  "split": "search",
+  "fixture": "data-pipeline",
+  "prompt": "Which make target builds the fct_daily_rollups table? Answer with the make target only.",
+  "note": "Makefile: the transform target runs transforms/rollup_daily.sql, which builds fct_daily_rollups; README run order agrees.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "transform"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

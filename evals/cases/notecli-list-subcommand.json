@@ -1,0 +1,20 @@
+{
+  "id": "notecli-list-subcommand",
+  "split": "holdout",
+  "fixture": "rust-cli",
+  "prompt": "Which subcommand prints every stored note, oldest first? Answer with the subcommand name only.",
+  "note": "src/args.rs parse_args; README usage.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "list"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

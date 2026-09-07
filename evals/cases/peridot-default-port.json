@@ -1,0 +1,20 @@
+{
+  "id": "peridot-default-port",
+  "split": "search",
+  "fixture": "docs-site",
+  "prompt": "In this workspace, what is the default port of the peridot dev server? Answer with the port number only.",
+  "note": "docs/configuration.md `port` default 7180; docs/cli.md and docs/getting-started.md agree.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "7180"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Peridot site configuration. Every key is documented in docs/configuration.md.
+site_name: Peridot Docs
+theme: citrine
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Themes: themes.md
+  - CLI: cli.md
+  - Deployment: deployment.md
+  - Changelog: changelog.md

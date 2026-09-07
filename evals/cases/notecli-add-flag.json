@@ -1,0 +1,20 @@
+{
+  "id": "notecli-add-flag",
+  "split": "search",
+  "fixture": "rust-cli",
+  "prompt": "Which command-line flag attaches tags to a new note? Answer with the flag name only.",
+  "note": "src/args.rs parse_tags reads --tags; README usage shows --tags home,errands.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "--tags"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "peridot-default-permalink",
+  "split": "search",
+  "fixture": "docs-site",
+  "prompt": "What is the default permalink pattern for pages? Answer with the pattern only.",
+  "note": "docs/configuration.md `permalink` default `/:slug/`.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "/:slug/"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

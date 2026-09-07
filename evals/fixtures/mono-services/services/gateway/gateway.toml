@@ -1,0 +1,7 @@
+# gateway service configuration
+owner_team = "team-edge"
+port = 8421
+rate_limit_rps = 250
+
+[upstreams]
+ledger = "127.0.0.1:9030"

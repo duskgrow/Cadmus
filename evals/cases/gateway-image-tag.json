@@ -1,0 +1,20 @@
+{
+  "id": "gateway-image-tag",
+  "split": "holdout",
+  "fixture": "mono-services",
+  "prompt": "What image tag is the gateway service deployed with? Answer with the tag only.",
+  "note": "image in deploy/gateway.yaml (ledger's tag differs: 2.4.0).",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "1.7.3"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

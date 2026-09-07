@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-retention-days",
+  "split": "search",
+  "fixture": "data-pipeline",
+  "prompt": "For how many days does the pipeline keep raw events before they are purged? Answer with the number of days only.",
+  "note": "config/pipeline.toml [storage] retention_days = 90; the only retention value stated anywhere in the fixture.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "90"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "ledger-id-prefix",
+  "split": "holdout",
+  "fixture": "mono-services",
+  "prompt": "What prefix is on the settlement entry ids that the ledger service records? Answer with the prefix only.",
+  "note": "ledger's main.rs calls ids::format_entry_id; ENTRY_PREFIX in libs/ids/src/lib.rs is `led-`.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "led-"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

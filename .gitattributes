@@ -5,3 +5,7 @@
 *.sh text eol=lf
 justfile text eol=lf
 *.md text eol=lf
+# the corpus digest hashes fixture bytes raw — pin LF so the identical
+# committed corpus hashes to the same set_digest on every platform
+# (fixtures are text-only by construction)
+evals/** text eol=lf

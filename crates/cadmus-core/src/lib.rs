@@ -1,5 +1,5 @@
-//! Agent loop, stream aggregation, trajectory replay and skill
-//! orchestration — pure logic, no IO.
+//! Agent loop, stream aggregation, trajectory replay, eval scoring and
+//! skill orchestration — pure logic, no IO.
 //!
 //! The core owns the *aggregation semantics* of normalized provider streams
 //! (the thin client only solves transport and frame parsing, ADR-0003), plus
@@ -10,6 +10,7 @@
 
 mod agent;
 mod assembler;
+mod eval;
 mod replay;
 pub mod testing;
 mod trajectory;
@@ -19,5 +20,6 @@ pub use assembler::{AssembledTurn, MessageAssembler};
 // The trajectory's llm_response events carry the outcome (ADR-0005), so the
 // enum moved to the contract crate; re-exported here for continuity.
 pub use cadmus_contract::TurnOutcome;
+pub use eval::score_case;
 pub use replay::ReplayProvider;
 pub use trajectory::{FinishRecord, RunState, replay_trace};

@@ -4,6 +4,6 @@
     "textWrap": "maintain"
   },
   "includes": ["**/*.md"],
-  "excludes": ["CHANGELOG.md", "docs/research/**"],
+  "excludes": ["CHANGELOG.md", "docs/research/**", "evals/fixtures/**"],
   "plugins": ["https://plugins.dprint.dev/markdown-0.23.2.wasm"]
 }

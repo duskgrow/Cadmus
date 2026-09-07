@@ -1,5 +1,6 @@
 //! Boundary contract of Cadmus: port traits, wire types, [`Capabilities`],
-//! [`ModelProfile`] and the trajectory event schema (ADR-0005).
+//! [`ModelProfile`], the trajectory event schema (ADR-0005) and the eval set
+//! schema ([`EvalCase`], ADR-0005 §7 / ADR-0010 §4).
 //!
 //! This is the only crate where serializable boundary types live (ADR-0002):
 //! the core never `use`s an external capability directly, and adapters never
@@ -8,6 +9,7 @@
 
 mod capabilities;
 mod error;
+mod eval;
 mod event;
 mod log;
 mod message;
@@ -19,6 +21,7 @@ pub mod testing;
 
 pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Support};
 pub use error::ModelError;
+pub use eval::{CaseResult, EvalCase, EvalReport, EvalSplit, Expectation};
 pub use event::{
     Clock, Command, Event, EventError, EventKind, IdSequence, ScoreEvent, Status, TurnOutcome,
     attrs, error_kinds,

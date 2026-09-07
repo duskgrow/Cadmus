@@ -1,0 +1,20 @@
+{
+  "id": "notecli-package-name",
+  "split": "holdout",
+  "fixture": "rust-cli",
+  "prompt": "What package name does this workspace's Cargo.toml declare? Answer with the name only.",
+  "note": "Cargo.toml [package] name.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "notecli"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

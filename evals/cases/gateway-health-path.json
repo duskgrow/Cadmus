@@ -1,0 +1,20 @@
+{
+  "id": "gateway-health-path",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "Which HTTP path does the gateway service expose for health checks? Answer with the path only.",
+  "note": "`/healthz` route in services/gateway/src/main.rs; gateway README and docs/runbook.md agree.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "/healthz"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

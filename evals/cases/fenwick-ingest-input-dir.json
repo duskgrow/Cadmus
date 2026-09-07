@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-ingest-input-dir",
+  "split": "holdout",
+  "fixture": "data-pipeline",
+  "prompt": "Which directory does the ingest step read raw event files from? Answer with the directory path only.",
+  "note": "scripts/ingest.sh default INCOMING_DIR is data/incoming; Makefile INGEST_DIR and config/pipeline.toml [ingest] incoming_dir agree.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "data/incoming"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

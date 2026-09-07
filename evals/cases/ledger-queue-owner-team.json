@@ -1,0 +1,20 @@
+{
+  "id": "ledger-queue-owner-team",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "Which team owns the service that consumes the `parcel-settle-events` queue? Answer with the team name only.",
+  "note": "queue in services/ledger/ledger.toml identifies ledger; owner_team there and in services/ledger/README.md is team-settlement.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "team-settlement"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

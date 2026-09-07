@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-dependency",
+  "split": "holdout",
+  "fixture": "python-lib",
+  "prompt": "What is the only runtime dependency declared in pyproject.toml? Answer with the package name only.",
+  "note": "pyproject.toml [project] dependencies lists featherfmt.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "featherfmt"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

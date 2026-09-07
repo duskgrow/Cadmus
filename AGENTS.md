@@ -15,6 +15,7 @@
 - All tests: `just test`; single test: `cargo nextest run -p cadmus <name>`
 - Iterate with the narrowest loop first (`cargo check -p <crate>`, scoped nextest); finish with `just ci`
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)
+- Eval set v1: `just eval` (live provider, full set, score file at `target/eval/latest.json`; corpus rules in `evals/README.md`)
 - New crate: `just new-crate <name>`
 - Dependency policy: `just deny`; docs build: `just doc`; release-artifact drift check: `just dist-check`; agent-doc smoke check: `just agent-check`; architecture test: `just arch-test`
 - Toolchain bump: `just toolchain-bump` (also run weekly by CI, which opens a validated PR)

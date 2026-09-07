@@ -1,0 +1,20 @@
+{
+  "id": "parcelops-drain-seconds",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "According to the runbook, how many seconds should operators wait for gateway connections to drain after a restart? Answer with the number only.",
+  "note": "docs/runbook.md restart procedure, step 4.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "45"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

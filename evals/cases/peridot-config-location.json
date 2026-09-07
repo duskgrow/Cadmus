@@ -1,0 +1,20 @@
+{
+  "id": "peridot-config-location",
+  "split": "search",
+  "fixture": "docs-site",
+  "prompt": "Which file documents the `permalink` configuration key? Answer with the file path only.",
+  "note": "docs/configuration.md documents every config key; the README layout section agrees.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "docs/configuration.md"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

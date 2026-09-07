@@ -5,18 +5,16 @@
 //! Every run appends its trajectory to the JSONL event log (ADR-0005): one
 //! file per trace under the trace root, recorded as `ChatResult::trace_path`.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cadmus_contract::{ChatRequest, ContentPart, Message, Usage, attrs};
+use cadmus_contract::{ChatRequest, ContentPart, Message, Usage};
 use cadmus_core::{AgentLoop, RunOutcome, Telemetry};
-use cadmus_llm_openai::{CustomDialect, Dialect, OpenAiProvider, dialect_by_name};
 use cadmus_memory::JsonlLog;
 
-use crate::Error;
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
 use crate::tools::coding_tools;
+use crate::{Error, provider};
 
 /// Everything a chat run needs, resolved from CLI arguments. The provider
 /// name is passed through verbatim — the vendor registry lives in
@@ -49,17 +47,11 @@ pub struct ChatResult {
 /// Runs one prompt through the agent loop with the coding tools confined to
 /// the current working directory.
 pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, Error> {
-    let dialect = build_dialect(config)?;
-    // Captured before the dialect moves into the provider: the model name as
-    // sent on the wire is trajectory provenance.
-    let wire_model = dialect.model_name().to_string();
-    // Fail fast with an actionable error instead of a wire 401.
-    if std::env::var(dialect.api_key_env()).is_err() {
-        return Err(Error::MissingApiKey {
-            env: dialect.api_key_env(),
-        });
-    }
-    let provider = OpenAiProvider::from_env(dialect).map_err(Error::Provider)?;
+    let (provider, wire_model) = provider::build(
+        &config.provider,
+        config.model.as_deref(),
+        config.base_url.as_deref(),
+    )?;
 
     let root = match &config.trace_root {
         Some(root) => root.clone(),
@@ -73,7 +65,7 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         clock,
         ids: Arc::new(SeqIds::default()),
         trace_id: trace_id.clone(),
-        run_attributes: run_attributes(config, &wire_model),
+        run_attributes: provider::run_attributes(&config.provider, &wire_model),
     };
 
     // Pointed out before the run: a failed run's partial trajectory is
@@ -94,30 +86,6 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         .run(&ChatRequest::user_text(prompt, config.max_tokens))
         .await?;
     Ok(into_result(outcome, trace_id, trace_path))
-}
-
-/// Run-level provenance recorded on the start-run event (ADR-0005 §3): the
-/// wired provider, the model name as sent on the wire, and the binary
-/// version — the attributes every later projection groups by.
-fn run_attributes(config: &ChatConfig, wire_model: &str) -> BTreeMap<String, serde_json::Value> {
-    BTreeMap::from([
-        (attrs::PROVIDER.to_string(), config.provider.clone().into()),
-        (attrs::MODEL.to_string(), wire_model.into()),
-        (
-            attrs::CADMUS_VERSION.to_string(),
-            env!("CARGO_PKG_VERSION").into(),
-        ),
-    ])
-}
-
-fn build_dialect(config: &ChatConfig) -> Result<Box<dyn Dialect>, Error> {
-    if config.provider == "custom" {
-        let (Some(model), Some(base_url)) = (&config.model, &config.base_url) else {
-            return Err(Error::CustomConfigMissing);
-        };
-        return Ok(Box::new(CustomDialect::new(model, base_url)));
-    }
-    dialect_by_name(&config.provider).ok_or_else(|| Error::UnknownProvider(config.provider.clone()))
 }
 
 fn into_result(outcome: RunOutcome, trace_id: String, trace_path: PathBuf) -> ChatResult {

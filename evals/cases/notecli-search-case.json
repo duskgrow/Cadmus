@@ -1,0 +1,20 @@
+{
+  "id": "notecli-search-case",
+  "split": "search",
+  "fixture": "rust-cli",
+  "prompt": "Is note search case-sensitive or case-insensitive? Answer with one word.",
+  "note": "search_notes lowercases both sides (src/store.rs); CHANGELOG 0.2.0 says the same.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "insensitive"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

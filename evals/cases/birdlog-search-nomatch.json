@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-search-nomatch",
+  "split": "search",
+  "fixture": "python-lib",
+  "prompt": "What does `find_observations` return when no observation matches the query? Answer in a few words.",
+  "note": "Docstring in src/birdlog/search.py; tests/test_search.py asserts [].",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "empty list"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

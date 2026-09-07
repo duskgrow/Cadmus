@@ -1,0 +1,4 @@
+# ledger service configuration
+owner_team = "team-settlement"
+port = 9030
+queue = "parcel-settle-events"

@@ -1,0 +1,20 @@
+{
+  "id": "notecli-default-dir",
+  "split": "search",
+  "fixture": "rust-cli",
+  "prompt": "What is the name of the default directory notes are stored in? Answer with the directory name only.",
+  "note": "DEFAULT_DIR in src/store.rs; README mentions ~/.notes.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": ".notes"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

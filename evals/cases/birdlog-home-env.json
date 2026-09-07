@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-home-env",
+  "split": "search",
+  "fixture": "python-lib",
+  "prompt": "Which environment variable overrides the default store location? Answer with the variable name only.",
+  "note": "Store.open_default in src/birdlog/store.py; README mentions BIRDLOG_HOME.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "BIRDLOG_HOME"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

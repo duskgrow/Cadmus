@@ -1,0 +1,20 @@
+{
+  "id": "ledger-replica-count",
+  "split": "search",
+  "fixture": "mono-services",
+  "prompt": "How many replicas does the ledger service run in its deployment manifest? Answer with the number only.",
+  "note": "replicas in deploy/ledger.yaml (gateway runs 3, ledger runs 5).",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "5"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

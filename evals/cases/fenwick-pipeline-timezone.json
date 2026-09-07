@@ -1,0 +1,20 @@
+{
+  "id": "fenwick-pipeline-timezone",
+  "split": "search",
+  "fixture": "data-pipeline",
+  "prompt": "Which timezone does the pipeline use for daily rollup boundaries? Answer with the timezone string only.",
+  "note": "config/pipeline.toml [rollups] timezone; transforms/rollup_daily.sql uses the same 'Etc/UTC' literal.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "Etc/UTC"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}

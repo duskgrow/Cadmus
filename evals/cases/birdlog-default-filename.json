@@ -1,0 +1,20 @@
+{
+  "id": "birdlog-default-filename",
+  "split": "search",
+  "fixture": "python-lib",
+  "prompt": "What is the default filename of the observation store? Answer with the filename only.",
+  "note": "DEFAULT_FILENAME in src/birdlog/store.py; README shows ~/.birdlog/sightings.jsonl.",
+  "expect": [
+    {
+      "metric": "run_completed"
+    },
+    {
+      "metric": "answer_contains",
+      "needle": "sightings.jsonl"
+    },
+    {
+      "metric": "turns_within",
+      "max": 8
+    }
+  ]
+}
