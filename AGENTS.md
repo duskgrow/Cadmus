@@ -7,6 +7,7 @@
 - `docs/roadmap.md` — the six-phase tracker; phase kickoff follows its ritual (re-read report §10.2.N, re-verify time-sensitive claims, then write the phase's ADR).
 - `docs/decisions/` — ADRs are the architecture-decision SSOT; they win over `docs/research/` (frozen exhibit material, never edited).
 - `docs/tools.md` — the built-in tool catalog: plan, tiers, and admission record (principles in ADR-0008).
+- `docs/open-items.md` — field findings awaiting their consuming change; delete items as consumed.
 
 ## Commands (just is the only entry point; never bypass the quality gates)
 

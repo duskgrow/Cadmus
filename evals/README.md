@@ -36,3 +36,22 @@ harness is tested end-to-end with scripted providers there.
   can re-derive expectations.
 - Holdout cases measure the same skills as search cases but stay unseen by
   the reflector; keep the split ratio near 4:1.
+
+## Known limits and growth
+
+- First live baseline (2026-09-07, `deepseek-v4-flash`): 50/50 in a single
+  run. For strong API composites the set is saturated — it works as a
+  retention floor (regressions flip passes to failures) but cannot measure
+  positive gain: with no failing items there is no boundary set
+  (ADR-0010 §3). Single runs screen direction only (ADR-0010 §1); 3–5
+  seeded repeats tell saturated items from flaky ones.
+- Growth adds headroom under the additive-only discipline (existing cases
+  never change meaning): multi-hop questions (the answer spans ≥2 files),
+  negative cases (the correct answer is "absent"), distractor-dense
+  fixtures, and edit-verify cases once the write tools land (ADR-0008).
+- Difficulty is anchored per composite (ADR-0010 §2): keep the easy items —
+  the phase-3 local-model composite may find them discriminative even where
+  API models saturate them.
+- Later direction (not yet a decision): adopt a general public coding
+  benchmark as a base layer under the scenario set; selection happens at
+  phase-2 kickoff.
