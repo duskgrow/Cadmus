@@ -43,7 +43,7 @@ security floor: modes can ask more than the floor requires, never less.
 | -------------------------- | ---- | ----- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
 | `read_file`                | L0   | 0     | shipped | workspace-confined UTF-8 read, streamed 1-based line windows so every line is reachable; dual cap (512 KiB per call, 64 KiB per line) with exact-resume-offset footers — the ADR-0007 layer-1 standard                                                                                                                                    | —              |
 | `grep`                     | L0   | 0     | shipped | structured `path:line` smart-case regex matches on ripgrep's library crates (the models' native habit): gitignore-aware walking, hidden entries skipped per-platform, symlinks never followed, binary/large-file skips and the match-cap stop file reported in the footer; dedicated despite shell (cross-platform consistency, book ch4) | —              |
-| `list_dir`                 | L0   | 0     | shipped | one-level listing, hidden entries skipped per-platform (same policy as grep, shared implementation; `include_hidden` parameter opts in, `ls -a` style), capped entries                                                                                                                                                                    | —              |
+| `list_dir`                 | L0   | 0     | shipped | one-level listing for orientation when no name pattern is known (glob finds known shapes, grep finds content), hidden entries skipped per-platform (same policy as grep, shared implementation; `include_hidden` parameter opts in, `ls -a` style), capped entries                                                                        | —              |
 | `glob`                     | L0   | 1     | planned | pattern file-find; the model-preferred slot over `list_dir` chains (first-class in all four baseline agents)                                                                                                                                                                                                                              | —              |
 | scheme reads (`trace://`…) | L0   | 2     | planned | `read_file` resolves internal schemes — `trace://<id>`, `skill://<name>`, `memory://` (oh-my-pi's one-surface pattern; trace id → shard path is already a pure function, ADR-0005)                                                                                                                                                        | 0005/0006/0009 |
 
@@ -132,6 +132,10 @@ security floor: modes can ask more than the floor requires, never less.
   when-_not_-to-use, boundaries with counter-examples, parameter examples,
   cost notes, and hard NEVER rules (e.g. once `shell_exec` exists: never use
   it for grep/find/cat — dedicated tools win on feedback quality).
+- Tool semantics mirror the dominant CLI habits (ripgrep regex and smart
+  case, `ls`/`ls -a`) so the dedicated tool stays the path of least
+  resistance — a habit mismatch pushes models back to shell (maintainer,
+  2026-09-09).
 - Errors are corrections, not failures (ADR-0008): non-zero exits return
   `isError` results with next-step guidance; out-of-range reads reply with
   the exact window to retry, never a bare error.

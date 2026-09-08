@@ -47,3 +47,29 @@ samples, human-curated into the set) has no cadence, sampling or admission
 procedure — a policy sentence without a mechanism, the failure mode
 ADR-0010's context calls out for holdout isolation. The phase-2 ADR should
 pin all three.
+
+## read_file's line axis has no column resume
+
+Consumer: a read_file byte-window parameter, if evals or traces ever show
+models needing it.
+
+Lines over 64 KiB are cut inline with a marker and their tails are
+unreachable; grep's match preview likewise shows only the 512 B head. Both
+deliberate — such lines are machine-generated (minified bundles, source
+maps, serialized records) and paged raw into context they are a net
+negative. If evidence ever justifies it, the additive extension is a
+byte-window parameter; do not build it ahead of evidence.
+
+## ACP adoption seam assessment
+
+Consumer: the ACP adoption ADR, whenever an ACP frontend is scheduled.
+
+Assessed 2026-09-09 against ADR-0013: an ACP frontend is another client
+kind of the client protocol, and the hard parts already align — trajectory
+events map to session/update tool-call notifications, the approval path is
+a command event shared by local and remote clients (ADR-0008 item 4), and
+the tool-result is_error flag maps to ACP's failed status. The one real
+seam: the built-in tools do their own filesystem IO, so ACP's client-side
+fs capabilities (remote workspaces, editor-native diffs) would need an IO
+port injected into the tools — additive behind `AgentTool`, aligned with
+the constructor-injection style rule, not a redesign.

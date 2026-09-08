@@ -101,3 +101,28 @@ risk-tiered approvals whose rejections are fed back as tool results.
 - The catalog of included, planned and excluded tools lives in
   `docs/tools.md` (plan + admission record); this ADR owns the principles
   and contract invariants only.
+
+## Amendment — 2026-09-09: multi-replacement edit_file, batch approval
+
+From the phase-1 tool-surface rework's review discussions (maintainer,
+2026-09-09):
+
+- **Item 3**: `edit_file` carries an _array_ of exact
+  `old_string`→`new_string` replacements per call, all targeting one
+  file; each must match exactly once, and the call applies all or none —
+  the batch is the unit, so the model never leaves a file half-edited,
+  and one call per file avoids the multi-turn round trips that
+  single-replacement editing would cost.
+- **Item 4**: approval becomes _batch_ approval — a turn's gated calls
+  are presented together and each is approved or rejected independently,
+  with approved calls executing immediately; "approval-gated calls
+  serialize" is superseded. The accepted trade-off: a rejection can
+  depend on the batch's contents but never on an earlier gated call's
+  _result_ (results postdate the approval moment).
+- **Item 2, design principle recorded**: built-in tools are designed for
+  parallel safety on purpose, so the `Concurrency` declaration on
+  `AgentTool` records the analysis rather than excusing it; the serial
+  default protects what we cannot vouch for (third-party wrappers,
+  unanalyzed additions). The loop's schedule is all-or-nothing per turn
+  batch — the model emits calls as one unordered batch, so intra-batch
+  order carries no information worth a finer schedule.
