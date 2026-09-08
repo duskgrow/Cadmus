@@ -7,7 +7,7 @@ with no consumer does not belong here.
 
 ## Interaction surfaces never render logs
 
-Consumer: the ADR-0011 TUI implementation.
+Consumer: the ADR-0011 TUI implementation, over the ADR-0013 live stream.
 
 First live `chat` run (2026-09-07): at the default `warn` filter the user
 saw only genai's `EMPTY CHOICE CONTENT` spam and no run progress, and the
@@ -23,7 +23,9 @@ Consumer: same as above, or a standalone interim change.
 `cadmus-core`'s agent loop emits nothing at any level: `RUST_LOG=info`
 gives per-case progress for `eval` but stays silent for `chat`. If wanted
 before the TUI lands, info-level instrumentation (turn start, tool-call
-name, finish status) is a small standalone change.
+name, finish status) is a small standalone change. The TUI's structured
+progress carrier is ADR-0013's live stream; interim tracing stays useful
+for `eval` and pre-TUI `chat`.
 
 ## Traces carry no workspace or ruler identity
 
