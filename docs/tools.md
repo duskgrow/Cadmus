@@ -39,13 +39,13 @@ security floor: modes can ask more than the floor requires, never less.
 
 ## Perception
 
-| Tool                       | Tier | Phase | Status  | Intent / design notes                                                                                                                                                                              | Serves         |
-| -------------------------- | ---- | ----- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| `read_file`                | L0   | 0     | shipped | workspace-confined read, line windows, 512 KiB cap; the exact-resume-range truncation footer is the ADR-0007 layer-1 standard, retrofitted with the write tools                                    | —              |
-| `grep`                     | L0   | 0     | shipped | structured `path:line` matches, capped count; dedicated despite shell (cross-platform consistency, book ch4); retrofit: regex support (the models' native habit; currently literal substring only) | —              |
-| `list_dir`                 | L0   | 0     | shipped | one-level listing, capped entries                                                                                                                                                                  | —              |
-| `glob`                     | L0   | 1     | planned | pattern file-find; the model-preferred slot over `list_dir` chains (first-class in all four baseline agents)                                                                                       | —              |
-| scheme reads (`trace://`…) | L0   | 2     | planned | `read_file` resolves internal schemes — `trace://<id>`, `skill://<name>`, `memory://` (oh-my-pi's one-surface pattern; trace id → shard path is already a pure function, ADR-0005)                 | 0005/0006/0009 |
+| Tool                       | Tier | Phase | Status  | Intent / design notes                                                                                                                                                                                  | Serves         |
+| -------------------------- | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| `read_file`                | L0   | 0     | shipped | workspace-confined UTF-8 read, streamed 1-based line windows so every line is reachable; dual cap (512 KiB per call, 64 KiB per line) with exact-resume-offset footers — the ADR-0007 layer-1 standard | —              |
+| `grep`                     | L0   | 0     | shipped | structured `path:line` matches, capped count; dedicated despite shell (cross-platform consistency, book ch4); retrofit: regex support (the models' native habit; currently literal substring only)     | —              |
+| `list_dir`                 | L0   | 0     | shipped | one-level listing, capped entries                                                                                                                                                                      | —              |
+| `glob`                     | L0   | 1     | planned | pattern file-find; the model-preferred slot over `list_dir` chains (first-class in all four baseline agents)                                                                                           | —              |
+| scheme reads (`trace://`…) | L0   | 2     | planned | `read_file` resolves internal schemes — `trace://<id>`, `skill://<name>`, `memory://` (oh-my-pi's one-surface pattern; trace id → shard path is already a pure function, ADR-0005)                     | 0005/0006/0009 |
 
 ## Workspace mutation
 
@@ -129,13 +129,11 @@ security floor: modes can ask more than the floor requires, never less.
 The phase-0 tools predate this catalog's standards; their rework is planned,
 not ad-hoc. Each item lands in the same PR as the behavior change.
 
-| Tool              | Retrofit                                                                                                                               | Evidence / standard                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `grep`            | regex support (currently literal substring only — the mainstream models' native habit is ripgrep-style regex)                          | model-agnostic admission criterion (ADR-0008)                   |
-| `grep`/`list_dir` | .gitignore-aware walking instead of the hardcoded Rust-centric skip list (`target`); hidden-file policy review                         | ripgrep/`rg --files` convention                                 |
-| `read_file`       | exact-resume-range truncation footer on the byte-cap path (the line-window footer exists; the 512 KiB byte path has no resume pointer) | ADR-0007 layer-1 truncation standard                            |
-| `read_file`       | description alignment: absolute paths inside the workspace are honored but undocumented; encoding behavior (UTF-8 only) made explicit  | book-ch4 description standard (boundaries and counter-examples) |
-| all three         | descriptions brought up to this catalog's standard (when-to-use / when-not, parameter examples, cost notes)                            | tools.md disclosure standard                                    |
+| Tool              | Retrofit                                                                                                       | Evidence / standard                           |
+| ----------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `grep`            | regex support (currently literal substring only — the mainstream models' native habit is ripgrep-style regex)  | model-agnostic admission criterion (ADR-0008) |
+| `grep`/`list_dir` | .gitignore-aware walking instead of the hardcoded Rust-centric skip list (`target`); hidden-file policy review | ripgrep/`rg --files` convention               |
+| `grep`/`list_dir` | descriptions brought up to this catalog's standard (when-to-use / when-not, parameter examples, cost notes)    | tools.md disclosure standard                  |
 
 ## Disclosure and description standard
 
