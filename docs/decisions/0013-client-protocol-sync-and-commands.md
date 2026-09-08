@@ -106,6 +106,37 @@ writer per run (ADR-0002).
    forbidden edge: presentation dependencies (terminal/GUI frameworks,
    markdown renderers) may appear only in frontend crates; core and
    contract never depend on a frontend.
+10. **Where precision lives.** This ADR pins the invariants and the
+    rationale — it is not the wire spec. The normative message vocabulary
+    lands with the write tools as `cadmus-contract` types with rustdoc;
+    the executable semantics (drop positions `≤ as_of_seq`, `Lagged`
+    forces re-sync, command idempotency) become a client-protocol
+    contract-test suite in the ADR-0003 port-suite pattern, run by fakes,
+    the in-process broadcaster and the stdio transport alike; the
+    byte-level NDJSON shape is insta-snapshot-locked. Prose here never
+    hand-copies field lists — that is drift by construction.
+
+The attach handshake of items 3–5 as one picture (the prose is the
+invariant SSOT; the diagram illustrates, it does not specify):
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant B as Broadcaster
+    participant L as JSONL log
+    C->>B: Attach(trace_id)
+    B->>L: fold history
+    B->>B: snapshot live aggregator
+    B-->>C: Sync: history, in_flight, as_of_seq
+    Note over C: baseline = history + in_flight; drop seq ≤ as_of_seq
+    B-->>C: Delta as_of_seq + 1
+    B-->>C: Delta as_of_seq + 2
+    alt client falls behind
+        B-->>C: Lagged
+        C->>B: Attach again
+        B-->>C: fresh Sync
+    end
+```
 
 ## Consequences
 
