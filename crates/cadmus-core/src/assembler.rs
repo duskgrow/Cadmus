@@ -149,6 +149,7 @@ impl MessageAssembler {
                 role: Role::Assistant,
                 content,
                 tool_call_id: None,
+                is_error: false,
                 opaque: self.opaque,
             },
             usage: self.usage,

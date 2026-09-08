@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use cadmus_contract::ToolSpec;
-use cadmus_core::{AgentTool, ToolError};
+use cadmus_core::{AgentTool, Concurrency, ToolError};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::WalkBuilder;
@@ -27,6 +27,12 @@ pub(super) struct Grep {
 
 #[async_trait]
 impl AgentTool for Grep {
+    /// Read-only and stateless: parallel-safe like every perception tool
+    /// (ADR-0008 item 2).
+    fn concurrency(&self) -> Concurrency {
+        Concurrency::ParallelSafe
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "grep".into(),

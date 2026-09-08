@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use cadmus_contract::ToolSpec;
-use cadmus_core::{AgentTool, ToolError};
+use cadmus_core::{AgentTool, Concurrency, ToolError};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
 
@@ -19,6 +19,12 @@ pub(super) struct ListDir {
 
 #[async_trait]
 impl AgentTool for ListDir {
+    /// Read-only and stateless: parallel-safe like every perception tool
+    /// (ADR-0008 item 2).
+    fn concurrency(&self) -> Concurrency {
+        Concurrency::ParallelSafe
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "list_dir".into(),

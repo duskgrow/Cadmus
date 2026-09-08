@@ -19,6 +19,7 @@ RunState {
                 },
             ],
             tool_call_id: None,
+            is_error: false,
             opaque: None,
         },
         Message {
@@ -35,6 +36,7 @@ RunState {
                 },
             ],
             tool_call_id: None,
+            is_error: false,
             opaque: None,
         },
         Message {
@@ -47,6 +49,7 @@ RunState {
             tool_call_id: Some(
                 "call_1",
             ),
+            is_error: false,
             opaque: None,
         },
         Message {
@@ -57,6 +60,7 @@ RunState {
                 },
             ],
             tool_call_id: None,
+            is_error: false,
             opaque: None,
         },
     ],

@@ -17,6 +17,11 @@ pub struct Message {
     /// Required when `role == Role::Tool`: the call this message answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Marks a tool result as an error outcome (`Role::Tool` only): the
+    /// model reads it as a correction, not as data (ADR-0008 item 2).
+    /// Dialects render the flag per wire capability.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
     /// Vendor-opaque payload (`Gemini` thought signatures, `DeepSeek`
     /// `reasoning_content`, …). Never parsed here — adapters persist it and
     /// echo it back verbatim on the next request; dropping it is a wire 400.
@@ -38,6 +43,7 @@ impl Message {
             role,
             content: vec![ContentPart::Text { text: text.into() }],
             tool_call_id: None,
+            is_error: false,
             opaque: None,
         }
     }
@@ -53,8 +59,18 @@ impl Message {
             role: Role::Tool,
             content: vec![ContentPart::Text { text }],
             tool_call_id: Some(call_id.into()),
+            is_error: false,
             opaque: None,
         }
+    }
+
+    /// The error answer to a completed tool call: same payload shaping as
+    /// [`tool_result`](Self::tool_result), marked so the model reads it as
+    /// a correction.
+    pub fn tool_error(call_id: impl Into<String>, content: Value) -> Self {
+        let mut message = Self::tool_result(call_id, content);
+        message.is_error = true;
+        message
     }
 
     /// All tool calls in this message, in wire order.
@@ -64,6 +80,12 @@ impl Message {
             _ => None,
         })
     }
+}
+
+// serde's skip_serializing_if requires the by-reference signature.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +106,43 @@ pub enum ContentPart {
     Image {
         bytes: Vec<u8>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_error_marks_the_flag_and_shares_the_payload_shaping() {
+        let error = Message::tool_error("c1", json!("boom"));
+        assert!(error.is_error);
+        assert_eq!(error.role, Role::Tool);
+        assert_eq!(error.tool_call_id.as_deref(), Some("c1"));
+
+        let ok = Message::tool_result("c1", json!("boom"));
+        assert!(!ok.is_error);
+        assert_eq!(ok.content, error.content);
+    }
+
+    #[test]
+    fn is_error_stays_wire_compatible() {
+        // Old payloads without the flag keep deserializing (default false),
+        // and a false flag never serializes (skip), so persisted streams
+        // are unchanged unless an error actually flows.
+        let plain: Message = serde_json::from_str(
+            r#"{"role":"tool","content":[{"type":"text","text":"x"}],"tool_call_id":"c1"}"#,
+        )
+        .expect("legacy payload");
+        assert!(!plain.is_error);
+
+        let serialized = serde_json::to_value(&plain).expect("serialize");
+        assert!(serialized.get("is_error").is_none());
+
+        let serialized = serde_json::to_value(Message::tool_error("c1", json!("x"))).unwrap();
+        assert_eq!(serialized["is_error"], json!(true));
+    }
+
+    use serde_json::json;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -107,9 +107,17 @@ pub fn replay_trace(events: &[Event]) -> RunState {
                 if let Some(position) = open_calls.iter().position(|open| open == call_id) {
                     open_calls.remove(position);
                 }
-                state
-                    .messages
-                    .push(Message::tool_result(call_id.clone(), result.clone()));
+                // The loop's own predicate: an errored event folds to an
+                // is_error-marked message, so replayed state matches live
+                // state (ADR-0005's fold invariant). Pre-flag logs fold
+                // correctly too — their errored results carried the error
+                // only on the envelope.
+                let message = if event.error.is_some() {
+                    Message::tool_error(call_id.clone(), result.clone())
+                } else {
+                    Message::tool_result(call_id.clone(), result.clone())
+                };
+                state.messages.push(message);
             }
             EventKind::EvalScore(score) => state.scores.push(score.clone()),
             EventKind::RunFinished { turns } => {

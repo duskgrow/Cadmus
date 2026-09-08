@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cadmus_contract::{
     ChatRequest, Command, ContentPart, Event, EventError, EventKind, FinishReason, Message, Role,
-    ScoreEvent, Status, StreamChunk, ToolCall, ToolSpec, TurnOutcome, Usage, attrs,
+    ScoreEvent, Status, StreamChunk, ToolCall, ToolSpec, TurnOutcome, Usage, attrs, error_kinds,
 };
 use cadmus_core::{
     AgentLoop, AgentTool, ReplayProvider, ToolError, replay_trace, testing::test_telemetry,
@@ -38,6 +38,7 @@ fn assistant_call(id: &str, name: &str, args: &str) -> Message {
             },
         }],
         tool_call_id: None,
+        is_error: false,
         opaque: None,
     }
 }
@@ -144,6 +145,64 @@ fn same_log_folds_to_identical_state_twice() {
     assert_eq!(finished.status, Status::Ok);
 
     insta::assert_debug_snapshot!(first);
+}
+
+/// The fold mirrors the loop's `is_error` predicate (ADR-0005's fold
+/// invariant): an errored tool result becomes an is_error-marked message.
+#[test]
+fn errored_tool_result_folds_to_an_is_error_message() {
+    let start = full_log().into_iter().next().expect("start_run");
+    let log = vec![
+        start,
+        envelope(
+            2,
+            2,
+            EventKind::ToolCall {
+                call: ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "a"}),
+                },
+            },
+        ),
+        envelope(
+            3,
+            2,
+            EventKind::ToolResult {
+                call_id: "c1".into(),
+                result: json!("tool `read_file` failed: nope"),
+            },
+        )
+        .errored(EventError {
+            kind: error_kinds::TOOL.into(),
+            message: "tool `read_file` failed: nope".into(),
+        }),
+        envelope(
+            4,
+            3,
+            EventKind::ToolCall {
+                call: ToolCall {
+                    id: "c2".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "b"}),
+                },
+            },
+        ),
+        envelope(
+            5,
+            3,
+            EventKind::ToolResult {
+                call_id: "c2".into(),
+                result: json!("contents"),
+            },
+        ),
+    ];
+
+    let state = replay_trace(&log);
+    // user question → errored tool result → successful tool result
+    assert_eq!(state.messages.len(), 3);
+    assert!(state.messages[1].is_error);
+    assert!(!state.messages[2].is_error);
 }
 
 /// The log cut right after a tool call (the crash window): the run state

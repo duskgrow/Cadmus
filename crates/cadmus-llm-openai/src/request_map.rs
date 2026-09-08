@@ -46,10 +46,16 @@ fn map_message(message: &Message, echo_reasoning: bool) -> Result<ChatMessage, M
             let call_id = message.tool_call_id.as_deref().ok_or_else(|| {
                 ModelError::InvalidRequest("tool message is missing its tool_call_id".into())
             })?;
-            Ok(ChatMessage::tool(ToolResponse::new(
-                call_id,
-                text_of(message)?,
-            )))
+            // The OpenAI-shape wire has no is_error channel, so the
+            // contract's flag renders as a text marker — the model still
+            // gets a correction it can act on.
+            let text = text_of(message)?;
+            let content = if message.is_error {
+                format!("Error: {text}")
+            } else {
+                text.to_owned()
+            };
+            Ok(ChatMessage::tool(ToolResponse::new(call_id, content)))
         }
         Role::Assistant => {
             let mut parts: Vec<GenaiContentPart> = Vec::new();
@@ -177,6 +183,7 @@ mod tests {
                 },
             ],
             tool_call_id: None,
+            is_error: false,
             opaque: None,
         };
         let request = ChatRequest::user_text("q", 100).with_messages(vec![assistant]);
@@ -204,6 +211,7 @@ mod tests {
                     },
                 }],
                 tool_call_id: None,
+                is_error: false,
                 opaque: None,
             },
             Message::tool_result("c1", json!("contents")),
@@ -217,6 +225,17 @@ mod tests {
         let parts1: Vec<_> = genai_request.messages[1].content.clone().into_parts();
         assert!(
             matches!(&parts1[0], GenaiContentPart::ToolResponse(response) if response.call_id == "c1" && response.content == "contents")
+        );
+    }
+
+    #[test]
+    fn renders_tool_errors_with_a_text_marker() {
+        let request = ChatRequest::user_text("q", 100)
+            .with_messages(vec![Message::tool_error("c1", json!("boom"))]);
+        let genai_request = build_genai_request(&request, false).expect("map");
+        let parts: Vec<_> = genai_request.messages[0].content.clone().into_parts();
+        assert!(
+            matches!(&parts[0], GenaiContentPart::ToolResponse(response) if response.content == "Error: boom")
         );
     }
 
