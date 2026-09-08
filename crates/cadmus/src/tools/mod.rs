@@ -106,6 +106,10 @@ mod tests {
         }
 
         pub(super) fn write(&self, path: &str, contents: &str) {
+            self.write_bytes(path, contents.as_bytes());
+        }
+
+        pub(super) fn write_bytes(&self, path: &str, contents: &[u8]) {
             let full = self.0.join(path);
             fs::create_dir_all(full.parent().expect("parent")).expect("mkdirs");
             fs::write(full, contents).expect("write");

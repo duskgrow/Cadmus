@@ -35,6 +35,15 @@ async-trait = "0.1"
 # thin LLM client (repo: jeremychone/rust-genai). Beware: crates.io also hosts
 # an unrelated Gemini-only crate literally named `rust-genai` — not this one.
 genai = "0.6.5"
+# ripgrep's library crates back the `grep` tool (tools.md retrofit):
+# gitignore-aware walking + hidden/symlink policy (`ignore`), Unicode regex
+# (`grep-regex`), line-oriented search with binary detection (`grep-searcher`).
+# The UTF-8-only policy lives in the tool's search setup (per-line sink
+# check, BOM sniffing off), not in feature flags; default-features = false
+# is a pin against future defaults, not a selection.
+ignore = { version = "0.4", default-features = false }
+grep-regex = "0.1"
+grep-searcher = { version = "0.1", default-features = false }
 
 # ---- internal crates ----
 cadmus-contract = { path = "crates/cadmus-contract" }
