@@ -135,6 +135,7 @@ mod tests {
         scratch.write("inside.txt", "safe");
         let read_file = tool(&scratch.0, "read_file");
         let grep = tool(&scratch.0, "grep");
+        let list_dir = tool(&scratch.0, "list_dir");
 
         let err = read_file
             .invoke(json!({"path": "../escape.txt"}))
@@ -146,6 +147,12 @@ mod tests {
             .invoke(json!({"pattern": "x", "path": "/"}))
             .await
             .expect_err("absolute escape must be confined");
+        assert!(err.message.contains("outside the workspace"));
+
+        let err = list_dir
+            .invoke(json!({"path": ".."}))
+            .await
+            .expect_err("must be confined");
         assert!(err.message.contains("outside the workspace"));
     }
 }

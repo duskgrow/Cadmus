@@ -35,7 +35,7 @@ async-trait = "0.1"
 # thin LLM client (repo: jeremychone/rust-genai). Beware: crates.io also hosts
 # an unrelated Gemini-only crate literally named `rust-genai` — not this one.
 genai = "0.6.5"
-# ripgrep's library crates back the `grep` tool (tools.md retrofit):
+# ripgrep's library crates back the `grep` and `list_dir` tools:
 # gitignore-aware walking + hidden/symlink policy (`ignore`), Unicode regex
 # (`grep-regex`), line-oriented search with binary detection (`grep-searcher`).
 # The UTF-8-only policy lives in the tool's search setup (per-line sink

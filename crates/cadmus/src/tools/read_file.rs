@@ -370,6 +370,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_cap_landing_on_a_line_boundary_resumes_at_the_next_line() {
+        let scratch = Scratch::new("read-exact-boundary");
+        // 2048 B/line (11 + 3·679): 256 lines fill the 512 KiB cap to the
+        // exact byte — the stop lands on a boundary, so no line is cut and
+        // the resume offset is the next line, not a re-read.
+        scratch.write("big.txt", &numbered_lines(300, 679));
+        let read_file = tool(&scratch.0, "read_file");
+
+        let first = read_file
+            .invoke(json!({"path": "big.txt"}))
+            .await
+            .expect("read");
+        let text = first.as_str().expect("string");
+        assert!(
+            text.ends_with("… [capped at 512 KiB — resume with offset=257]"),
+            "got tail: {}",
+            &text[text.len() - 100..]
+        );
+        assert!(
+            !text.contains("[cut at 512 KiB]"),
+            "a boundary stop must not cut a line, got: {text}"
+        );
+
+        let resumed = read_file
+            .invoke(json!({"path": "big.txt", "offset": 257, "limit": 1}))
+            .await
+            .expect("resume");
+        let text = resumed.as_str().expect("string");
+        assert!(text.starts_with("line 0257 "), "got: {text}");
+    }
+
+    #[tokio::test]
     async fn read_file_marks_overlong_lines_and_continues() {
         let scratch = Scratch::new("read-long-line");
         let content = format!("{}\nsecond\n", "x".repeat(100_000));

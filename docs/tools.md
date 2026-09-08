@@ -43,7 +43,7 @@ security floor: modes can ask more than the floor requires, never less.
 | -------------------------- | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
 | `read_file`                | L0   | 0     | shipped | workspace-confined UTF-8 read, streamed 1-based line windows so every line is reachable; dual cap (512 KiB per call, 64 KiB per line) with exact-resume-offset footers — the ADR-0007 layer-1 standard                                                                                                                         | —              |
 | `grep`                     | L0   | 0     | shipped | structured `path:line` regex matches on ripgrep's library crates (the models' native habit): gitignore-aware walking, hidden entries skipped per-platform, symlinks never followed, binary/large-file skips and the match-cap stop file reported in the footer; dedicated despite shell (cross-platform consistency, book ch4) | —              |
-| `list_dir`                 | L0   | 0     | shipped | one-level listing, capped entries                                                                                                                                                                                                                                                                                              | —              |
+| `list_dir`                 | L0   | 0     | shipped | one-level listing, hidden entries skipped per-platform (same policy as grep, shared implementation; `include_hidden` parameter opts in, `ls -a` style), capped entries                                                                                                                                                         | —              |
 | `glob`                     | L0   | 1     | planned | pattern file-find; the model-preferred slot over `list_dir` chains (first-class in all four baseline agents)                                                                                                                                                                                                                   | —              |
 | scheme reads (`trace://`…) | L0   | 2     | planned | `read_file` resolves internal schemes — `trace://<id>`, `skill://<name>`, `memory://` (oh-my-pi's one-surface pattern; trace id → shard path is already a pure function, ADR-0005)                                                                                                                                             | 0005/0006/0009 |
 
@@ -123,15 +123,6 @@ security floor: modes can ask more than the floor requires, never less.
 | workflow / multi-agent orchestration | excluded project boundary (ADR-0002) | never (boundary) |
 | direct memory-write tool | violates the human gate (ADR-0009); `remember` is proposal-only | never (principle) |
 | repo-map | ADR-0011: just-in-time retrieval consensus; a stale map is worse than none | — |
-
-## Shipped-tool retrofits
-
-The phase-0 tools predate this catalog's standards; their rework is planned,
-not ad-hoc. Each item lands in the same PR as the behavior change.
-
-| Tool              | Retrofit                                                                                                    | Evidence / standard          |
-| ----------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `grep`/`list_dir` | descriptions brought up to this catalog's standard (when-to-use / when-not, parameter examples, cost notes) | tools.md disclosure standard |
 
 ## Disclosure and description standard
 
