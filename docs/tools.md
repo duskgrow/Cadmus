@@ -7,7 +7,7 @@ is the plan and the admission record.
 
 Rules for this file:
 
-- The code (`crates/cadmus/src/tools.rs`) is the live list; this file is the
+- The code (`crates/cadmus/src/tools/`) is the live list; this file is the
   plan. A new tool lands as a row here in the same PR, with the ADR-0008
   admission bar: goal, tier, why a dedicated tool beats shell — plus the two
   hard criteria: cross-platform (Linux/macOS/Windows; CI's windows job

@@ -33,7 +33,7 @@ risk-tiered approvals whose rejections are fed back as tool results.
    v1 freezes, so v1 covers the actual coding task surface. Phase 3:
    `shell_exec` inside `sandbox-local` (report §7, unchanged). MCP: per
    ADR-0004's triggers, amended by item 6. The live tool list is the code
-   (`crates/cadmus/src/tools.rs`); this ADR owns only the intent and the
+   (`crates/cadmus/src/tools/`); this ADR owns only the intent and the
    per-tool admission bar: one-line justification of goal, risk tier, and
    why a dedicated tool beats shell (book: dedicated grep/find earn their
    place via cross-platform consistency and line-number feedback even when a
