@@ -112,6 +112,16 @@ constraints.
    (`golden.ascii`) join `just snapshot-review` when the TUI lands, keeping
    the floor testable rather than aspirational.
 
+## Amendment — 2026-09-08: the GUI is planned, protocol-first
+
+Item 4's "a future GUI (distant, unlikely)" is superseded (maintainer,
+2026-09-08): the GUI is planned, lands after phase 5, and lives out-of-repo
+(GPUI is GPL-licensed), importing cadmus as a library. The client protocol
+is ADR-0013; the GUI attaches over the phase-5 transport as another
+renderer of the same client kind. The composability stance itself is
+unchanged: cadmus still embeds in nothing, the headless NDJSON stream
+remains the interop API, and manager env-seam reporting is untouched.
+
 ## Consequences
 
 - Item 1 retroactively constrains the existing print-mode CLI (stdout/stderr

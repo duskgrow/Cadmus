@@ -90,6 +90,20 @@ SSOT for details.
    models on error paths are a proven death-spiral source (ai-agent-book
    ch5); adoption starts deterministic-only, with recursion limits.
 
+## Amendment — 2026-09-08: N frontends; the GUI is planned
+
+Item 2's "two frontends" becomes N frontends over the client protocol of
+ADR-0013 (sync-on-subscribe live stream + idempotent commands): the TUI,
+headless print mode, the post-phase-5 GUI and remote attach are one client
+kind. The consequences line "deliberately not pursued: desktop/mobile/web
+frontends" is narrowed: a desktop GUI is now planned (maintainer,
+2026-09-08), Rust-native and possibly GPUI — GPL-licensed, so it lives in a
+separate repository importing cadmus as a library and lands after phase 5
+as another renderer over the transport. Mobile and web frontends stay
+unpursued. The TUI-first strategy and this ADR's interaction floor are
+unchanged: the floor remains the TUI's acceptance criterion, and the GUI
+inherits parity through the shared protocol rather than a second UX spec.
+
 ## Consequences
 
 - The "daily driver" milestone — write tools + TUI + streaming + approval
