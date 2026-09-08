@@ -31,7 +31,9 @@ impl AgentTool for Grep {
         ToolSpec {
             name: "grep".into(),
             description: "Search workspace files with a regular expression (ripgrep/Rust syntax, \
-                          Unicode-aware, case-sensitive). Use this to find which files to read; \
+                          Unicode-aware, smart case: all-lowercase patterns ignore case, any \
+                          uppercase forces case-sensitive — ripgrep's -S rule). Use this to \
+                          find which files to read; \
                           then use read_file to view them. Recursive from path (default: workspace \
                           root); naming a single file searches just it, bypassing the rules below. \
                           Directory searches respect .gitignore (even outside git repositories) and \
@@ -57,7 +59,11 @@ impl AgentTool for Grep {
         if pattern.is_empty() {
             return Err(error("grep", "pattern must not be empty".into()));
         }
+        // Smart case (ripgrep's -S rule), forgiving recall by default:
+        // an all-lowercase pattern matches case-insensitively, any
+        // uppercase letter forces an exact match.
         let regex = RegexMatcherBuilder::new()
+            .case_smart(true)
             .build(pattern)
             .map_err(|err| error("grep", format!("invalid regex `{pattern}`: {err}")))?;
         let base = arguments["path"].as_str().unwrap_or(".");
@@ -287,6 +293,30 @@ mod tests {
             .await
             .expect_err("invalid regex must be a tool error");
         assert!(err.message.contains("invalid regex"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn grep_smart_case_matches_like_ripgrep() {
+        let scratch = Scratch::new("grep-smart-case");
+        scratch.write("f.rs", "needle\nNeedle\nNEEDLE\n");
+        let grep = tool(&scratch.0, "grep");
+
+        // All-lowercase: insensitive, all three casings match.
+        let result = grep
+            .invoke(json!({"pattern": "needle"}))
+            .await
+            .expect("grep");
+        assert_eq!(
+            result,
+            json!("f.rs:1: needle\nf.rs:2: Needle\nf.rs:3: NEEDLE")
+        );
+
+        // Any uppercase: sensitive, only the exact casing matches.
+        let result = grep
+            .invoke(json!({"pattern": "Needle"}))
+            .await
+            .expect("grep");
+        assert_eq!(result, json!("f.rs:2: Needle"));
     }
 
     #[tokio::test]
