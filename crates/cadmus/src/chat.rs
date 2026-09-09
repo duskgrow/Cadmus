@@ -2,6 +2,10 @@
 //! Streaming deltas are assembled in `cadmus-core`; phase 0 prints the final
 //! turn (incremental terminal rendering is a later polish).
 //!
+//! Headless chat is unattended: mutation calls pass the approval gate and
+//! are denied unless the operator passed `--yes` (ADR-0008 item 4, ADR-0011
+//! item 3) — the denial comes back as a tool result, so the model can adapt.
+//!
 //! Every run appends its trajectory to the JSONL event log (ADR-0005): one
 //! file per trace under the trace root, recorded as `ChatResult::trace_path`.
 
@@ -12,6 +16,7 @@ use cadmus_contract::{ChatRequest, ContentPart, Message, Usage};
 use cadmus_core::{AgentLoop, RunOutcome, Telemetry};
 use cadmus_memory::JsonlLog;
 
+use crate::approval::Headless;
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
 use crate::tools::coding_tools;
 use crate::{Error, provider};
@@ -28,6 +33,10 @@ pub struct ChatConfig {
     pub base_url: Option<String>,
     pub max_tokens: u32,
     pub max_turns: usize,
+    /// Approve workspace-mutation tool calls without a prompt (the CLI's
+    /// `-y/--yes`): headless chat cannot ask, so unattended runs deny them
+    /// (ADR-0008 item 4, ADR-0011 item 3).
+    pub approve_writes: bool,
     /// Trajectory root; `None` resolves the env/default chain at run time.
     pub trace_root: Option<PathBuf>,
 }
@@ -79,6 +88,9 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
     let agent = AgentLoop::new(
         Arc::new(provider),
         coding_tools(root),
+        Arc::new(Headless {
+            yes: config.approve_writes,
+        }),
         config.max_turns,
         telemetry,
     );

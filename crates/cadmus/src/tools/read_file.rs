@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use cadmus_contract::ToolSpec;
-use cadmus_core::{AgentTool, Concurrency, ToolError};
+use cadmus_core::{AgentTool, Concurrency, Effect, ToolError};
 use serde_json::{Value, json};
 
 use super::{error, resolve};
@@ -28,6 +28,11 @@ impl AgentTool for ReadFile {
     /// (ADR-0008 item 2).
     fn concurrency(&self) -> Concurrency {
         Concurrency::ParallelSafe
+    }
+
+    /// Reads only: never gated (ADR-0008 item 4).
+    fn effect(&self) -> Effect {
+        Effect::Perception
     }
 
     fn spec(&self) -> ToolSpec {

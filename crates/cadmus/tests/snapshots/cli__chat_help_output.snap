@@ -2,7 +2,7 @@
 source: crates/cadmus/tests/cli.rs
 expression: stdout
 ---
-Chat with the agent (one shot: prompt in, final answer out), with read-only coding tools confined to the current directory
+Chat with the agent (one shot: prompt in, final answer out), with coding tools confined to the current directory; workspace writes are denied unless approved (see --yes)
 
 Usage: cadmus chat [OPTIONS] [PROMPT]...
 
@@ -15,6 +15,7 @@ Options:
       --base-url <BASE_URL>      Endpoint base URL (required for --provider custom; key comes from `CADMUS_CUSTOM_API_KEY`)
       --max-tokens <MAX_TOKENS>  Maximum output tokens per assistant turn [default: 4096]
       --max-turns <MAX_TURNS>    Maximum assistant turns before the run fails [default: 16]
+  -y, --yes                      Approve workspace-write tool calls without prompting; unattended runs deny them by default
       --trace-root <TRACE_ROOT>  Directory the trajectory JSONL log is written under (default: the `CADMUS_TRACE_ROOT` env var, else the platform data dir)
       --json                     Emit the full message sequence as JSON on stdout
   -h, --help                     Print help

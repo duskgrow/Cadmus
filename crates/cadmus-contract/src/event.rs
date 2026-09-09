@@ -238,6 +238,10 @@ pub mod error_kinds {
     pub const TOOL: &str = "tool";
     /// The model named a tool that is not wired in.
     pub const UNKNOWN_TOOL: &str = "unknown_tool";
+    /// A gated call was rejected at the approval gate and never executed
+    /// (ADR-0008 item 4); the rejection text rides the tool result, so
+    /// reflection can tell a reviewer's no from a tool failure.
+    pub const APPROVAL_REJECTED: &str = "approval_rejected";
 }
 
 /// Well-known attribute-bag keys — the SSOT of the long-lived `selfevol.*`

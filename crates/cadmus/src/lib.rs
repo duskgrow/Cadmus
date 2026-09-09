@@ -3,6 +3,7 @@
 //! The binary (`src/main.rs`) is a thin CLI shell over this library: keep
 //! logic here so it stays testable without spawning a process.
 
+mod approval;
 mod chat;
 mod error;
 mod eval;

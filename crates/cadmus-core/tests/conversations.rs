@@ -91,7 +91,13 @@ async fn run(scripts: Vec<Vec<Result<StreamChunk, ModelError>>>) -> Vec<cadmus_c
     let provider = Arc::new(ReplayProvider::new(scripts));
     let tools: Vec<Arc<dyn AgentTool>> = vec![Arc::new(ReadFileTool), Arc::new(GrepTool)];
     let (telemetry, _sink) = test_telemetry("tr-conversations");
-    let agent = AgentLoop::new(provider, tools, 8, telemetry);
+    let agent = AgentLoop::new(
+        provider,
+        tools,
+        Arc::new(cadmus_core::testing::ApproveAll),
+        8,
+        telemetry,
+    );
     let outcome = agent
         .run(&ChatRequest::user_text("look up TODOs in main.rs", 4_096))
         .await

@@ -387,7 +387,13 @@ async fn run_two_turn_loop() -> (Vec<Event>, cadmus_core::RunOutcome) {
     telemetry
         .run_attributes
         .insert(attrs::CADMUS_VERSION.into(), "0.0.0-test".into());
-    let agent = AgentLoop::new(provider, vec![Arc::new(EchoTool)], 8, telemetry);
+    let agent = AgentLoop::new(
+        provider,
+        vec![Arc::new(EchoTool)],
+        Arc::new(cadmus_core::testing::ApproveAll),
+        8,
+        telemetry,
+    );
     let outcome = agent
         .run(&ChatRequest::user_text("say ping", 1_024))
         .await

@@ -6,9 +6,20 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cadmus_contract::{Clock, Event, EventSink, IdSequence, LogError};
+use cadmus_contract::{Approval, Clock, Event, EventSink, IdSequence, LogError, ToolCall};
 
 use crate::Telemetry;
+
+/// Approves every gated call: the test-double half of the approval gate,
+/// for loop/trajectory tests that exercise dispatch, not the gate.
+pub struct ApproveAll;
+
+#[async_trait::async_trait]
+impl crate::Approver for ApproveAll {
+    async fn approve(&self, calls: &[ToolCall]) -> Vec<Approval> {
+        calls.iter().map(|_| Approval::Approved).collect()
+    }
+}
 
 /// An in-memory [`EventSink`] keeping every appended event, in order.
 #[derive(Default)]

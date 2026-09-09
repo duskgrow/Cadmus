@@ -49,10 +49,10 @@ security floor: modes can ask more than the floor requires, never less.
 
 ## Workspace mutation
 
-| Tool         | Tier | Phase | Status  | Intent / design notes                                                                                                    | Serves |
-| ------------ | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------ | ------ |
-| `write_file` | L0   | 1     | planned | create/overwrite inside the workspace; post-write verifier feedback merged into the result (ADR-0008 item 5)             | 0008   |
-| `edit_file`  | L0   | 1     | planned | exact `old_string`→`new_string`, unique-match-or-fail, near-idempotent (ADR-0008 item 3); batch edits via parallel calls | 0008   |
+| Tool         | Tier | Phase | Status  | Intent / design notes                                                                                                                                                                                                                                                                                                     | Serves |
+| ------------ | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `write_file` | L0   | 1     | shipped | create/overwrite inside the workspace, byte-exact content, parent dirs created; overwrite results carry a capped unified diff against the previous content (execution-verification feedback, ADR-0008 item 5 — a real checker's output merges once one exists); creates carry none (the content is the model's own input) | 0008   |
+| `edit_file`  | L0   | 1     | shipped | an array of exact `old_string`→`new_string` replacements per call, each matching exactly once at its step, all-or-nothing, near-idempotent (ADR-0008 item 3 + the 2026-09-09 amendment); the result carries a capped unified diff of the file transition — placement and surviving context, never a re-read prompt        | 0008   |
 
 ## Execution
 

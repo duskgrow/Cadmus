@@ -9,13 +9,17 @@
 //! is what keeps every test deterministic.
 
 mod agent;
+mod approval;
 mod assembler;
 mod eval;
 mod replay;
 pub mod testing;
 mod trajectory;
 
-pub use agent::{AgentError, AgentLoop, AgentTool, Concurrency, RunOutcome, Telemetry, ToolError};
+pub use agent::{
+    AgentError, AgentLoop, AgentTool, Concurrency, Effect, RunOutcome, Telemetry, ToolError,
+};
+pub use approval::Approver;
 pub use assembler::{AssembledTurn, MessageAssembler};
 // The trajectory's llm_response events carry the outcome (ADR-0005), so the
 // enum moved to the contract crate; re-exported here for continuity.

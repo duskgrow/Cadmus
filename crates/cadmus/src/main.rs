@@ -19,7 +19,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Chat with the agent (one shot: prompt in, final answer out), with
-    /// read-only coding tools confined to the current directory
+    /// coding tools confined to the current directory; workspace writes are
+    /// denied unless approved (see --yes)
     Chat {
         /// Provider to use (registry dialect, or `custom` for an explicit
         /// OpenAI-compatible endpoint)
@@ -39,6 +40,10 @@ enum Commands {
         /// Maximum assistant turns before the run fails
         #[arg(long, default_value_t = 16)]
         max_turns: usize,
+        /// Approve workspace-write tool calls without prompting; unattended
+        /// runs deny them by default
+        #[arg(short = 'y', long)]
+        yes: bool,
         /// Directory the trajectory JSONL log is written under (default: the
         /// `CADMUS_TRACE_ROOT` env var, else the platform data dir)
         #[arg(long)]
@@ -98,6 +103,7 @@ async fn main() -> miette::Result<()> {
             base_url,
             max_tokens,
             max_turns,
+            yes,
             trace_root,
             json,
             prompt,
@@ -109,6 +115,7 @@ async fn main() -> miette::Result<()> {
                 base_url,
                 max_tokens,
                 max_turns,
+                approve_writes: yes,
                 trace_root,
             };
             let prompt = resolve_prompt(&prompt)?;

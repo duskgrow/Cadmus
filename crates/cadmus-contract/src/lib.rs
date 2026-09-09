@@ -7,6 +7,7 @@
 //! invent their own wire types. Everything here is plain data plus the
 //! [`Provider`] port — logic lives in `cadmus-core`, IO in the adapters.
 
+mod approval;
 mod capabilities;
 mod error;
 mod eval;
@@ -19,6 +20,7 @@ mod request;
 mod stream;
 pub mod testing;
 
+pub use approval::Approval;
 pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Support};
 pub use error::ModelError;
 pub use eval::{CaseResult, EvalCase, EvalReport, EvalSplit, Expectation};

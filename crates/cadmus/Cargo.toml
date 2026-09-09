@@ -1,6 +1,6 @@
 [package]
 name = "cadmus"
-description = "Self-evolving coding agent: self-built loop, OpenAI-compatible dialects, read-only coding tools (phase 0)"
+description = "Self-evolving coding agent: self-built loop, OpenAI-compatible dialects, coding tools with gated workspace writes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -32,6 +32,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 ignore.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

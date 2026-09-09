@@ -1,32 +1,47 @@
-//! Read-only coding tools, confined to a workspace root (phase 0 scope; the
-//! Landlock sandbox is phase 3, report §7). Paths resolving outside the root
+//! Coding tools, confined to a workspace root (the Landlock sandbox is
+//! phase 3, report §7). The perception tools (`read_file` / `grep` /
+//! `list_dir`) are parallel-safe and never gated; the mutation tools
+//! (`write_file` / `edit_file`) serialize and pass the client policy's
+//! approval gate (ADR-0008 items 2/4). Paths resolving outside the root
 //! are tool errors — feedback the model can recover from, never a fatal error.
+//!
+//! Writes are deliberately non-atomic (no temp+rename): a torn write needs
+//! an IO fault (disk full, …) — rare — and comes back as a tool error the
+//! model repairs by re-reading (maintainer, 2026-09-09).
 //!
 //! One module per tool. The confinement seam (`resolve`) and the tool-error
 //! constructor stay here: the security floor has exactly one home, and every
 //! tool — present and future — goes through it.
 
+mod diff;
+mod edit_file;
 mod grep;
 mod list_dir;
 mod read_file;
+mod write_file;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cadmus_core::{AgentTool, ToolError};
 
+use edit_file::EditFile;
 use grep::Grep;
 use list_dir::ListDir;
 use read_file::ReadFile;
+use write_file::WriteFile;
 
-/// The phase-0 coding toolset: `read_file`, `grep`, `list_dir`.
+/// The phase-1 coding toolset: `read_file`, `grep`, `list_dir`,
+/// `write_file`, `edit_file`.
 #[must_use]
 pub fn coding_tools(root: PathBuf) -> Vec<Arc<dyn AgentTool>> {
     let root = canonical_root(root);
     vec![
         Arc::new(ReadFile { root: root.clone() }),
         Arc::new(Grep { root: root.clone() }),
-        Arc::new(ListDir { root }),
+        Arc::new(ListDir { root: root.clone() }),
+        Arc::new(WriteFile { root: root.clone() }),
+        Arc::new(EditFile { root }),
     ]
 }
 
@@ -87,10 +102,30 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use cadmus_core::AgentTool;
+    use cadmus_core::{AgentTool, Effect};
     use serde_json::json;
 
     use super::coding_tools;
+
+    /// The gate's fail-safe default is `Mutation` — so the declarations are
+    /// pinned here: without them, perception tools would be gated and
+    /// unattended chat would deny even reads.
+    #[test]
+    fn effect_declarations_match_the_tool_kind() {
+        let scratch = Scratch::new("effects");
+        let tools = coding_tools(scratch.0.clone());
+        let effect_of = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.spec().name == name)
+                .map(|tool| tool.effect())
+        };
+        assert_eq!(effect_of("read_file"), Some(Effect::Perception));
+        assert_eq!(effect_of("grep"), Some(Effect::Perception));
+        assert_eq!(effect_of("list_dir"), Some(Effect::Perception));
+        assert_eq!(effect_of("write_file"), Some(Effect::Mutation));
+        assert_eq!(effect_of("edit_file"), Some(Effect::Mutation));
+    }
 
     /// A scratch workspace under the OS temp dir, unique per test name and
     /// process, removed on drop. Shared by every tool's test module.
@@ -136,6 +171,8 @@ mod tests {
         let read_file = tool(&scratch.0, "read_file");
         let grep = tool(&scratch.0, "grep");
         let list_dir = tool(&scratch.0, "list_dir");
+        let write_file = tool(&scratch.0, "write_file");
+        let edit_file = tool(&scratch.0, "edit_file");
 
         let err = read_file
             .invoke(json!({"path": "../escape.txt"}))
@@ -153,6 +190,18 @@ mod tests {
             .invoke(json!({"path": ".."}))
             .await
             .expect_err("must be confined");
+        assert!(err.message.contains("outside the workspace"));
+
+        let err = write_file
+            .invoke(json!({"path": "../escape.txt", "content": "x"}))
+            .await
+            .expect_err("writes must be confined");
+        assert!(err.message.contains("outside the workspace"));
+
+        let err = edit_file
+            .invoke(json!({"path": "/", "edits": [{"old_string": "x", "new_string": "y"}]}))
+            .await
+            .expect_err("edits must be confined");
         assert!(err.message.contains("outside the workspace"));
     }
 }

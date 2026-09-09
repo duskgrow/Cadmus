@@ -24,6 +24,7 @@ use cadmus_contract::{
 use cadmus_core::{AgentLoop, Telemetry, replay_trace, score_case};
 use cadmus_memory::JsonlLog;
 
+use crate::approval::ApproveAll;
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
 use crate::tools::coding_tools;
 use crate::{Error, provider};
@@ -322,6 +323,9 @@ async fn run_case(
     let agent = AgentLoop::new(
         provider.clone(),
         coding_tools(scratch.0.clone()),
+        // Every case runs against a disposable scratch copy of its fixture,
+        // so mutations approve unconditionally.
+        Arc::new(ApproveAll),
         config.max_turns,
         telemetry,
     );

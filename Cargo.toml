@@ -44,6 +44,9 @@ genai = "0.6.5"
 ignore = { version = "0.4", default-features = false }
 grep-regex = "0.1"
 grep-searcher = { version = "0.1", default-features = false }
+# unified diffs in the write tools' results (execution-verification feedback,
+# ADR-0008 item 5); insta's snapshot diffing already trusts this crate
+similar = { version = "2", default-features = false, features = ["text"] }
 
 # ---- internal crates ----
 cadmus-contract = { path = "crates/cadmus-contract" }

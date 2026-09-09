@@ -2,12 +2,12 @@
 source: crates/cadmus/tests/cli.rs
 expression: stdout
 ---
-Self-evolving coding agent: self-built loop, OpenAI-compatible dialects, read-only coding tools (phase 0)
+Self-evolving coding agent: self-built loop, OpenAI-compatible dialects, coding tools with gated workspace writes
 
 Usage: cadmus <COMMAND>
 
 Commands:
-  chat  Chat with the agent (one shot: prompt in, final answer out), with read-only coding tools confined to the current directory
+  chat  Chat with the agent (one shot: prompt in, final answer out), with coding tools confined to the current directory; workspace writes are denied unless approved (see --yes)
   eval  Run the eval set (evals/cases) against the fixture workspaces and write the aggregate score file; each run's scores are also recorded as score events in that run's trajectory log
   help  Print this message or the help of the given subcommand(s)
 
