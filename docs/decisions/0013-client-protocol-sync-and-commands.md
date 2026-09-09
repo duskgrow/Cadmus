@@ -138,6 +138,45 @@ sequenceDiagram
     end
 ```
 
+## Amendment — 2026-09-09: the minimal protocol lands
+
+The write-tools PR landed the gate as an in-process port; this change lands
+the protocol itself (the minimal set named in Consequences: the live-stream
+port, approval request/resolve, steer, interrupt). The normative vocabulary
+(item 10) is now code: `cadmus-contract`'s `live.rs` (LiveItem / LiveKind /
+Sync / InFlight) and the `resolve_approval` / `steer` / `interrupt` command
+variants, with the attach semantics executable as the
+`client_protocol_tests!` suite and the serialized `Sync` insta-locked.
+Rewind, plan approval and `ask_user` stay contract-future until their
+features land; the human-wait deny timeout lands with the TUI, the first
+waiting client (the in-process policies answer synchronously).
+
+In-process realizations, recorded so the prose above stays the invariant
+SSOT without overpromising the wiring:
+
+- Item 2's "the log writer is one subscriber of the live stream" is
+  realized as: the loop appends durable events synchronously — fatal on
+  error, the run never continues unrecorded — then republishes them as
+  `Recorded` items. The observable topology is the ADR's (one stream
+  carries the log's contents plus deltas); a literal subscriber-writer
+  could not propagate append failure back to the loop.
+- Item 4's ring-buffer backfill is replaced in-process by attach-under-
+  lock: the snapshot and the subscription are atomic, so the backfill set
+  is empty by construction and deltas fold incrementally into a replica of
+  the loop's own `MessageAssembler` (item 3's "no new aggregation logic").
+  A byte transport may still need the ring; the client rule is unchanged.
+- The in-process broadcaster folds the events it retains for `Sync.history`;
+  attach to finished or foreign traces reads the log file and lands with
+  the session picker.
+- Command recording rule: a command is appended at the moment it takes
+  effect in the run's state order, never at receipt — the replayed history
+  equals the live history (ADR-0005's fold invariant). A steer still
+  buffered when the run ends is never logged.
+- Mid-stream interrupt is chunk-granular: core stays runtime-free (no
+  `select!` against the command channel), so a stalled stream still ends
+  on the provider's own error path. Turn boundaries, the approval wait and
+  chunk gaps all honor it.
+
 ## Consequences
 
 - The write-tools PR (ADR-0008) implements the minimal protocol — the

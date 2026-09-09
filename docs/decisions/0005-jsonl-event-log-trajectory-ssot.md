@@ -109,6 +109,39 @@ posture — so dependency churn never touches the table; only a new _kind_ of
 crate does. The version-SSOT and serialization-boundary invariants are
 unchanged.
 
+## Amendment — 2026-09-09: one trace per session; the run idles at the finish line
+
+From the maintainer's review of the client-protocol implementation
+(2026-09-09). The research anchored on per-SESSION transcripts (Claude
+Code's per-session JSONL, Codex CLI — see Context), but the one-shot
+implementation narrowed that to one run = one trace, with the run ending at
+the first complete answer. Decided for the interactive session (landing
+with the TUI):
+
+- **A session is one trace.** At the finish line (an assistant turn
+  without tool calls and no pending steering) an interactive run _idles
+  awaiting the next user-message command_ instead of finishing;
+  `run_finished` lands only on explicit session close. Termination is a
+  policy: headless chat and eval keep finishing at the answer (one prompt
+  per trace), the interactive client idles.
+- The rejected alternative — a new run per prompt chained by replaying the
+  prefix (ADR-0009's resume mechanism) — re-copies the whole history into
+  every prompt's `start_run`, the quadratic growth item 1 rejects
+  intra-trace, and would force the fold to learn multi-run traces. Keeping
+  one `start_run` per trace keeps "a later start-run is a writer anomaly"
+  intact.
+- Consequences for later implementation: user prompts after the first are
+  command events (a user-message variant lands with the interactive
+  session; queue-steer is the mid-task sibling); the turn cap becomes
+  per-prompt — the budget bounds one user ask, not the session; per-prompt
+  attribution over the session-long turn index rides an additive attribute
+  when a consumer needs it. ADR-0009's resume/fork is unchanged:
+  cross-process continuity still spawns a new trace with lineage.
+- Interrupt follows the same split: in interactive mode Esc aborts the
+  current task back to the finish line and the session idles — the next
+  user message continues the same trace. Ending the run (the
+  `interrupted` terminal record) is the headless/one-shot policy's form.
+
 ## Consequences
 
 - Deviations from the frozen report (recorded here per roadmap rules):

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use cadmus_contract::{
-    ContentPart, FinishReason, Message, Role, StreamChunk, ToolCall, TurnOutcome, Usage,
+    CallSnapshot, ContentPart, FinishReason, Message, Role, StreamChunk, ToolCall, TurnOutcome,
+    TurnSnapshot, Usage,
 };
 use serde_json::Value;
 
@@ -99,6 +100,41 @@ impl MessageAssembler {
             StreamChunk::OpaqueDelta(value) => merge_opaque(&mut self.opaque, value),
             StreamChunk::Usage(usage) => self.usage = Some(usage),
             StreamChunk::Done { finish } => self.finish = Some(finish),
+        }
+    }
+
+    /// The in-flight fold so far (ADR-0013 item 3): the attach handshake's
+    /// `in_flight` payload. Aggregation semantics stay single-owned here —
+    /// a broadcaster's replica is this same type fed the same deltas, never
+    /// a second implementation.
+    #[must_use]
+    pub fn snapshot(&self) -> TurnSnapshot {
+        let mut calls: Vec<CallSnapshot> = self
+            .completed
+            .iter()
+            .map(|(index, call)| CallSnapshot::Sealed {
+                index: *index,
+                call: Box::new(call.clone()),
+            })
+            .collect();
+        calls.extend(
+            self.partials
+                .iter()
+                .map(|(index, partial)| CallSnapshot::Open {
+                    index: *index,
+                    id: partial.id.clone(),
+                    name: partial.name.clone(),
+                    arguments: partial.args.clone(),
+                }),
+        );
+        calls.sort_by_key(|snapshot| match snapshot {
+            CallSnapshot::Sealed { index, .. } | CallSnapshot::Open { index, .. } => *index,
+        });
+        TurnSnapshot {
+            text: self.text.clone(),
+            reasoning: self.reasoning.clone(),
+            calls,
+            usage: self.usage.clone(),
         }
     }
 

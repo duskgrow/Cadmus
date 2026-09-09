@@ -16,6 +16,13 @@ field: the interaction surface renders structured progress (turn blocks,
 tool activity); logs go to a file or an opt-in verbose channel, never into
 the interaction view.
 
+Interim landed (2026-09-09, the client-protocol change): headless `chat`
+renders structured progress to stderr from the live stream (turns, tool
+calls, approval requests, denials), so "no run progress" is fixed for the
+print-mode surface. What remains for the TUI: the full interaction floor,
+and the log-channel discipline — at the default filter, tracing warns still
+share stderr with the progress view.
+
 ## The agent loop has no tracing instrumentation
 
 Consumer: same as above, or a standalone interim change.
@@ -60,19 +67,28 @@ maps, serialized records) and paged raw into context they are a net
 negative. If evidence ever justifies it, the additive extension is a
 byte-window parameter; do not build it ahead of evidence.
 
-## Approval resolve is not yet a command event
+## Session attach payload, fold and render all scale with history
 
-Consumer: the TUI PR (the ADR-0011/0013 implementation).
+Consumer: the TUI session picker / multi-session dashboard — the first
+attaches to live runs carrying real history, and to long finished sessions.
 
-The write-tools change (ADR-0008 items 2–5) landed the gate as an
-in-process `Approver` port: the loop asks, the injected client policy
-answers, and only rejections enter the trajectory (as tool results).
-ADR-0008 item 4's full design — `resolve_approval` as a command event, so
-remote clients share one approval path and the approval itself is
-recorded — lands with the first interactive client, together with the
-ADR-0013 live-stream vocabulary (approval request/resolve, steer,
-interrupt) it needs. Until then the ACP-seam assessment above describes
-the design, not the code.
+Three coupled costs, all O(history). The in-process broadcaster retains
+every durable event of the run and folds them with `replay_trace` per
+attach, under the publish lock. A remote attach serializes the full
+`RunState` — tool results verbatim dominate (field experience 2026-09:
+attaching to a long session meant a long transfer; the temporary workaround
+was transport-level compression, which is legitimate but only a
+transport-layer answer). And a client that renders the fold from the head
+scrolls through the whole session on attach.
+
+Design direction (2026-09-09 maintainer discussion): `Sync` carries a
+bounded recent window plus a cursor, never the full fold; the client
+viewport anchors at the tail, and scrolling up pages older events lazily
+through a read verb (a request/response pair — not a command: it changes
+no state, and the two travel separately). The fold itself becomes
+incremental (`replay_trace` rehomed as `push(&Event)` onto a `RunStateFold`
+the broadcaster keeps), so attach is O(window) and the retained event vec
+dies.
 
 ## ACP adoption seam assessment
 
@@ -141,8 +157,10 @@ era).
 
 From the same discussion. Session/workspace-scoped "always allow" extends
 the decided per-tool allow/ask/deny rules (ADR-0011 item 3) and needs no
-core change — the `Approver` port composes; what lands later is policy
-plus persistence. But the config layer's design must answer what the
+core change — the composition point is the client policy producing
+`resolve_approval` commands (an auto-resolving decorator on the live
+stream, as eval/headless chat already do); what lands later is policy plus
+persistence. But the config layer's design must answer what the
 report leaves open: no layering/precedence/XDG anywhere (ADR-0012's
 precedence is our own), no config storage reconciliation — text assets go
 to git (§5.3.1) while structured config goes to SQLite (§5.1.1), two homes

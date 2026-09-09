@@ -9,7 +9,6 @@
 //! is what keeps every test deterministic.
 
 mod agent;
-mod approval;
 mod assembler;
 mod eval;
 mod replay;
@@ -17,13 +16,14 @@ pub mod testing;
 mod trajectory;
 
 pub use agent::{
-    AgentError, AgentLoop, AgentTool, Concurrency, Effect, RunOutcome, Telemetry, ToolError,
+    AgentError, AgentLoop, AgentTool, ClientProtocol, Concurrency, Effect, RunOutcome, Telemetry,
+    ToolError,
 };
-pub use approval::Approver;
 pub use assembler::{AssembledTurn, MessageAssembler};
 // The trajectory's llm_response events carry the outcome (ADR-0005), so the
-// enum moved to the contract crate; re-exported here for continuity.
-pub use cadmus_contract::TurnOutcome;
+// enum moved to the contract crate; re-exported here for continuity. The
+// fold output types followed it (ADR-0013: `Sync` carries the fold).
+pub use cadmus_contract::{FinishRecord, RunState, TurnOutcome};
 pub use eval::score_case;
 pub use replay::ReplayProvider;
-pub use trajectory::{FinishRecord, RunState, replay_trace};
+pub use trajectory::replay_trace;

@@ -4,13 +4,14 @@
 //! one canonical snapshot of a fully populated event.
 
 use cadmus_contract::{
-    ChatRequest, Command, Event, EventError, EventKind, FinishReason, Message, Role, ScoreEvent,
-    Status, ToolCall, TurnOutcome, Usage, attrs,
+    Approval, ChatRequest, Command, Event, EventError, EventKind, FinishReason, Message, Role,
+    ScoreEvent, Status, SteerMode, ToolCall, TurnOutcome, Usage, attrs,
 };
 use serde_json::json;
 
 fn sample_event() -> Event {
     Event::new(
+        3,
         "e3".into(),
         "tr_01JZKX9A".into(),
         "s2".into(),
@@ -77,10 +78,30 @@ fn every_kind_round_trips() {
         EventKind::Command(Command::StartRun {
             base: Box::new(ChatRequest::user_text("fix the typo", 4_096)),
         }),
+        EventKind::Command(Command::ResolveApproval {
+            command_id: "cmd-1".into(),
+            request_id: "ap7".into(),
+            decisions: vec![
+                Approval::Approved,
+                Approval::Rejected {
+                    comment: Some("not this one".into()),
+                },
+            ],
+        }),
+        EventKind::Command(Command::Steer {
+            command_id: "cmd-2".into(),
+            text: "also check the tests".into(),
+            mode: SteerMode::Inject,
+        }),
+        EventKind::Command(Command::Interrupt {
+            command_id: "cmd-3".into(),
+        }),
         EventKind::RunFinished { turns: 2 },
     ];
     for (index, kind) in kinds.into_iter().enumerate() {
+        let seq = u64::try_from(index).expect("small index");
         let event = Event::new(
+            seq,
             format!("e{index}"),
             "tr_round".into(),
             "s1".into(),
@@ -98,6 +119,7 @@ fn every_kind_round_trips() {
 #[test]
 fn errored_event_round_trips() {
     let event = Event::new(
+        9,
         "e9".into(),
         "tr_fail".into(),
         "s1".into(),
@@ -117,11 +139,13 @@ fn errored_event_round_trips() {
 
 /// Additive evolution tolerance: a line from a newer writer with unknown
 /// envelope fields, and with optional fields absent, still parses — with
-/// documented defaults (status ok, no error, empty attributes).
+/// documented defaults (status ok, no error, empty attributes). A
+/// pre-protocol line carries no `seq` and defaults to position zero.
 #[test]
 fn unknown_and_missing_fields_are_tolerated() {
     let line = r#"{"id":"e1","trace_id":"tr","span_id":"s1","time_unix_ms":1,"kind":"run_finished","turns":1,"future_field":42}"#;
     let event: Event = serde_json::from_str(line).expect("tolerant parse");
+    assert_eq!(event.seq, 0, "a pre-protocol line defaults to seq zero");
     assert_eq!(event.status, Status::Ok);
     assert_eq!(event.error, None);
     assert!(event.attributes.is_empty());

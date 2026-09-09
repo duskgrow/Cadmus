@@ -20,42 +20,16 @@
 //!   message; a result without a matching open call still appends (tolerant
 //!   reader), and calls never closed surface as
 //!   [`RunState::dangling_tool_calls`];
+//! - commands fold their state effects only: a `steer` appends its user
+//!   message exactly where the loop applied it (commands are recorded at
+//!   application, so the fold matches the live history); `resolve_approval`
+//!   and `interrupt` are asset-only — their effects already arrive as tool
+//!   results, the truncated turn and the terminal record;
 //! - `eval_score` accumulates; `run_finished` is the trace's terminal record.
 
 use std::collections::HashSet;
 
-use cadmus_contract::{Command, Event, EventError, EventKind, Message, ScoreEvent, Status, attrs};
-
-/// The folded state of one trace.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RunState {
-    pub trace_id: String,
-    /// `selfevol.provider` / `selfevol.model` from the start-run command,
-    /// when recorded.
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    /// The reconstructed history: the start-run seed plus every assistant
-    /// and tool message, in log order.
-    pub messages: Vec<Message>,
-    /// Completed assistant turns (ok `llm_response` events).
-    pub turns: u32,
-    /// Every turn warning, in log order.
-    pub warnings: Vec<String>,
-    pub scores: Vec<ScoreEvent>,
-    /// Tool calls never closed by a result — the crash window's dangling
-    /// spans, in the order they opened.
-    pub dangling_tool_calls: Vec<String>,
-    /// The terminal record; `None` means the trace ended mid-run.
-    pub finished: Option<FinishRecord>,
-}
-
-/// How the run ended, from its `run_finished` event's envelope.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FinishRecord {
-    pub turns: u32,
-    pub status: Status,
-    pub error: Option<EventError>,
-}
+use cadmus_contract::{Command, Event, EventKind, FinishRecord, Message, RunState, Status, attrs};
 
 /// Folds one trace's events into its [`RunState`]. Input order is log order
 /// (the append-only writer guarantees it); mixed traces are the caller's
@@ -92,7 +66,17 @@ pub fn replay_trace(events: &[Event]) -> RunState {
                 state.provider = string_attr(event, attrs::PROVIDER);
                 state.model = string_attr(event, attrs::MODEL);
             }
-            EventKind::LlmRequest => {}
+            EventKind::Command(Command::Steer { text, .. }) => {
+                // Applied commands only (the loop records at application):
+                // the user message lands exactly where the live history has
+                // it.
+                state.messages.push(Message::user(text.clone()));
+            }
+            // Asset-only arms: a request's history is rebuilt, never
+            // snapshotted; a resolve's effects arrive as tool results, an
+            // interrupt's as the truncated turn and terminal record.
+            EventKind::Command(Command::ResolveApproval { .. } | Command::Interrupt { .. })
+            | EventKind::LlmRequest => {}
             EventKind::LlmResponse {
                 message, warnings, ..
             } => {

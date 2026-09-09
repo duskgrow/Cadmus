@@ -94,7 +94,7 @@ async fn run(scripts: Vec<Vec<Result<StreamChunk, ModelError>>>) -> Vec<cadmus_c
     let agent = AgentLoop::new(
         provider,
         tools,
-        Arc::new(cadmus_core::testing::ApproveAll),
+        cadmus_core::testing::auto_approving().0,
         8,
         telemetry,
     );

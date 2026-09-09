@@ -21,13 +21,13 @@ use cadmus_contract::{
     CaseResult, ChatRequest, Clock, Command, EvalCase, EvalReport, Event, EventKind, EventSink,
     Expectation, IdSequence, Provider, attrs,
 };
-use cadmus_core::{AgentLoop, Telemetry, replay_trace, score_case};
+use cadmus_core::{AgentLoop, ClientProtocol, Telemetry, replay_trace, score_case};
 use cadmus_memory::JsonlLog;
+use cadmus_transport::{Blackhole, command_channel};
 
-use crate::approval::ApproveAll;
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
 use crate::tools::coding_tools;
-use crate::{Error, provider};
+use crate::{Error, approval, provider};
 
 /// Everything an eval run needs, resolved from CLI arguments.
 pub struct EvalConfig {
@@ -320,12 +320,22 @@ async fn run_case(
         trace_id: trace_id.clone(),
         run_attributes,
     };
+    // Every case runs against a disposable scratch copy of its fixture, so
+    // mutations approve unconditionally — through the same command path a
+    // client uses, over a blackhole live sink (nobody watches an eval run).
+    let (sender, commands) = command_channel();
+    let protocol = ClientProtocol {
+        live: Arc::new(approval::AutoResolver::new(
+            Arc::new(Blackhole),
+            sender,
+            approval::approve_all,
+        )),
+        commands: Arc::new(commands),
+    };
     let agent = AgentLoop::new(
         provider.clone(),
         coding_tools(scratch.0.clone()),
-        // Every case runs against a disposable scratch copy of its fixture,
-        // so mutations approve unconditionally.
-        Arc::new(ApproveAll),
+        protocol,
         config.max_turns,
         telemetry,
     );
@@ -381,8 +391,10 @@ fn append_scores(
     });
     let eval_span = format!("s{}", ids.next());
     for score in scores {
+        let seq = ids.next();
         let event = Event::new(
-            format!("e{}", ids.next()),
+            seq,
+            format!("e{seq}"),
             trace_id.to_string(),
             eval_span.clone(),
             root_span.clone(),

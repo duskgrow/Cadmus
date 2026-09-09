@@ -7,12 +7,22 @@
 //! The suite never makes live calls — subjects are scripted: the replay fake
 //! natively, network adapters through a local recorded-replay stub. Every
 //! assertion is a port semantic; no adapter-private API appears here.
+//!
+//! The second half of this module is the client-protocol suite (ADR-0013
+//! item 10): the executable semantics of attach — the Sync baseline, the
+//! `drop positions ≤ as_of_seq` rule, pending-approval reconstruction and
+//! lag recovery — instantiated by fakes, the in-process broadcaster and
+//! (later) the stdio transport alike via
+//! [`client_protocol_tests!`](crate::client_protocol_tests).
 
 use std::collections::HashSet;
 
 use tokio_stream::StreamExt;
 
-use crate::{ChatRequest, FinishReason, ModelError, Provider, StreamChunk, ToolSpec};
+use crate::{
+    Attachment, ChatRequest, Command, Event, EventKind, FinishReason, InFlight, LiveItem, LiveKind,
+    LiveUpdate, ModelError, Provider, StreamChunk, ToolSpec, attrs,
+};
 
 /// One scripted response for the subject under test.
 #[derive(Debug)]
@@ -297,12 +307,340 @@ async fn collect_ok(subject: &impl ContractSubject, request: &ChatRequest) -> Ve
         .expect("scripted stream must be all-Ok")
 }
 
-/// Instantiates the suite as one `#[test]` per case, each driving the factory
-/// on its own current-thread runtime (with a 30-second watchdog so a broken
-/// adapter fails instead of hanging CI).
+// ============================================================================
+// The client-protocol suite (ADR-0013 item 10): the attach semantics every
+// protocol endpoint must honor, driven through a scriptable subject. Sync
+// only — publish/attach are synchronous, the tail is a blocking iterator.
+// ============================================================================
+
+/// A client-protocol endpoint the suite scripts. One subject serves one run;
+/// implementations are the in-process broadcaster, fakes, and later the
+/// stdio transport.
+pub trait ProtocolSubject {
+    /// Feeds one live item, as the run's loop would publish it.
+    fn publish(&self, item: &LiveItem);
+    /// The attach handshake: a `Sync` baseline plus the live tail.
+    fn attach(&self) -> Attachment;
+    /// The per-subscriber queue bound — the lag case publishes past it.
+    fn queue_capacity(&self) -> usize;
+}
+
+const SUITE_TRACE: &str = "tr-suite";
+
+/// A recorded durable event as the loop publishes it (item seq == event seq).
+fn recorded(seq: u64, kind: EventKind, turn: Option<u64>) -> LiveItem {
+    let event = Event::new(
+        seq,
+        format!("e{seq}"),
+        SUITE_TRACE.into(),
+        format!("s{seq}"),
+        Some("s0".into()),
+        1_757_200_000_000 + seq,
+        kind,
+    );
+    let event = match turn {
+        Some(turn) => event.with_attribute(attrs::TURN, turn),
+        None => event,
+    };
+    LiveItem {
+        seq,
+        trace_id: SUITE_TRACE.into(),
+        kind: LiveKind::Recorded {
+            event: Box::new(event),
+        },
+    }
+}
+
+/// One assistant-stream delta of the open turn.
+fn delta(seq: u64, turn: u32, chunk: StreamChunk) -> LiveItem {
+    LiveItem {
+        seq,
+        trace_id: SUITE_TRACE.into(),
+        kind: LiveKind::AssistantDelta { turn, chunk },
+    }
+}
+
+fn start_run(seq: u64) -> LiveItem {
+    recorded(
+        seq,
+        EventKind::Command(Command::StartRun {
+            base: Box::new(ChatRequest::user_text("fix the typo", 4_096)),
+        }),
+        None,
+    )
+}
+
+fn text_done(seq: u64, turn: u32, text: &str) -> LiveItem {
+    recorded(
+        seq,
+        EventKind::LlmResponse {
+            message: crate::Message::text(crate::Role::Assistant, text),
+            usage: None,
+            finish: FinishReason::Stop,
+            outcome: crate::TurnOutcome::Content,
+            warnings: Vec::new(),
+        },
+        Some(u64::from(turn)),
+    )
+}
+
+/// Drains `n` updates off the tail, asserting the drop-rule shape: every
+/// item's seq strictly above `as_of_seq` and strictly increasing.
+fn take_items(
+    tail: &mut dyn Iterator<Item = LiveUpdate>,
+    n: usize,
+    as_of_seq: u64,
+) -> Vec<LiveItem> {
+    let mut items = Vec::new();
+    let mut previous = as_of_seq;
+    for update in tail.take(n) {
+        let LiveUpdate::Item { item } = update else {
+            panic!("expected an item, got the lag marker");
+        };
+        assert!(item.seq > as_of_seq, "the tail must not replay ≤ as_of_seq");
+        assert!(item.seq > previous, "the tail is strictly ordered");
+        previous = item.seq;
+        items.push(*item);
+    }
+    assert_eq!(items.len(), n, "the tail ended early");
+    items
+}
+
+/// The degenerate attach (item 3's position 0): an empty baseline, then
+/// every published item arrives on the tail in order.
+pub fn attach_at_zero_tails_every_item_in_order(subject: &impl ProtocolSubject) {
+    let attachment = subject.attach();
+    assert_eq!(attachment.sync.as_of_seq, 0);
+    assert!(attachment.sync.history.messages.is_empty());
+    assert_eq!(attachment.sync.in_flight, InFlight::default());
+
+    let script = vec![
+        start_run(1),
+        recorded(2, EventKind::LlmRequest, Some(1)),
+        delta(3, 1, StreamChunk::TextDelta("hel".into())),
+        delta(4, 1, StreamChunk::TextDelta("lo".into())),
+        text_done(5, 1, "hello"),
+    ];
+    for item in &script {
+        subject.publish(item);
+    }
+    let mut tail = attachment.tail;
+    let received = take_items(&mut *tail, script.len(), attachment.sync.as_of_seq);
+    assert_eq!(received, script, "the tail replays the script verbatim");
+}
+
+/// Mid-turn attach (the field pain of item 3): the baseline carries the log
+/// fold AND the open turn's partial text, and the tail continues strictly
+/// past `as_of_seq` — no gap, no duplicate, no jump when the response lands.
+pub fn mid_run_attach_syncs_history_and_in_flight(subject: &impl ProtocolSubject) {
+    subject.publish(&start_run(1));
+    subject.publish(&recorded(2, EventKind::LlmRequest, Some(1)));
+    subject.publish(&delta(3, 1, StreamChunk::TextDelta("partial".into())));
+
+    let attachment = subject.attach();
+    assert_eq!(attachment.sync.as_of_seq, 3);
+    assert_eq!(
+        attachment.sync.history.messages.len(),
+        1,
+        "the start-run seed"
+    );
+    let open = attachment
+        .sync
+        .in_flight
+        .open_turn
+        .as_ref()
+        .expect("a turn is in flight");
+    assert_eq!(open.turn, 1);
+    assert_eq!(open.partial.text, "partial");
+
+    subject.publish(&delta(4, 1, StreamChunk::TextDelta(" tail".into())));
+    subject.publish(&text_done(5, 1, "partial tail"));
+    let mut tail = attachment.tail;
+    let received = take_items(&mut *tail, 2, attachment.sync.as_of_seq);
+    assert_eq!(received[0].seq, 4);
+    assert_eq!(received[1].seq, 5);
+}
+
+/// An attach during an approval wait renders the dialog immediately (item
+/// 3); the recorded resolve clears the pending request for later attaches.
+pub fn attach_during_approval_wait_shows_the_pending_request(subject: &impl ProtocolSubject) {
+    subject.publish(&start_run(1));
+    subject.publish(&recorded(2, EventKind::LlmRequest, Some(1)));
+    subject.publish(&LiveItem {
+        seq: 3,
+        trace_id: SUITE_TRACE.into(),
+        kind: LiveKind::ApprovalRequested {
+            request_id: "ap9".into(),
+            turn: 1,
+            calls: vec![crate::ToolCall {
+                id: "call_1".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            }],
+        },
+    });
+
+    let waiting = subject.attach();
+    let pending = &waiting.sync.in_flight.pending_approvals;
+    assert_eq!(pending.len(), 1, "the open request reconstructs");
+    assert_eq!(pending[0].request_id, "ap9");
+    assert_eq!(pending[0].calls[0].name, "write_file");
+
+    subject.publish(&recorded(
+        4,
+        EventKind::Command(Command::ResolveApproval {
+            command_id: "cmd-1".into(),
+            request_id: "ap9".into(),
+            decisions: vec![crate::Approval::Approved],
+        }),
+        Some(1),
+    ));
+    let mut tail = waiting.tail;
+    let received = take_items(&mut *tail, 1, waiting.sync.as_of_seq);
+    assert_eq!(received[0].seq, 4, "the resolve arrives on the live tail");
+
+    let after = subject.attach();
+    assert!(
+        after.sync.in_flight.pending_approvals.is_empty(),
+        "the recorded resolve settles the request"
+    );
+}
+
+/// Lag recovery (item 5): a subscriber that falls behind learns it via the
+/// lag marker and re-attaches for a complete fresh baseline — the in-flight
+/// replica folds deltas the lagging client never saw.
+pub fn a_lagging_subscriber_is_told_to_resync(subject: &impl ProtocolSubject) {
+    let attachment = subject.attach();
+    let capacity = subject.queue_capacity();
+    let total = capacity + 2;
+    for index in 1..=total {
+        subject.publish(&delta(
+            u64::try_from(index).expect("small index"),
+            1,
+            StreamChunk::TextDelta("x".into()),
+        ));
+    }
+
+    let mut tail = attachment.tail;
+    let received = take_items(&mut *tail, capacity, 0);
+    assert_eq!(received.len(), capacity, "the queue bound holds");
+    assert_eq!(
+        tail.next(),
+        Some(LiveUpdate::Lagged),
+        "a gap is signalled, never silent"
+    );
+    assert_eq!(tail.next(), None, "the subscription ends after the gap");
+
+    let fresh = subject.attach();
+    assert_eq!(fresh.sync.as_of_seq, u64::try_from(total).expect("small"));
+    let open = fresh
+        .sync
+        .in_flight
+        .open_turn
+        .as_ref()
+        .expect("the turn is still open");
+    assert_eq!(open.partial.text, "x".repeat(total));
+}
+
+/// Turn close reconciles the delta buffer with the durable record (item 5):
+/// after the response lands, a fresh attach sees no open turn and the
+/// completed message in the fold.
+pub fn turn_close_clears_the_in_flight_turn(subject: &impl ProtocolSubject) {
+    subject.publish(&start_run(1));
+    subject.publish(&recorded(2, EventKind::LlmRequest, Some(1)));
+    subject.publish(&delta(3, 1, StreamChunk::TextDelta("do".into())));
+    subject.publish(&delta(4, 1, StreamChunk::TextDelta("ne".into())));
+    subject.publish(&text_done(5, 1, "done"));
+
+    let attachment = subject.attach();
+    assert!(attachment.sync.in_flight.open_turn.is_none());
+    assert_eq!(attachment.sync.history.turns, 1);
+    assert_eq!(attachment.sync.history.messages.len(), 2);
+}
+
+/// The canonical scripted run behind the serialized-`Sync` snapshot locks
+/// (ADR-0013's consequence: "insta mechanical gates extend to serialized
+/// Sync payloads"). Subjects publish it verbatim; the snapshot asserts the
+/// attach output, not the script.
+#[must_use]
+pub fn fixed_sync_script() -> Vec<LiveItem> {
+    vec![
+        start_run(1),
+        recorded(2, EventKind::LlmRequest, Some(1)),
+        delta(3, 1, StreamChunk::TextDelta("partial".into())),
+        delta(
+            4,
+            1,
+            StreamChunk::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "read_file".into(),
+            },
+        ),
+        delta(
+            5,
+            1,
+            StreamChunk::ToolArgsDelta {
+                index: 0,
+                fragment: "{\"path\":\"src/".into(),
+            },
+        ),
+    ]
+}
+
+/// Instantiates the client-protocol suite as one `#[test]` per case
+/// (ADR-0013 item 10), the protocol-side mirror of
+/// [`provider_contract_tests!`](crate::provider_contract_tests). The factory
+/// produces one fresh subject per case; the subject trait implementation
+/// lives with the consuming crate's tests, not its public surface.
 ///
-/// The consuming crate must have `tokio` with the `rt` and `time` features as
-/// a dev-dependency.
+/// ```ignore
+/// cadmus_contract::client_protocol_tests!(Broadcaster::new);
+/// ```
+#[macro_export]
+macro_rules! client_protocol_tests {
+    ($factory:expr) => {
+        mod client_protocol {
+            use super::*;
+
+            #[test]
+            fn attach_at_zero_tails_every_item_in_order() {
+                let subject = ($factory)();
+                $crate::testing::attach_at_zero_tails_every_item_in_order(&subject);
+            }
+
+            #[test]
+            fn mid_run_attach_syncs_history_and_in_flight() {
+                let subject = ($factory)();
+                $crate::testing::mid_run_attach_syncs_history_and_in_flight(&subject);
+            }
+
+            #[test]
+            fn attach_during_approval_wait_shows_the_pending_request() {
+                let subject = ($factory)();
+                $crate::testing::attach_during_approval_wait_shows_the_pending_request(&subject);
+            }
+
+            #[test]
+            fn a_lagging_subscriber_is_told_to_resync() {
+                let subject = ($factory)();
+                $crate::testing::a_lagging_subscriber_is_told_to_resync(&subject);
+            }
+
+            #[test]
+            fn turn_close_clears_the_in_flight_turn() {
+                let subject = ($factory)();
+                $crate::testing::turn_close_clears_the_in_flight_turn(&subject);
+            }
+        }
+    };
+}
+/// Instantiates the provider suite as one `#[test]` per case, each driving
+/// the factory on its own current-thread runtime (with a 30-second watchdog
+/// so a broken adapter fails instead of hanging CI).
+///
+/// The consuming crate must have `tokio` with the `rt` and `time` features
+/// as a dev-dependency.
 ///
 /// ```ignore
 /// cadmus_contract::provider_contract_tests!(|| ReplayProvider::new(Vec::new()));

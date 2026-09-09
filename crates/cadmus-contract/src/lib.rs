@@ -12,11 +12,13 @@ mod capabilities;
 mod error;
 mod eval;
 mod event;
+mod live;
 mod log;
 mod message;
 mod profile;
 mod provider;
 mod request;
+mod state;
 mod stream;
 pub mod testing;
 
@@ -25,8 +27,12 @@ pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Sup
 pub use error::ModelError;
 pub use eval::{CaseResult, EvalCase, EvalReport, EvalSplit, Expectation};
 pub use event::{
-    Clock, Command, Event, EventError, EventKind, IdSequence, ScoreEvent, Status, TurnOutcome,
-    attrs, error_kinds,
+    Clock, Command, Event, EventError, EventKind, IdSequence, ScoreEvent, Status, SteerMode,
+    TurnOutcome, attrs, error_kinds,
+};
+pub use live::{
+    Attachment, CallSnapshot, CommandSource, InFlight, LiveItem, LiveKind, LiveSink, LiveUpdate,
+    OpenTurn, PendingApproval, Sync, TurnSnapshot,
 };
 pub use log::{EventSink, LogError};
 pub use message::{ContentPart, Message, Role, ToolCall};
@@ -35,6 +41,7 @@ pub use provider::{ChunkStream, Provider};
 pub use request::{
     CacheDirective, ChatRequest, EffortLevel, OutputMode, Reasoning, Sampling, ToolChoice, ToolSpec,
 };
+pub use state::{FinishRecord, RunState};
 pub use stream::{FinishReason, StreamChunk, Usage};
 #[doc(inline)]
 pub use testing::{ContractSubject, QueuedResponse};

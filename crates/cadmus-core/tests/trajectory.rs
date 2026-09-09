@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 /// data tests, nothing here may read a clock.
 fn envelope(id: u32, span: u32, kind: EventKind) -> Event {
     Event::new(
+        u64::from(id),
         format!("e{id}"),
         "tr_test".into(),
         format!("s{span}"),
@@ -390,7 +391,7 @@ async fn run_two_turn_loop() -> (Vec<Event>, cadmus_core::RunOutcome) {
     let agent = AgentLoop::new(
         provider,
         vec![Arc::new(EchoTool)],
-        Arc::new(cadmus_core::testing::ApproveAll),
+        cadmus_core::testing::auto_approving().0,
         8,
         telemetry,
     );
@@ -410,6 +411,9 @@ async fn loop_events_replay_to_the_run_state() {
         .iter()
         .map(|event| match &event.kind {
             EventKind::Command(Command::StartRun { .. }) => "start_run",
+            EventKind::Command(Command::ResolveApproval { .. }) => "resolve_approval",
+            EventKind::Command(Command::Steer { .. }) => "steer",
+            EventKind::Command(Command::Interrupt { .. }) => "interrupt",
             EventKind::LlmRequest => "llm_request",
             EventKind::LlmResponse { .. } => "llm_response",
             EventKind::ToolCall { .. } => "tool_call",
@@ -424,6 +428,9 @@ async fn loop_events_replay_to_the_run_state() {
             "start_run",
             "llm_request",
             "llm_response",
+            // EchoTool is a mutation by the fail-safe default: the gate's
+            // resolve lands between the response and the dispatch.
+            "resolve_approval",
             "tool_call",
             "tool_result",
             "llm_request",
@@ -458,22 +465,23 @@ async fn loop_events_keep_span_and_attribute_discipline() {
     let root = events[0].span_id.clone();
     assert_eq!(events[0].parent_span_id, None, "start_run opens the root");
     assert_eq!(events[1].span_id, events[2].span_id, "turn-1 llm pair");
-    assert_eq!(events[3].span_id, events[4].span_id, "tool pair");
-    assert_eq!(events[5].span_id, events[6].span_id, "turn-2 llm pair");
+    assert_eq!(events[4].span_id, events[5].span_id, "tool pair");
+    assert_eq!(events[6].span_id, events[7].span_id, "turn-2 llm pair");
     assert_ne!(
-        events[1].span_id, events[5].span_id,
+        events[1].span_id, events[6].span_id,
         "turns are distinct spans"
     );
-    for event in &events[1..7] {
+    for event in &events[1..8] {
         assert_eq!(event.parent_span_id.as_deref(), Some(root.as_str()));
     }
-    assert_eq!(events[7].span_id, root, "run_finished closes the root");
-    assert_eq!(events[7].parent_span_id, None);
-    // Turn attributes: 1-based, shared by the turn's llm and tool events.
-    for event in &events[1..5] {
+    assert_eq!(events[8].span_id, root, "run_finished closes the root");
+    assert_eq!(events[8].parent_span_id, None);
+    // Turn attributes: 1-based, shared by the turn's llm, command and tool
+    // events (position 3 is the gate's resolve command).
+    for event in &events[1..6] {
         assert_eq!(event.attributes.get(attrs::TURN), Some(&json!(1)));
     }
-    for event in &events[5..7] {
+    for event in &events[6..8] {
         assert_eq!(event.attributes.get(attrs::TURN), Some(&json!(2)));
     }
     // Run-level provenance rides the start-run event.

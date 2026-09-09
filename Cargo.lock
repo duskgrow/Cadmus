@@ -242,6 +242,7 @@ dependencies = [
  "cadmus-core",
  "cadmus-llm-openai",
  "cadmus-memory",
+ "cadmus-transport",
  "clap",
  "grep-regex",
  "grep-searcher",
@@ -308,6 +309,17 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "cadmus-transport"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cadmus-contract",
+ "cadmus-core",
+ "insta",
+ "tokio",
 ]
 
 [[package]]

@@ -21,6 +21,7 @@ cadmus-contract.workspace = true
 cadmus-core.workspace = true
 cadmus-llm-openai.workspace = true
 cadmus-memory.workspace = true
+cadmus-transport.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 thiserror.workspace = true

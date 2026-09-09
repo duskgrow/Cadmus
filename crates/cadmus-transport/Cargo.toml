@@ -1,0 +1,24 @@
+[package]
+name = "cadmus-transport"
+description = "Client-protocol transports (ADR-0002/0013): the in-process broadcaster and command channel first; stdio NDJSON and the phase-5 socket later"
+# Internal crates carry no semver burden. To publish later, switch to
+# version.workspace = true, drop publish = false, and register the package
+# in release-plz.toml — see CONTRIBUTING.md.
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cadmus-contract.workspace = true
+cadmus-core.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -106,6 +106,15 @@ fn posture_of(name: &str) -> Posture {
             dev_internal: Some(&["cadmus-contract"]),
             third_party: ThirdParty::Forbid(&["genai", "reqwest", "rusqlite", "tokio"]),
         },
+        // The in-process client-protocol endpoint (ADR-0002/0013): attach
+        // folds traces and aggregates deltas, so the crate links the core's
+        // semantics — a frontend crate never does (ADR-0013 item 9's
+        // forbidden edge applies when one lands).
+        "cadmus-transport" => Posture {
+            deps_internal: Some(&["cadmus-contract", "cadmus-core"]),
+            dev_internal: Some(&["cadmus-contract", "cadmus-core"]),
+            third_party: ThirdParty::Any,
+        },
         // Zero third-party dependencies, by policy.
         "xtask" => Posture {
             deps_internal: Some(&[]),
@@ -122,7 +131,13 @@ fn posture_of(name: &str) -> Posture {
 
 /// Postures pinned by name — renaming or removing one of these crates must
 /// fail loudly instead of silently dropping its rule to the adapter default.
-const NAMED_POSTURES: [&str; 4] = ["cadmus", "cadmus-contract", "cadmus-core", "xtask"];
+const NAMED_POSTURES: [&str; 5] = [
+    "cadmus",
+    "cadmus-contract",
+    "cadmus-core",
+    "cadmus-transport",
+    "xtask",
+];
 
 /// Entry point: `arch-test` (no arguments).
 pub fn run(args: &[String]) -> ExitCode {
@@ -396,6 +411,7 @@ mod tests {
             "cadmus-contract",
             "cadmus-core",
             "cadmus-llm-openai",
+            "cadmus-transport",
         ]
         .map(str::to_owned)
         .into()
@@ -420,7 +436,13 @@ mod tests {
         // a duplicated or dropped call in the tree scan itself.
         let root = std::env::temp_dir().join(format!("cadmus-arch-tree-{}", std::process::id()));
         let crates = root.join("crates");
-        for name in ["cadmus", "cadmus-contract", "cadmus-core", "xtask"] {
+        for name in [
+            "cadmus",
+            "cadmus-contract",
+            "cadmus-core",
+            "cadmus-transport",
+            "xtask",
+        ] {
             std::fs::create_dir_all(crates.join(name)).expect("mkdir");
             std::fs::write(
                 crates.join(name).join("Cargo.toml"),
@@ -462,6 +484,7 @@ mod tests {
         assert!(failures.iter().any(|f| f.contains("crates/xtask: gone")));
         assert!(!failures.iter().any(|f| f.contains("cadmus-memory")));
         assert!(!failures.iter().any(|f| f.contains("cadmus-core")));
+        assert!(!failures.iter().any(|f| f.contains("cadmus-transport")));
     }
 
     #[test]

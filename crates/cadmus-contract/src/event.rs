@@ -13,13 +13,19 @@
 //! silently drop an event kind it does not understand. A torn trailing line
 //! after a crash is dropped by the log reader (`cadmus-memory`), not parsed
 //! here.
+//!
+//! Terms: a **run** is one execution of the agent loop and one trace (one
+//! log file); an **(assistant) turn** is one request/response round within
+//! it ([`attrs::TURN`]); a **session** is the user-facing conversation —
+//! one trace per session (ADR-0005's 2026-09-09 amendment), with
+//! resume/fork chaining new traces onto the lineage (ADR-0009).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ChatRequest, FinishReason, Message, ToolCall, Usage};
+use crate::{Approval, ChatRequest, FinishReason, Message, ToolCall, Usage};
 
 /// One event in a trajectory log: a fixed envelope with the per-kind payload
 /// flattened under the `kind` tag.
@@ -28,6 +34,14 @@ pub struct Event {
     /// Unique within the trace (`e7`); minted from the injected
     /// [`IdSequence`].
     pub id: String,
+    /// The run's totally ordered, monotonic position (ADR-0013 item 4): the
+    /// same [`IdSequence`] counter the `id` carries, kept numeric so clients
+    /// can compare positions without parsing (`drop positions ≤ as_of_seq`).
+    /// Live-stream deltas draw from the same sequence, so one order spans
+    /// both channels. Zero in pre-protocol logs (serde default) — attach
+    /// backfills them from the fold, never from a position.
+    #[serde(default)]
+    pub seq: u64,
     pub trace_id: String,
     /// The span this event belongs to (`s3`). An event is a point in time;
     /// a span is an interval — never itself a line in the log — delimited by
@@ -64,6 +78,7 @@ pub struct Event {
 impl Event {
     #[must_use]
     pub fn new(
+        seq: u64,
         id: String,
         trace_id: String,
         span_id: String,
@@ -73,6 +88,7 @@ impl Event {
     ) -> Self {
         Self {
             id,
+            seq,
             trace_id,
             span_id,
             parent_span_id,
@@ -159,15 +175,72 @@ pub struct ScoreEvent {
 
 /// A validated client operation (ADR-0002's command seam): the only event
 /// kind a client may ever produce — the control plane's trust boundary is
-/// this type. Phase 1 knows only the run-opening command; approvals,
-/// messages and steering arrive with the interactive clients (ADR-0011)
-/// and later the remote control plane.
+/// this type. Runtime commands (everything but the run-opening `StartRun`)
+/// carry a client-minted `command_id` so retries over a lossy transport
+/// apply idempotently: the owning node dedupes on it before applying.
+///
+/// Recording rule (ADR-0013, 2026-09 amendment): a command is appended at
+/// the moment it takes effect in the run's state order — never at receipt —
+/// so the replayed history equals the live history (ADR-0005's fold
+/// invariant). A command still buffered when the run ends is never logged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     /// Opens a run: the base request the loop started from. Replaying a log
     /// re-seeds the message history from here, so a trace is self-sufficient.
     StartRun { base: Box<ChatRequest> },
+    /// Resolves one approval request (ADR-0008 item 4 / ADR-0013 item 6):
+    /// one decision per presented call, in call order. A short reply denies
+    /// the remainder — unanswered is deny; extra decisions are ignored. A
+    /// resolve naming an unknown or settled `request_id` is dropped, making
+    /// retries and late answers safe. Recording the resolution is what makes
+    /// the approval itself part of the trajectory.
+    ResolveApproval {
+        command_id: String,
+        request_id: String,
+        decisions: Vec<Approval>,
+    },
+    /// User text entering a running session (ADR-0011 item 3's two
+    /// granularities): the loop appends it as a user message at the next
+    /// request boundary, or — [`SteerMode::Queue`] — only when the run would
+    /// otherwise finish. Never the in-flight request: a streamed turn's
+    /// request bytes are already on the wire.
+    Steer {
+        command_id: String,
+        text: String,
+        mode: SteerMode,
+    },
+    /// Stops the run, preserving completed work (ADR-0011 item 3's Esc):
+    /// honored at turn boundaries, at chunk granularity mid-stream (a stalled
+    /// stream still ends on the provider's own error path) and during an
+    /// approval wait; tool dispatches in flight settle first. The partial
+    /// turn and the terminal record carry [`error_kinds::INTERRUPTED`].
+    Interrupt { command_id: String },
+}
+
+impl Command {
+    /// The client-minted idempotency key; `None` for the run-opening
+    /// command (a trace opens exactly once, so it needs no dedupe key).
+    #[must_use]
+    pub fn command_id(&self) -> Option<&str> {
+        match self {
+            Self::StartRun { .. } => None,
+            Self::ResolveApproval { command_id, .. }
+            | Self::Steer { command_id, .. }
+            | Self::Interrupt { command_id } => Some(command_id),
+        }
+    }
+}
+
+/// Steering granularity (ADR-0011 item 3, Codex's Tab/Enter split).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteerMode {
+    /// Hold until the run would otherwise finish, then continue it with this
+    /// text — the user's "one more thing".
+    Queue,
+    /// Land at the next request boundary, even mid-task.
+    Inject,
 }
 
 /// Outcome classification of a completed event (span-level, OTel-shaped).
@@ -242,6 +315,9 @@ pub mod error_kinds {
     /// (ADR-0008 item 4); the rejection text rides the tool result, so
     /// reflection can tell a reviewer's no from a tool failure.
     pub const APPROVAL_REJECTED: &str = "approval_rejected";
+    /// The client interrupted the run (ADR-0011 item 3's Esc); the partial
+    /// turn and the terminal record carry it.
+    pub const INTERRUPTED: &str = "interrupted";
 }
 
 /// Well-known attribute-bag keys — the SSOT of the long-lived `selfevol.*`

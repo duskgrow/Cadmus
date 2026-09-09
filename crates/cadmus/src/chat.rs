@@ -1,6 +1,9 @@
 //! One-shot chat: prompt in, final answer out, with the coding tools wired.
-//! Streaming deltas are assembled in `cadmus-core`; phase 0 prints the final
-//! turn (incremental terminal rendering is a later polish).
+//! Streaming deltas are assembled in `cadmus-core`; the final turn prints
+//! (incremental terminal rendering is the TUI's, ADR-0011 item 3), while
+//! turn and tool activity render live to stderr from the live stream
+//! (`render`) — headless chat is the client protocol's degenerate client
+//! (attach at position 0, ADR-0013).
 //!
 //! Headless chat is unattended: mutation calls pass the approval gate and
 //! are denied unless the operator passed `--yes` (ADR-0008 item 4, ADR-0011
@@ -13,13 +16,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cadmus_contract::{ChatRequest, ContentPart, Message, Usage};
-use cadmus_core::{AgentLoop, RunOutcome, Telemetry};
+use cadmus_core::{AgentLoop, ClientProtocol, RunOutcome, Telemetry};
 use cadmus_memory::JsonlLog;
+use cadmus_transport::{Broadcaster, command_channel};
 
-use crate::approval::Headless;
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
 use crate::tools::coding_tools;
-use crate::{Error, provider};
+use crate::{Error, approval, provider, render};
 
 /// Everything a chat run needs, resolved from CLI arguments. The provider
 /// name is passed through verbatim — the vendor registry lives in
@@ -85,18 +88,39 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         .expect("minted id resolves to a shard path");
     tracing::info!(trace_id, path = %trace_path.display(), "recording trajectory");
     let root = std::env::current_dir().map_err(Error::Workdir)?;
+    // The client protocol (ADR-0013): the renderer subscribes to the live
+    // stream; approvals auto-resolve through the command channel per the
+    // `--yes` policy — the same two ports the TUI will drive. The attach
+    // happens before the loop exists, so position 0 holds by construction
+    // (an attach inside the renderer thread would race the run's first
+    // events into the discarded baseline).
+    let broadcaster = Arc::new(Broadcaster::new());
+    let first = broadcaster.attach();
+    let (sender, commands) = command_channel();
+    let resolver = approval::AutoResolver::new(
+        broadcaster.clone(),
+        sender,
+        approval::unattended(config.approve_writes),
+    );
+    let renderer = render::spawn(broadcaster.clone(), first);
     let agent = AgentLoop::new(
         Arc::new(provider),
         coding_tools(root),
-        Arc::new(Headless {
-            yes: config.approve_writes,
-        }),
+        ClientProtocol {
+            live: Arc::new(resolver),
+            commands: Arc::new(commands),
+        },
         config.max_turns,
         telemetry,
     );
-    let outcome = agent
+    let result = agent
         .run(&ChatRequest::user_text(prompt, config.max_tokens))
-        .await?;
+        .await;
+    // The tail must end even on the paths without a terminal record (a
+    // failed trajectory log aborts mid-run): close, then join the renderer.
+    broadcaster.close();
+    let _ = renderer.join();
+    let outcome = result?;
     Ok(into_result(outcome, trace_id, trace_path))
 }
 

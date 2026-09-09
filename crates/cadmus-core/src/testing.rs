@@ -1,25 +1,18 @@
-//! Test doubles for the telemetry ports — the determinism seam for loop and
-//! trajectory tests. These are fakes (behavior, not mocks): the recording
-//! sink keeps every event so tests assert on the trajectory itself.
+//! Test doubles for the telemetry and client-protocol ports — the
+//! determinism seam for loop and trajectory tests. These are fakes
+//! (behavior, not mocks): the recording sinks keep everything so tests
+//! assert on the trajectory and the live stream themselves.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cadmus_contract::{Approval, Clock, Event, EventSink, IdSequence, LogError, ToolCall};
+use cadmus_contract::{
+    Approval, Clock, Command, CommandSource, Event, EventSink, IdSequence, LiveItem, LiveKind,
+    LiveSink, LogError, ToolCall,
+};
 
-use crate::Telemetry;
-
-/// Approves every gated call: the test-double half of the approval gate,
-/// for loop/trajectory tests that exercise dispatch, not the gate.
-pub struct ApproveAll;
-
-#[async_trait::async_trait]
-impl crate::Approver for ApproveAll {
-    async fn approve(&self, calls: &[ToolCall]) -> Vec<Approval> {
-        calls.iter().map(|_| Approval::Approved).collect()
-    }
-}
+use crate::{ClientProtocol, Telemetry};
 
 /// An in-memory [`EventSink`] keeping every appended event, in order.
 #[derive(Default)]
@@ -42,6 +35,160 @@ impl EventSink for RecordingSink {
             .push(event.clone());
         Ok(())
     }
+}
+
+/// An in-memory [`LiveSink`] keeping every published item, in order.
+#[derive(Default)]
+pub struct RecordingLive {
+    items: Mutex<Vec<LiveItem>>,
+}
+
+impl RecordingLive {
+    /// A snapshot of everything published so far.
+    pub fn items(&self) -> Vec<LiveItem> {
+        self.items.lock().expect("recording live poisoned").clone()
+    }
+}
+
+impl LiveSink for RecordingLive {
+    fn publish(&self, item: &LiveItem) {
+        self.items
+            .lock()
+            .expect("recording live poisoned")
+            .push(item.clone());
+    }
+}
+
+/// An in-memory [`CommandSource`] over a std channel: scripts pre-seed it,
+/// or a fake tool pushes mid-run through the sender handle (a tool firing
+/// during dispatch is how tests plant a command at a precise loop point).
+///
+/// `recv` blocks the calling thread on an empty queue: scripts must queue
+/// every resolve before the loop's gate can await it — a missing script
+/// hangs the test, which is honest: a real run would wait for its client
+/// too.
+pub struct ChannelCommands {
+    rx: Mutex<std::sync::mpsc::Receiver<Command>>,
+}
+
+impl ChannelCommands {
+    /// The source plus its send half (cloneable, for injection fakes).
+    #[must_use]
+    pub fn new() -> (Self, std::sync::mpsc::Sender<Command>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Self { rx: Mutex::new(rx) }, tx)
+    }
+
+    /// A source pre-loaded with commands, in order.
+    #[must_use]
+    pub fn scripted(commands: impl IntoIterator<Item = Command>) -> Self {
+        let (source, tx) = Self::new();
+        for command in commands {
+            tx.send(command).expect("scripted channel open");
+        }
+        source
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandSource for ChannelCommands {
+    async fn recv(&self) -> Option<Command> {
+        self.rx.lock().expect("commands poisoned").recv().ok()
+    }
+
+    fn poll(&self) -> Option<Command> {
+        self.rx.lock().expect("commands poisoned").try_recv().ok()
+    }
+}
+
+/// The test-double approval client (ADR-0013 item 6): reacts to approval
+/// requests on the live stream by sending the resolve command through the
+/// command channel — the one path every client shares. Wraps an inner sink
+/// so published items still reach it. Deliberately duplicated in spirit by
+/// the binary's wiring (`cadmus::approval`); the test double must not leak
+/// into the binary through this module.
+pub struct AutoResolver<P> {
+    inner: Arc<dyn LiveSink>,
+    commands: std::sync::mpsc::Sender<Command>,
+    policy: P,
+    command_seq: AtomicU64,
+}
+
+impl<P> AutoResolver<P> {
+    #[must_use]
+    pub fn new(
+        inner: Arc<dyn LiveSink>,
+        commands: std::sync::mpsc::Sender<Command>,
+        policy: P,
+    ) -> Self {
+        Self {
+            inner,
+            commands,
+            policy,
+            command_seq: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<P> LiveSink for AutoResolver<P>
+where
+    P: Fn(&[ToolCall]) -> Vec<Approval> + Send + Sync,
+{
+    fn publish(&self, item: &LiveItem) {
+        if let LiveKind::ApprovalRequested {
+            request_id, calls, ..
+        } = &item.kind
+        {
+            let command = Command::ResolveApproval {
+                command_id: format!(
+                    "cmd-test-{}",
+                    self.command_seq.fetch_add(1, Ordering::Relaxed)
+                ),
+                request_id: request_id.clone(),
+                decisions: (self.policy)(calls),
+            };
+            // A closed channel means the run is ending; the gate denies on
+            // a closed channel, so dropping the send is safe.
+            let _ = self.commands.send(command);
+        }
+        self.inner.publish(item);
+    }
+}
+
+/// A client protocol over test doubles: approval requests resolve through
+/// the command channel per `policy`, and every published item lands in the
+/// returned recording sink. The sender half comes back for tests that
+/// inject commands mid-run.
+#[must_use]
+pub fn protocol_with<P>(
+    policy: P,
+) -> (
+    ClientProtocol,
+    Arc<RecordingLive>,
+    std::sync::mpsc::Sender<Command>,
+)
+where
+    P: Fn(&[ToolCall]) -> Vec<Approval> + Send + Sync + 'static,
+{
+    let live = Arc::new(RecordingLive::default());
+    let (commands, sender) = ChannelCommands::new();
+    let resolver = AutoResolver::new(live.clone(), sender.clone(), policy);
+    (
+        ClientProtocol {
+            live: Arc::new(resolver),
+            commands: Arc::new(commands),
+        },
+        live,
+        sender,
+    )
+}
+
+/// The common case: every gated call approved, nothing else scripted.
+#[must_use]
+pub fn auto_approving() -> (ClientProtocol, Arc<RecordingLive>) {
+    let (protocol, live, _sender) =
+        protocol_with(|calls| calls.iter().map(|_| Approval::Approved).collect());
+    (protocol, live)
 }
 
 /// A stopped clock: every timestamp is the same fixed instant.

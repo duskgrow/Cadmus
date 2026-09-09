@@ -8,6 +8,7 @@ mod chat;
 mod error;
 mod eval;
 pub mod provider;
+mod render;
 mod telemetry;
 mod tools;
 

@@ -4,6 +4,7 @@ expression: sample_event()
 ---
 {
   "id": "e3",
+  "seq": 3,
   "trace_id": "tr_01JZKX9A",
   "span_id": "s2",
   "parent_span_id": "s1",

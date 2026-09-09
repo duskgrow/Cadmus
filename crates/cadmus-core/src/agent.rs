@@ -1,15 +1,15 @@
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cadmus_contract::{
-    Approval, ChatRequest, Clock, Command, Event, EventError, EventKind, EventSink, FinishReason,
-    IdSequence, Message, ModelError, Provider, ToolCall, ToolSpec, TurnOutcome, attrs, error_kinds,
+    Approval, ChatRequest, Clock, Command, CommandSource, Event, EventError, EventKind, EventSink,
+    FinishReason, IdSequence, LiveItem, LiveKind, LiveSink, Message, ModelError, Provider,
+    SteerMode, ToolCall, ToolSpec, TurnOutcome, attrs, error_kinds,
 };
 use serde_json::Value;
 use tokio_stream::StreamExt;
 
-use crate::approval::Approver;
 use crate::{AssembledTurn, MessageAssembler};
 
 /// A tool the agent may call. rmcp servers are wrapped into this trait at the
@@ -66,6 +66,17 @@ pub struct ToolError {
     pub message: String,
 }
 
+/// The client-protocol bundle injected into the loop (ADR-0013): `live` is
+/// the ephemeral downstream (deltas, span boundaries via recorded events,
+/// approval requests), `commands` the only upstream (resolve, steer,
+/// interrupt). A client is an event subscriber plus a command producer —
+/// the loop never talks to a client any other way, so the TUI, headless
+/// clients and phase 5's remote attach all share this one path.
+pub struct ClientProtocol {
+    pub live: Arc<dyn LiveSink>,
+    pub commands: Arc<dyn CommandSource>,
+}
+
 /// The outcome of a completed run.
 #[derive(Debug)]
 pub struct RunOutcome {
@@ -107,18 +118,48 @@ pub enum AgentError {
     /// (pitfall #5). Cascade routing is phase 3; for now it surfaces.
     #[error("empty assistant turn (finish: {finish:?})")]
     EmptyTurn { finish: FinishReason },
+    /// The client interrupted the run (ADR-0011 item 3's Esc): completed
+    /// work is preserved — the partial turn and the terminal record carry
+    /// [`error_kinds::INTERRUPTED`].
+    #[error("run interrupted by the client")]
+    Interrupted,
 }
 
 /// The minimal agent loop: stream → assemble → dispatch tool calls → repeat,
-/// appending each step to the trace log. Everything external is injected
-/// (provider, tools, telemetry, limits) — no hidden time, randomness or IO.
+/// appending each step to the trace log and publishing it to the live
+/// stream. Everything external is injected (provider, tools, protocol,
+/// telemetry, limits) — no hidden time, randomness or IO.
 pub struct AgentLoop {
     provider: Arc<dyn Provider>,
     tools: HashMap<String, Arc<dyn AgentTool>>,
-    approver: Arc<dyn Approver>,
+    protocol: ClientProtocol,
     specs: Vec<ToolSpec>,
     max_turns: usize,
     telemetry: Telemetry,
+    inbox: Mutex<Inbox>,
+}
+
+/// Commands received ahead of their application point, classified on
+/// receipt (ADR-0013 item 6: the loop applies each command in receipt
+/// order at its defined point). The kinds split because their application
+/// points and consumption rules differ — a resolve is matched to its gate
+/// by request id, steers partition by mode and apply in receipt order, an
+/// interrupt is first-wins state — one shared queue would make every
+/// consumer re-scan and re-order. Client command ids are deduped at the
+/// gate of every path — a retried submission applies exactly once.
+#[derive(Default)]
+struct Inbox {
+    /// Resolves awaiting their gate (a resolve can only name an already
+    /// published request, so a stale one sits harmlessly until the run
+    /// ends — late answers and retries are safe by construction).
+    resolves: VecDeque<Command>,
+    /// Steers not yet applied; they land as user messages at the next
+    /// application point, in receipt order.
+    steers: Vec<Command>,
+    /// The first pending interrupt (a second one changes nothing).
+    interrupt: Option<Command>,
+    /// Client command ids already seen — the idempotent-retry seam.
+    seen: HashSet<String>,
 }
 
 impl AgentLoop {
@@ -126,7 +167,7 @@ impl AgentLoop {
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn AgentTool>>,
-        approver: Arc<dyn Approver>,
+        protocol: ClientProtocol,
         max_turns: usize,
         telemetry: Telemetry,
     ) -> Self {
@@ -144,10 +185,11 @@ impl AgentLoop {
         Self {
             provider,
             tools,
-            approver,
+            protocol,
             specs,
             max_turns,
             telemetry,
+            inbox: Mutex::new(Inbox::default()),
         }
     }
 
@@ -178,6 +220,12 @@ impl AgentLoop {
         self.emit(&start_run)?;
 
         for turn in 1..=self.max_turns {
+            // Turn-boundary command application: a pending interrupt ends
+            // the run here; buffered steers land as user messages before
+            // this turn's request. Commands are recorded at application —
+            // never at receipt — so the replayed history equals the live
+            // one (ADR-0005's fold invariant).
+            self.drain_boundary(&mut messages, &root_span, turn)?;
             let turn_span = self.next_span();
             // Per-turn clone is deliberate: the provider borrows an immutable
             // request while the loop owns the growing history. The cost is a
@@ -194,6 +242,16 @@ impl AgentLoop {
             messages.push(turn_result.message.clone());
             let calls: Vec<_> = turn_result.message.tool_calls().cloned().collect();
             if calls.is_empty() {
+                self.poll_incoming();
+                // An interrupt at the exact finish line is moot — the run
+                // completed first; it is dropped unrecorded (it had no
+                // effect). A queued steer instead continues the run: the
+                // user's "one more thing" (ADR-0011 item 3).
+                if self.take_interrupt().is_none()
+                    && self.apply_steers(&mut messages, &root_span, turn + 1, true)? > 0
+                {
+                    continue;
+                }
                 self.finish_with(&root_span, turn, None)?;
                 return Ok(RunOutcome {
                     messages,
@@ -218,11 +276,14 @@ impl AgentLoop {
     }
 
     /// Streams one assistant turn, assembles it and appends the
-    /// `llm_response` event. Failure paths record what there is to record
-    /// before returning:
+    /// `llm_response` event. Every chunk is also published to the live
+    /// stream before the assembler folds it (ADR-0013 item 2), so a
+    /// subscriber's own fold reconciles exactly with the recorded turn.
+    /// Failure paths record what there is to record before returning:
     /// a call-level error leaves the turn span unclosed (no response ever
     /// arrived), a mid-stream error records the partial turn errored, an
-    /// empty turn records its classification.
+    /// empty turn records its classification, an interrupt records the
+    /// command and then the truncated turn.
     async fn assistant_turn(
         &self,
         request: &ChatRequest,
@@ -238,20 +299,37 @@ impl AgentLoop {
             }
         };
         let mut assembler = MessageAssembler::new();
-        // User-facing streaming is deliberately deferred: the seam is an
-        // observer sink right before `push` (TextDelta / ToolCallStarted /
-        // TurnCompleted events), leaving the assembler the single owner of
-        // aggregation semantics.
         let mut stream_error = None;
+        let mut interrupt = None;
         while let Some(item) = stream.next().await {
             match item {
-                Ok(chunk) => assembler.push(chunk),
+                Ok(chunk) => {
+                    self.publish(LiveKind::AssistantDelta {
+                        turn: u32::try_from(turn).unwrap_or(u32::MAX),
+                        chunk: chunk.clone(),
+                    });
+                    assembler.push(chunk);
+                    // The mid-stream steering/interrupt seam, chunk
+                    // granular: commands apply between chunks. A stalled
+                    // stream still ends on the provider's own error path —
+                    // core stays runtime-free, so there is no `select!`
+                    // against the command channel here.
+                    self.poll_incoming();
+                    if let Some(command) = self.take_interrupt() {
+                        interrupt = Some(command);
+                        break;
+                    }
+                }
                 Err(error) => {
                     stream_error = Some(error);
                     break;
                 }
             }
         }
+        // Dropping the stream mid-flight is the cancellation semantic (the
+        // provider port's contract); a broken-off stream never poisons the
+        // provider.
+        drop(stream);
         let turn_result = assembler.complete();
 
         if let Some(error) = stream_error {
@@ -261,6 +339,19 @@ impl AgentLoop {
             self.emit(&response)?;
             self.finish_with(root_span, turn - 1, Some(model_event_error(&error)))?;
             return Err(AgentError::Provider(error));
+        }
+
+        if let Some(command) = interrupt {
+            // The command lands before its consequences: interrupt, then
+            // the truncated turn it caused, then the terminal record.
+            self.record_command(command, root_span, turn)?;
+            let detail = interrupted_detail();
+            let response = self
+                .turn_event(turn_span, root_span, turn, response_kind(&turn_result))
+                .errored(detail.clone());
+            self.emit(&response)?;
+            self.finish_with(root_span, turn - 1, Some(detail))?;
+            return Err(AgentError::Interrupted);
         }
 
         if turn_result.outcome == TurnOutcome::Empty {
@@ -293,11 +384,11 @@ impl AgentLoop {
     /// trajectory reads the same either way.
     ///
     /// Batch approval precedes any execution (ADR-0008 item 4 amendment):
-    /// the turn's gated (mutation) calls are presented to the client policy
-    /// together, each approved or rejected independently, so a decision can
-    /// depend on the batch's contents but never on another gated call's
-    /// result. A rejected call never invokes; its rejection lands as an
-    /// `is_error` tool result in call order.
+    /// the turn's gated (mutation) calls are presented together, each
+    /// approved or rejected independently, so a decision can depend on the
+    /// batch's contents but never on another gated call's result. A
+    /// rejected call never invokes; its rejection lands as an `is_error`
+    /// tool result in call order.
     ///
     /// All-or-nothing, not segment mixing: the model emits a turn's calls as
     /// one unordered batch — it cannot know which tools are parallel-safe,
@@ -316,7 +407,7 @@ impl AgentLoop {
         root_span: &str,
         turn: usize,
     ) -> Result<(), AgentError> {
-        let denied = self.gate(&calls).await;
+        let denied = self.gate(&calls, root_span, turn).await?;
         let all_safe = calls.iter().all(|call| self.is_parallel_safe(call));
         if all_safe {
             self.dispatch_parallel(&calls, &denied, messages, root_span, turn)
@@ -330,13 +421,37 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Presents the batch's gated calls to the client policy as one batch
-    /// and returns the rejections keyed by batch position. Position, not
-    /// call id: ids are provider-supplied wire data with no uniqueness
-    /// check, and a duplicated id must never let one call's rejection deny
-    /// its same-id sibling. A short decision reply denies the remainder:
-    /// unanswered is deny (ADR-0008 item 4); extra decisions are ignored.
-    async fn gate(&self, calls: &[ToolCall]) -> HashMap<usize, Option<String>> {
+    /// Presents the batch's gated calls as one approval request on the live
+    /// stream and awaits the matching `resolve_approval` command (ADR-0008
+    /// item 4 / ADR-0013 item 6): one path for local and future remote
+    /// clients alike, and the resolution itself enters the trajectory as a
+    /// command event — the approval is recorded, not just its effects.
+    ///
+    /// Returns the rejections keyed by batch position. Position, not call
+    /// id: ids are provider-supplied wire data with no uniqueness check,
+    /// and a duplicated id must never let one call's rejection deny its
+    /// same-id sibling. A short decision reply denies the remainder:
+    /// unanswered is deny (ADR-0008 item 4); extra decisions are ignored;
+    /// a resolve naming another request is dropped. A command channel that
+    /// closes mid-wait denies the whole batch.
+    ///
+    /// An interrupt during the wait ends the run before any gated call
+    /// executes: no call or result events land — the trajectory shows the
+    /// model's intent (the recorded response), then the interrupt. Steers
+    /// received during the wait classify into the inbox and apply at the
+    /// next boundary.
+    ///
+    /// Timeout: a client that waits on a human pairs its wait with its own
+    /// deny timeout (ADR-0008 item 4: human-in-the-loop always pairs a
+    /// timeout with the conservative default). The in-process policies
+    /// answer synchronously, so no core-side timeout mechanism exists yet
+    /// — it lands with the first waiting client (the TUI).
+    async fn gate(
+        &self,
+        calls: &[ToolCall],
+        root_span: &str,
+        turn: usize,
+    ) -> Result<HashMap<usize, Option<String>>, AgentError> {
         let mut positions = Vec::new();
         let mut batch = Vec::new();
         for (position, call) in calls.iter().enumerate() {
@@ -347,9 +462,34 @@ impl AgentLoop {
         }
         let mut denied = HashMap::new();
         if batch.is_empty() {
-            return denied;
+            return Ok(denied);
         }
-        let decisions = self.approver.approve(&batch).await;
+
+        let request_id = format!("ap{}", self.telemetry.ids.next());
+        self.publish(LiveKind::ApprovalRequested {
+            request_id: request_id.clone(),
+            turn: u32::try_from(turn).unwrap_or(u32::MAX),
+            calls: batch,
+        });
+
+        let command = loop {
+            if let Some(command) = self.take_resolve(&request_id) {
+                break command;
+            }
+            if let Some(command) = self.take_interrupt() {
+                self.record_command(command, root_span, turn)?;
+                self.finish_with(root_span, turn, Some(interrupted_detail()))?;
+                return Err(AgentError::Interrupted);
+            }
+            match self.protocol.commands.recv().await {
+                Some(command) => self.note(command),
+                None => return Ok(deny_all(&positions)),
+            }
+        };
+        let Command::ResolveApproval { decisions, .. } = command.clone() else {
+            unreachable!("take_resolve returns only matching resolves");
+        };
+        self.record_command(command, root_span, turn)?;
         for (index, position) in positions.iter().enumerate() {
             match decisions.get(index) {
                 Some(Approval::Approved) => {}
@@ -361,7 +501,7 @@ impl AgentLoop {
                 }
             }
         }
-        denied
+        Ok(denied)
     }
 
     /// A call is gated when its tool declares a mutation effect (ADR-0008
@@ -536,13 +676,156 @@ impl AgentLoop {
     }
 
     fn emit(&self, event: &Event) -> Result<(), AgentError> {
+        // Append first, publish second: a log failure aborts the run before
+        // any subscriber sees the event — clients never observe state the
+        // trajectory does not have. The republished copy is what makes the
+        // log's contents observable on the live stream (ADR-0013 item 2).
         self.telemetry.sink.append(event)?;
+        self.protocol.live.publish(&LiveItem {
+            seq: event.seq,
+            trace_id: event.trace_id.clone(),
+            kind: LiveKind::Recorded {
+                event: Box::new(event.clone()),
+            },
+        });
         Ok(())
     }
 
+    /// Publishes one ephemeral live item, stamped from the same sequence
+    /// the durable events draw from (one total order across both channels,
+    /// ADR-0013 item 4). Best-effort: a lagging subscriber is told to
+    /// re-sync, never awaited.
+    fn publish(&self, kind: LiveKind) {
+        self.protocol.live.publish(&LiveItem {
+            seq: self.telemetry.ids.next(),
+            trace_id: self.telemetry.trace_id.clone(),
+            kind,
+        });
+    }
+
+    /// Appends a client command to the trace — off the run root, stamped
+    /// with the turn it takes effect in — and publishes it live through
+    /// [`Self::emit`].
+    fn record_command(
+        &self,
+        command: Command,
+        root_span: &str,
+        turn: usize,
+    ) -> Result<(), AgentError> {
+        let span = self.next_span();
+        self.emit(&self.turn_event(&span, root_span, turn, EventKind::Command(command)))
+    }
+
+    /// Classifies one received command into the inbox, deduped by the
+    /// client-minted command id (ADR-0002's idempotent-retry seam). A
+    /// `start_run` mid-run is a protocol anomaly: ignored.
+    fn note(&self, command: Command) {
+        let mut inbox = self.inbox.lock().expect("inbox poisoned");
+        if let Some(id) = command.command_id()
+            && !inbox.seen.insert(id.to_string())
+        {
+            return;
+        }
+        match command {
+            Command::ResolveApproval { .. } => inbox.resolves.push_back(command),
+            Command::Steer { .. } => inbox.steers.push(command),
+            Command::Interrupt { .. } => {
+                if inbox.interrupt.is_none() {
+                    inbox.interrupt = Some(command);
+                }
+            }
+            Command::StartRun { .. } => {}
+        }
+    }
+
+    /// Non-blocking drain of the command source into the inbox — the
+    /// mid-stream and boundary seam.
+    fn poll_incoming(&self) {
+        while let Some(command) = self.protocol.commands.poll() {
+            self.note(command);
+        }
+    }
+
+    /// The pending interrupt, taken once (the caller applies it).
+    fn take_interrupt(&self) -> Option<Command> {
+        self.inbox.lock().expect("inbox poisoned").interrupt.take()
+    }
+
+    /// The resolve naming `request_id`, taken out of the inbox once.
+    fn take_resolve(&self, request_id: &str) -> Option<Command> {
+        let mut inbox = self.inbox.lock().expect("inbox poisoned");
+        let position = inbox.resolves.iter().position(|command| {
+            matches!(
+                command,
+                Command::ResolveApproval { request_id: rid, .. } if rid == request_id
+            )
+        })?;
+        inbox.resolves.remove(position)
+    }
+
+    /// Turn-boundary application point: a pending interrupt ends the run
+    /// (command recorded, then the terminal record); otherwise every
+    /// buffered inject-mode steer lands as a user message ahead of this
+    /// turn's request. Queue-mode steers stay buffered — they apply only
+    /// when the run would otherwise finish.
+    fn drain_boundary(
+        &self,
+        messages: &mut Vec<Message>,
+        root_span: &str,
+        turn: usize,
+    ) -> Result<(), AgentError> {
+        self.poll_incoming();
+        if let Some(command) = self.take_interrupt() {
+            self.record_command(command, root_span, turn)?;
+            self.finish_with(root_span, turn - 1, Some(interrupted_detail()))?;
+            return Err(AgentError::Interrupted);
+        }
+        self.apply_steers(messages, root_span, turn, false)?;
+        Ok(())
+    }
+
+    /// Appends buffered steers as user messages, recording each command at
+    /// its application point (the fold-invariant recording rule). Inject
+    /// steers apply at any boundary; queue steers only when
+    /// `include_queued` (the run's would-be finish line). Returns how many
+    /// steers were applied.
+    fn apply_steers(
+        &self,
+        messages: &mut Vec<Message>,
+        root_span: &str,
+        turn: usize,
+        include_queued: bool,
+    ) -> Result<usize, AgentError> {
+        let steers: Vec<Command> = {
+            let mut inbox = self.inbox.lock().expect("inbox poisoned");
+            let (apply, keep) = std::mem::take(&mut inbox.steers).into_iter().partition(
+                |command| {
+                    include_queued
+                        || matches!(command, Command::Steer { mode, .. } if *mode == SteerMode::Inject)
+                },
+            );
+            inbox.steers = keep;
+            apply
+        };
+        let count = steers.len();
+        for command in steers {
+            let Command::Steer { text, .. } = &command else {
+                continue;
+            };
+            messages.push(Message::user(text.clone()));
+            self.record_command(command, root_span, turn)?;
+        }
+        Ok(count)
+    }
+
     fn envelope(&self, span: &str, parent: Option<&str>, kind: EventKind) -> Event {
+        // The id and the seq mint from one counter (`e7` ↔ seq 7), so the
+        // log identity and the client-protocol position never disagree
+        // (ADR-0013 item 4's total order, one sequence for both channels).
+        let seq = self.telemetry.ids.next();
         Event::new(
-            format!("e{}", self.telemetry.ids.next()),
+            seq,
+            format!("e{seq}"),
             self.telemetry.trace_id.clone(),
             span.to_string(),
             parent.map(str::to_string),
@@ -592,6 +875,22 @@ fn tool_failure(err: &ToolError) -> (Value, Option<EventError>) {
             message: err.to_string(),
         }),
     )
+}
+
+/// Every gated position denied without a reason — the gate's conservative
+/// default when the command channel closes mid-wait (unanswered is deny,
+/// ADR-0008 item 4).
+fn deny_all(positions: &[usize]) -> HashMap<usize, Option<String>> {
+    positions.iter().map(|position| (*position, None)).collect()
+}
+
+/// The structured detail of an interrupted run, carried by the truncated
+/// turn and the terminal record alike.
+fn interrupted_detail() -> EventError {
+    EventError {
+        kind: error_kinds::INTERRUPTED.into(),
+        message: AgentError::Interrupted.to_string(),
+    }
 }
 
 /// A rejected call's outcome: the denial is model feedback (ADR-0008 item 4
@@ -1041,12 +1340,12 @@ mod tests {
         let (telemetry, sink) = test_telemetry("tr-test");
         (
             // The dispatch-path tests exercise the loop, not the gate: their
-            // fakes stay on the fail-safe `Effect::Mutation` default and
-            // pass the gate unconditionally.
+            // fakes stay on the fail-safe `Effect::Mutation` default and the
+            // test client auto-approves through the command path.
             AgentLoop::new(
                 Arc::new(provider),
                 tools,
-                Arc::new(crate::testing::ApproveAll),
+                crate::testing::auto_approving().0,
                 max_turns,
                 telemetry,
             ),
@@ -1054,37 +1353,87 @@ mod tests {
         )
     }
 
-    /// Records every batch it is shown onto a log shared with the tools (so
-    /// approve-vs-execute ordering is observable) and answers with exactly
-    /// `decisions` — shorter or longer than the batch on purpose, to pin the
-    /// conservative-mismatch behavior.
-    struct ScriptedApprover {
-        log: Arc<tokio::sync::Mutex<Vec<String>>>,
-        decisions: Vec<Approval>,
+    /// A gate harness whose client resolves every request through the
+    /// command channel with `policy`'s fixed decisions — shorter or longer
+    /// than the batch on purpose, to pin the conservative-mismatch
+    /// behavior. The recording live sink comes back: the protocol's items
+    /// are the ordering evidence (request before any execution).
+    fn gate_harness(
+        tools: Vec<Arc<dyn AgentTool>>,
+        policy: impl Fn(&[ToolCall]) -> Vec<Approval> + Send + Sync + 'static,
+    ) -> (
+        AgentLoop,
+        Arc<crate::testing::RecordingSink>,
+        Arc<crate::testing::RecordingLive>,
+    ) {
+        let provider = ReplayProvider::new([]).with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let (protocol, live, _sender) = crate::testing::protocol_with(policy);
+        (
+            AgentLoop::new(Arc::new(provider), tools, protocol, 8, telemetry),
+            sink,
+            live,
+        )
     }
 
-    #[async_trait]
-    impl Approver for ScriptedApprover {
-        async fn approve(&self, calls: &[ToolCall]) -> Vec<Approval> {
-            let mut log = self.log.lock().await;
-            for call in calls {
-                log.push(format!("approve {}", call.name));
+    /// Sends one scripted command the first time a live item matches — how
+    /// a test plants a command at a precise protocol point, the way a real
+    /// client reacts to the stream (ADR-0013 item 6).
+    struct SendOnMatch<P> {
+        inner: Arc<crate::testing::RecordingLive>,
+        commands: std::sync::mpsc::Sender<Command>,
+        predicate: P,
+        command: Mutex<Option<Command>>,
+    }
+
+    impl<P> SendOnMatch<P> {
+        fn new(
+            inner: Arc<crate::testing::RecordingLive>,
+            commands: std::sync::mpsc::Sender<Command>,
+            predicate: P,
+            command: Command,
+        ) -> Self {
+            Self {
+                inner,
+                commands,
+                predicate,
+                command: Mutex::new(Some(command)),
             }
-            drop(log);
-            self.decisions.clone()
         }
     }
 
-    fn gate_harness(
-        tools: Vec<Arc<dyn AgentTool>>,
-        approver: ScriptedApprover,
-    ) -> (AgentLoop, Arc<crate::testing::RecordingSink>) {
-        let provider = ReplayProvider::new([]).with_capabilities(test_capabilities());
-        let (telemetry, sink) = test_telemetry("tr-test");
-        (
-            AgentLoop::new(Arc::new(provider), tools, Arc::new(approver), 8, telemetry),
-            sink,
-        )
+    impl<P> LiveSink for SendOnMatch<P>
+    where
+        P: Fn(&LiveItem) -> bool + Send + Sync,
+    {
+        fn publish(&self, item: &LiveItem) {
+            self.inner.publish(item);
+            if (self.predicate)(item)
+                && let Some(command) = self.command.lock().expect("send-on poisoned").take()
+            {
+                let _ = self.commands.send(command);
+            }
+        }
+    }
+
+    /// The position of the first approval request and of the first recorded
+    /// tool call in the live stream — the approve-before-execute evidence.
+    fn request_and_call_positions(live: &crate::testing::RecordingLive) -> (usize, usize) {
+        let items = live.items();
+        let request = items
+            .iter()
+            .position(|item| matches!(item.kind, LiveKind::ApprovalRequested { .. }))
+            .expect("an approval request was published");
+        let call = items
+            .iter()
+            .position(|item| {
+                matches!(
+                    &item.kind,
+                    LiveKind::Recorded { event } if matches!(event.kind, EventKind::ToolCall { .. })
+                )
+            })
+            .expect("a tool call was recorded");
+        (request, call)
     }
 
     #[tokio::test]
@@ -1106,18 +1455,18 @@ mod tests {
         ])
         .with_capabilities(test_capabilities());
         let (telemetry, sink) = test_telemetry("tr-test");
+        let (protocol, live, _sender) = crate::testing::protocol_with(|_| {
+            vec![Approval::Rejected {
+                comment: Some("not today".into()),
+            }]
+        });
         let agent = AgentLoop::new(
             Arc::new(provider),
             vec![Arc::new(StepTool {
                 name: "step",
                 log: log.clone(),
             })],
-            Arc::new(ScriptedApprover {
-                log: log.clone(),
-                decisions: vec![Approval::Rejected {
-                    comment: Some("not today".into()),
-                }],
-            }),
+            protocol,
             8,
             telemetry,
         );
@@ -1127,8 +1476,41 @@ mod tests {
             .await
             .expect("run");
 
-        // The gate answered, the tool never invoked.
-        assert_eq!(log.lock().await.as_slice(), ["approve step"]);
+        // The tool never invoked.
+        assert!(
+            log.lock().await.is_empty(),
+            "a rejected call must not execute"
+        );
+        // The request preceded any execution, and the resolution entered the
+        // trajectory as a command event — the approval itself is recorded,
+        // not just its effect (ADR-0008 item 4 / ADR-0013 item 6).
+        let (request, call) = request_and_call_positions(&live);
+        assert!(request < call, "the gate opens before any execution");
+        let events = sink.events();
+        let resolve = events.iter().find_map(|event| match &event.kind {
+            EventKind::Command(Command::ResolveApproval {
+                request_id,
+                decisions,
+                ..
+            }) => Some((request_id.clone(), decisions.clone())),
+            _ => None,
+        });
+        let Some((request_id, decisions)) = resolve else {
+            panic!("the resolve command must be recorded");
+        };
+        assert!(
+            live.items().iter().any(|item| matches!(
+                &item.kind,
+                LiveKind::ApprovalRequested { request_id: rid, .. } if *rid == request_id
+            )),
+            "the recorded resolve answers the published request"
+        );
+        assert_eq!(
+            decisions,
+            vec![Approval::Rejected {
+                comment: Some("not today".into())
+            }]
+        );
         // The rejection is model feedback: an is_error tool result naming
         // the reason, never a silent skip.
         let message = &outcome.messages[2];
@@ -1140,13 +1522,9 @@ mod tests {
         );
         // The trajectory carries the routing kind, so reflection can tell a
         // reviewer's no from a tool failure.
-        let tool_result = sink
-            .events()
-            .into_iter()
-            .find_map(|event| match event.kind {
-                EventKind::ToolResult { .. } => Some(event),
-                _ => None,
-            })
+        let tool_result = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::ToolResult { .. }))
             .expect("a tool_result event");
         assert_eq!(tool_result.status, Status::Error);
         assert_eq!(
@@ -1155,7 +1533,6 @@ mod tests {
         );
         // The fold mirrors the loop: replayed state matches live state, and
         // the rejected call's span stays paired (its tool_call event exists).
-        let events = sink.events();
         assert!(
             events.iter().any(
                 |event| matches!(&event.kind, EventKind::ToolCall { call } if call.id == "c1")
@@ -1169,7 +1546,7 @@ mod tests {
     #[tokio::test]
     async fn batch_approval_decides_each_call_independently_before_any_execution() {
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let (agent, _sink) = gate_harness(
+        let (agent, _sink, live) = gate_harness(
             vec![
                 Arc::new(StepTool {
                     name: "w1",
@@ -1180,14 +1557,13 @@ mod tests {
                     log: log.clone(),
                 }),
             ],
-            ScriptedApprover {
-                log: log.clone(),
-                decisions: vec![
+            |_| {
+                vec![
                     Approval::Approved,
                     Approval::Rejected {
                         comment: Some("no".into()),
                     },
-                ],
+                ]
             },
         );
         let mut messages = Vec::new();
@@ -1202,13 +1578,16 @@ mod tests {
             .await
             .expect("dispatch");
 
-        // Both calls were presented as one batch before either executed.
-        assert_eq!(
-            log.lock().await.as_slice(),
-            ["approve w1", "approve w2", "start w1", "end w1"]
-        );
+        // The batch was presented before either call executed.
+        let (request, call) = request_and_call_positions(&live);
+        assert!(request < call, "the gate opens before any execution");
         // Approved executed, rejected denied — and the results keep call
         // order.
+        assert_eq!(
+            log.lock().await.as_slice(),
+            ["start w1", "end w1"],
+            "the rejected call never runs"
+        );
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tool_call_id.as_deref(), Some("c1"));
         assert!(!messages[0].is_error);
@@ -1222,7 +1601,7 @@ mod tests {
         // Both fakes are parallel-safe and (by the fail-safe default)
         // mutations, so the batch takes the parallel schedule with c1
         // pre-settled by the gate.
-        let (agent, sink) = gate_harness(
+        let (agent, sink, live) = gate_harness(
             vec![
                 Arc::new(YieldTool {
                     name: "m1",
@@ -1233,14 +1612,13 @@ mod tests {
                     log: log.clone(),
                 }),
             ],
-            ScriptedApprover {
-                log: log.clone(),
-                decisions: vec![
+            |_| {
+                vec![
                     Approval::Rejected {
                         comment: Some("no".into()),
                     },
                     Approval::Approved,
-                ],
+                ]
             },
         );
         let mut messages = Vec::new();
@@ -1255,10 +1633,9 @@ mod tests {
             .await
             .expect("dispatch");
 
-        assert_eq!(
-            log.lock().await.as_slice(),
-            ["approve m1", "approve m2", "start m2", "end m2"]
-        );
+        let (request, call) = request_and_call_positions(&live);
+        assert!(request < call, "the gate opens before any execution");
+        assert_eq!(log.lock().await.as_slice(), ["start m2", "end m2"]);
         assert_eq!(messages.len(), 2);
         assert!(messages[0].is_error);
         assert_eq!(messages[0].tool_call_id.as_deref(), Some("c1"));
@@ -1282,7 +1659,7 @@ mod tests {
     #[tokio::test]
     async fn a_short_decision_reply_denies_the_remainder() {
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let (agent, _sink) = gate_harness(
+        let (agent, _sink, _live) = gate_harness(
             vec![
                 Arc::new(StepTool {
                     name: "w1",
@@ -1293,12 +1670,9 @@ mod tests {
                     log: log.clone(),
                 }),
             ],
-            ScriptedApprover {
-                log: log.clone(),
-                // One decision for two gated calls: the unanswered second
-                // call must deny, not execute (ADR-0008 item 4).
-                decisions: vec![Approval::Approved],
-            },
+            // One decision for two gated calls: the unanswered second call
+            // must deny, not execute (ADR-0008 item 4).
+            |_| vec![Approval::Approved],
         );
         let mut messages = Vec::new();
 
@@ -1346,14 +1720,10 @@ mod tests {
 
     #[tokio::test]
     async fn perception_calls_never_reach_the_gate() {
-        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let (agent, _sink) = gate_harness(
+        let (agent, _sink, live) = gate_harness(
             vec![Arc::new(PeekTool)],
-            ScriptedApprover {
-                log: log.clone(),
-                // Any answer would do — the gate must not ask at all.
-                decisions: vec![],
-            },
+            // Any answer would do — the gate must not ask at all.
+            |_| panic!("the gate was shown a perception call"),
         );
         let mut messages = Vec::new();
 
@@ -1363,8 +1733,11 @@ mod tests {
             .expect("dispatch");
 
         assert!(
-            log.lock().await.is_empty(),
-            "the gate was shown a perception call"
+            !live
+                .items()
+                .iter()
+                .any(|item| matches!(item.kind, LiveKind::ApprovalRequested { .. })),
+            "a perception call must not open an approval request"
         );
         assert!(!messages[0].is_error);
     }
@@ -1372,21 +1745,20 @@ mod tests {
     #[tokio::test]
     async fn extra_decisions_are_ignored() {
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let (agent, _sink) = gate_harness(
+        let (agent, _sink, _live) = gate_harness(
             vec![Arc::new(StepTool {
                 name: "w1",
                 log: log.clone(),
             })],
-            ScriptedApprover {
-                log: log.clone(),
-                // More decisions than gated calls: the stray rejection must
-                // not leak into the batch.
-                decisions: vec![
+            // More decisions than gated calls: the stray rejection must not
+            // leak into the batch.
+            |_| {
+                vec![
                     Approval::Approved,
                     Approval::Rejected {
                         comment: Some("stray".into()),
                     },
-                ],
+                ]
             },
         );
         let mut messages = Vec::new();
@@ -1398,7 +1770,8 @@ mod tests {
 
         assert_eq!(
             log.lock().await.as_slice(),
-            ["approve w1", "start w1", "end w1"]
+            ["start w1", "end w1"],
+            "the approved call runs"
         );
         assert!(!messages[0].is_error);
     }
@@ -1607,9 +1980,527 @@ mod tests {
         assert_eq!(finished.status, Status::Error);
     }
 
+    // ---- ADR-0013 item 6: commands over the protocol ----
+
+    /// A resolve naming an unknown request is dropped — late answers and
+    /// retries can never resurrect a settled (or never-open) gate.
+    #[tokio::test]
+    async fn a_resolve_for_an_unknown_request_is_dropped() {
+        let provider = ReplayProvider::new([
+            tool_call_script("c1", "{\"text\":\"ping\"}"),
+            text_script("done"),
+        ])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let (protocol, _live, sender) = crate::testing::protocol_with(|calls| {
+            calls.iter().map(|_| Approval::Approved).collect()
+        });
+        // A bogus resolve sits in the channel before the real request exists.
+        sender
+            .send(Command::ResolveApproval {
+                command_id: "cmd-bogus".into(),
+                request_id: "ap-bogus".into(),
+                decisions: vec![Approval::Rejected {
+                    comment: Some("stray".into()),
+                }],
+            })
+            .expect("channel open");
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![Arc::new(EchoTool)],
+            protocol,
+            8,
+            telemetry,
+        );
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("the stray resolve must not poison the run");
+
+        assert_eq!(outcome.turns, 2);
+        let resolves: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::Command(Command::ResolveApproval { .. })
+                )
+            })
+            .collect();
+        assert_eq!(
+            resolves.len(),
+            1,
+            "only the real request's resolve is recorded"
+        );
+        assert!(!outcome.messages[2].is_error, "the call was approved");
+    }
+
+    /// ADR-0002's idempotent-retry seam: a retried submission (same client
+    /// command id) applies exactly once — one message, one command event.
+    #[tokio::test]
+    async fn a_retried_command_applies_exactly_once() {
+        let provider = ReplayProvider::new([text_script("one"), text_script("two")])
+            .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let (protocol, _live, sender) = crate::testing::protocol_with(|calls| {
+            calls.iter().map(|_| Approval::Approved).collect()
+        });
+        let steer = || Command::Steer {
+            command_id: "cmd-dup".into(),
+            text: "one more thing".into(),
+            mode: SteerMode::Queue,
+        };
+        sender.send(steer()).expect("first send");
+        sender.send(steer()).expect("the retry");
+        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("the queued steer extends the run");
+
+        let steered: Vec<_> = outcome
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(&message.content[0], cadmus_contract::ContentPart::Text { text } if text == "one more thing")
+            })
+            .collect();
+        assert_eq!(steered.len(), 1, "the retry deduped on the command id");
+        let steers = sink
+            .events()
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::Command(Command::Steer { .. })))
+            .count();
+        assert_eq!(steers, 1, "one command event, not two");
+    }
+
+    /// An inject steer sent while turn 1 streams lands at the next request
+    /// boundary — never in the in-flight request — recorded at application
+    /// so the fold matches the live history.
+    #[tokio::test]
+    async fn an_injected_steer_lands_at_the_next_request_boundary() {
+        let provider = ReplayProvider::new([
+            tool_call_script("c1", "{\"text\":\"ping\"}"),
+            text_script("pong received"),
+        ])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let recording = std::sync::Arc::new(crate::testing::RecordingLive::default());
+        let (commands, sender) = crate::testing::ChannelCommands::new();
+        // React to turn 1's recorded response exactly like a watching
+        // client: the steer enters the channel while the tools dispatch.
+        // The auto-resolver sits behind it so the gate still resolves.
+        let reactive = SendOnMatch::new(
+            recording,
+            sender.clone(),
+            |item: &LiveItem| {
+                matches!(
+                    &item.kind,
+                    LiveKind::Recorded { event }
+                        if matches!(event.kind, EventKind::LlmResponse { .. })
+                )
+            },
+            Command::Steer {
+                command_id: "cmd-steer".into(),
+                text: "also say thanks".into(),
+                mode: SteerMode::Inject,
+            },
+        );
+        let resolver = crate::testing::AutoResolver::new(
+            std::sync::Arc::new(reactive),
+            sender,
+            |calls: &[ToolCall]| calls.iter().map(|_| Approval::Approved).collect(),
+        );
+        let protocol = ClientProtocol {
+            live: std::sync::Arc::new(resolver),
+            commands: std::sync::Arc::new(commands),
+        };
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![Arc::new(EchoTool)],
+            protocol,
+            8,
+            telemetry,
+        );
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("say ping", 1_024))
+            .await
+            .expect("run");
+
+        // user → assistant(call) → tool(result) → user(steer) → assistant(text)
+        let roles: Vec<_> = outcome
+            .messages
+            .iter()
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                cadmus_contract::Role::User,
+                cadmus_contract::Role::Assistant,
+                cadmus_contract::Role::Tool,
+                cadmus_contract::Role::User,
+                cadmus_contract::Role::Assistant,
+            ]
+        );
+        assert!(
+            matches!(&outcome.messages[3].content[0], cadmus_contract::ContentPart::Text { text } if text == "also say thanks")
+        );
+        // The command is recorded at application — between the tool result
+        // and turn 2's request — so the replayed history equals the live one.
+        let events = sink.events();
+        let state = crate::replay_trace(&events);
+        assert_eq!(state.messages, outcome.messages);
+    }
+
+    /// A queue steer holds past mid-task boundaries and fires only at the
+    /// would-be finish line: the run continues instead of ending.
+    #[tokio::test]
+    async fn a_queued_steer_continues_a_run_that_would_finish() {
+        let provider = ReplayProvider::new([text_script("first"), text_script("second")])
+            .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let (protocol, _live, sender) = crate::testing::protocol_with(|calls| {
+            calls.iter().map(|_| Approval::Approved).collect()
+        });
+        sender
+            .send(Command::Steer {
+                command_id: "cmd-queue".into(),
+                text: "one more thing".into(),
+                mode: SteerMode::Queue,
+            })
+            .expect("send");
+        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("the queued steer extends the run");
+
+        assert_eq!(outcome.turns, 2);
+        // user → assistant("first") → user(steer) → assistant("second")
+        assert!(
+            matches!(&outcome.messages[1].content[0], cadmus_contract::ContentPart::Text { text } if text == "first")
+        );
+        assert!(
+            matches!(&outcome.messages[2].content[0], cadmus_contract::ContentPart::Text { text } if text == "one more thing")
+        );
+        let state = crate::replay_trace(&sink.events());
+        assert_eq!(state.messages, outcome.messages);
+    }
+
+    /// Mid-stream interrupt (chunk granularity): the stream is dropped, the
+    /// partial turn is recorded errored, and the terminal record carries the
+    /// interruption — completed work is preserved.
+    #[tokio::test]
+    async fn an_interrupt_mid_stream_truncates_the_turn() {
+        let provider = ReplayProvider::new([ReplayProvider::script(vec![
+            StreamChunk::TextDelta("par".into()),
+            StreamChunk::TextDelta("tial".into()),
+            StreamChunk::Done {
+                finish: FinishReason::Stop,
+            },
+        ])])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let live = std::sync::Arc::new(crate::testing::RecordingLive::default());
+        let (commands, sender) = crate::testing::ChannelCommands::new();
+        let live = std::sync::Arc::new(SendOnMatch::new(
+            live,
+            sender,
+            |item: &LiveItem| matches!(item.kind, LiveKind::AssistantDelta { .. }),
+            Command::Interrupt {
+                command_id: "cmd-esc".into(),
+            },
+        ));
+        let protocol = ClientProtocol {
+            live,
+            commands: std::sync::Arc::new(commands),
+        };
+        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+
+        let err = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect_err("the run is interrupted");
+        assert!(matches!(err, AgentError::Interrupted));
+
+        let events = sink.events();
+        let kinds: Vec<&str> = events.iter().map(kind_name).collect();
+        assert_eq!(
+            kinds,
+            [
+                "start_run",
+                "llm_request",
+                "interrupt",
+                "llm_response",
+                "run_finished"
+            ],
+            "the command lands before its consequences"
+        );
+        let response = &events[3];
+        assert_eq!(response.status, Status::Error);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.kind.as_str()),
+            Some(error_kinds::INTERRUPTED)
+        );
+        let EventKind::LlmResponse { message, .. } = &response.kind else {
+            panic!("expected llm_response");
+        };
+        assert!(matches!(
+            message.content.first(),
+            Some(cadmus_contract::ContentPart::Text { text }) if text == "par"
+        ));
+        let finished = events.last().expect("terminal record");
+        assert_eq!(finished.status, Status::Error);
+        assert!(matches!(finished.kind, EventKind::RunFinished { turns: 0 }));
+    }
+
+    /// Interrupt during the approval wait: the gated calls never execute —
+    /// no call or result events land — and the terminal record follows the
+    /// interrupt command.
+    #[tokio::test]
+    async fn an_interrupt_during_the_approval_wait_ends_the_run() {
+        let provider = ReplayProvider::new([ReplayProvider::script(vec![
+            StreamChunk::ToolCallStart {
+                index: 0,
+                id: "c1".into(),
+                name: "step".into(),
+            },
+            StreamChunk::ToolCallEnd { index: 0 },
+            StreamChunk::Done {
+                finish: FinishReason::ToolCalls,
+            },
+        ])])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let live = std::sync::Arc::new(crate::testing::RecordingLive::default());
+        let (commands, sender) = crate::testing::ChannelCommands::new();
+        // The interrupt arrives while the gate awaits its resolve: sent when
+        // the approval request publishes.
+        let live = std::sync::Arc::new(SendOnMatch::new(
+            live,
+            sender,
+            |item: &LiveItem| matches!(item.kind, LiveKind::ApprovalRequested { .. }),
+            Command::Interrupt {
+                command_id: "cmd-esc".into(),
+            },
+        ));
+        let protocol = ClientProtocol {
+            live,
+            commands: std::sync::Arc::new(commands),
+        };
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![Arc::new(StepTool {
+                name: "step",
+                log: log.clone(),
+            })],
+            protocol,
+            8,
+            telemetry,
+        );
+
+        let err = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect_err("interrupted at the gate");
+        assert!(matches!(err, AgentError::Interrupted));
+        assert!(log.lock().await.is_empty(), "the gated call never executed");
+        let events = sink.events();
+        let kinds: Vec<&str> = events.iter().map(kind_name).collect();
+        assert_eq!(
+            kinds,
+            [
+                "start_run",
+                "llm_request",
+                "llm_response",
+                "interrupt",
+                "run_finished"
+            ]
+        );
+        let finished = events.last().expect("terminal record");
+        assert_eq!(finished.status, Status::Error);
+        assert!(matches!(finished.kind, EventKind::RunFinished { turns: 1 }));
+    }
+
+    /// An interrupt planted during turn 1's tool dispatch lands at the next
+    /// boundary: dispatches in flight settle first (their results are
+    /// recorded), then the run ends.
+    #[tokio::test]
+    async fn an_interrupt_at_the_boundary_lets_dispatch_settle() {
+        /// Sends the interrupt when invoked — a mid-run client action at a
+        /// deterministic point.
+        struct InterruptTool(std::sync::mpsc::Sender<Command>);
+
+        #[async_trait]
+        impl AgentTool for InterruptTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "echo".into(),
+                    description: "echoes and interrupts".into(),
+                    parameters: json!({"type": "object"}),
+                }
+            }
+
+            async fn invoke(&self, arguments: Value) -> Result<Value, ToolError> {
+                let _ = self.0.send(Command::Interrupt {
+                    command_id: "cmd-esc".into(),
+                });
+                Ok(arguments)
+            }
+        }
+
+        let provider = ReplayProvider::new([
+            tool_call_script("c1", "{\"text\":\"x\"}"),
+            text_script("never reached"),
+        ])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let (protocol, _live, sender) = crate::testing::protocol_with(|calls| {
+            calls.iter().map(|_| Approval::Approved).collect()
+        });
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![Arc::new(InterruptTool(sender))],
+            protocol,
+            8,
+            telemetry,
+        );
+
+        let err = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect_err("interrupted at the boundary");
+        assert!(matches!(err, AgentError::Interrupted));
+        let events = sink.events();
+        // The tool result landed before the run ended.
+        assert!(events.iter().any(
+            |event| matches!(&event.kind, EventKind::ToolResult { call_id, .. } if call_id == "c1")
+        ));
+        let finished = events.last().expect("terminal record");
+        assert!(matches!(finished.kind, EventKind::RunFinished { turns: 1 }));
+        assert_eq!(finished.status, Status::Error);
+    }
+
+    /// A command channel with no clients left (the sender is gone) mid-gate
+    /// denies the batch — unanswered is deny (ADR-0008 item 4).
+    #[tokio::test]
+    async fn a_closed_command_channel_denies_the_gate() {
+        let provider = ReplayProvider::new([
+            tool_call_script("c1", "{\"text\":\"x\"}"),
+            text_script("skipped"),
+        ])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let (commands, sender) = crate::testing::ChannelCommands::new();
+        drop(sender);
+        let protocol = ClientProtocol {
+            live: std::sync::Arc::new(crate::testing::RecordingLive::default()),
+            commands: std::sync::Arc::new(commands),
+        };
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![Arc::new(EchoTool)],
+            protocol,
+            8,
+            telemetry,
+        );
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("the run adapts to the denial");
+        assert!(outcome.messages[2].is_error);
+        assert!(matches!(
+            &outcome.messages[2].content[0],
+            cadmus_contract::ContentPart::Text { text } if text.contains("no reason given")
+        ));
+        let result = sink
+            .events()
+            .into_iter()
+            .find(|event| matches!(event.kind, EventKind::ToolResult { .. }))
+            .expect("a tool_result event");
+        assert_eq!(
+            result.error.as_ref().map(|error| error.kind.as_str()),
+            Some(error_kinds::APPROVAL_REJECTED)
+        );
+    }
+
+    /// The finish-line race: a run that completed before the interrupt was
+    /// applied finishes clean — the moot interrupt is dropped unrecorded,
+    /// and a queued steer it arrived with is canceled with it (the user
+    /// stopped the run; "one more thing" dies with it).
+    #[tokio::test]
+    async fn an_interrupt_at_the_finish_line_is_moot() {
+        let provider =
+            ReplayProvider::new([text_script("one")]).with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let recording = std::sync::Arc::new(crate::testing::RecordingLive::default());
+        let (commands, sender) = crate::testing::ChannelCommands::new();
+        sender
+            .send(Command::Steer {
+                command_id: "cmd-queue".into(),
+                text: "one more thing".into(),
+                mode: SteerMode::Queue,
+            })
+            .expect("the queued steer");
+        // The interrupt lands when turn 1's response is recorded — after
+        // the stream, before the finish check: the exact finish-line window.
+        let reactive = SendOnMatch::new(
+            recording,
+            sender,
+            |item: &LiveItem| {
+                matches!(
+                    &item.kind,
+                    LiveKind::Recorded { event }
+                        if matches!(event.kind, EventKind::LlmResponse { .. })
+                )
+            },
+            Command::Interrupt {
+                command_id: "cmd-esc".into(),
+            },
+        );
+        let protocol = ClientProtocol {
+            live: std::sync::Arc::new(reactive),
+            commands: std::sync::Arc::new(commands),
+        };
+        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("the run finished before the interrupt applied");
+
+        assert_eq!(outcome.turns, 1);
+        assert_eq!(
+            outcome.messages.len(),
+            2,
+            "the queued steer was canceled with the interrupt"
+        );
+        let events = sink.events();
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.kind,
+                EventKind::Command(Command::Steer { .. } | Command::Interrupt { .. })
+            )),
+            "moot commands are never recorded"
+        );
+        let finished = events.last().expect("terminal record");
+        assert_eq!(finished.status, Status::Ok);
+    }
+
     fn kind_name(event: &Event) -> &'static str {
         match &event.kind {
             EventKind::Command(Command::StartRun { .. }) => "start_run",
+            EventKind::Command(Command::ResolveApproval { .. }) => "resolve_approval",
+            EventKind::Command(Command::Steer { .. }) => "steer",
+            EventKind::Command(Command::Interrupt { .. }) => "interrupt",
             EventKind::LlmRequest => "llm_request",
             EventKind::LlmResponse { .. } => "llm_response",
             EventKind::ToolCall { .. } => "tool_call",

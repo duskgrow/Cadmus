@@ -53,6 +53,7 @@ cadmus-contract = { path = "crates/cadmus-contract" }
 cadmus-core = { path = "crates/cadmus-core" }
 cadmus-llm-openai = { path = "crates/cadmus-llm-openai" }
 cadmus-memory = { path = "crates/cadmus-memory" }
+cadmus-transport = { path = "crates/cadmus-transport" }
 
 # ---- dev dependencies ----
 insta = "1"

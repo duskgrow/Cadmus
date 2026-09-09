@@ -126,3 +126,36 @@ From the phase-1 tool-surface rework's review discussions (maintainer,
   unanalyzed additions). The loop's schedule is all-or-nothing per turn
   batch — the model emits calls as one unordered batch, so intra-batch
   order carries no information worth a finer schedule.
+
+## Amendment — 2026-09-09 (evening): per-call approval resolution, approve-and-execute-immediately
+
+From the maintainer's review of the client-protocol implementation (same
+day, refining the batch-approval amendment above). The batch amendment made
+one `resolve_approval` command settle the whole batch before anything
+executes. Interactive use wants finer granularity: decisions arrive per
+call and possibly out of order — approve the third of five and it runs at
+once; approve the second later and it runs then.
+
+Decided (lands with the TUI, its interactive consumer; the in-process
+auto-resolvers keep answering the whole batch at once, the degenerate
+case):
+
+- The batch is still **presented** together (the dialog shows a turn's
+  gated calls as one batch — batch _contents_ inform every decision), but
+  **settlement is per call**: `ResolveApproval` gains per-call addressing
+  (an additive contract change), the gate keeps the request open until
+  every gated call is decided, and each decision executes or denies its
+  call on arrival. Each resolve command is recorded as its own command
+  event (the audit granularity improves).
+- Tool results still land in **call order** (ordered reassembly — the
+  `dispatch_parallel` outcomes pattern), so the trajectory reads
+  schedule-independent and the prompt prefix stays decision-order-stable.
+- The batch amendment's accepted trade-off inverts: a decision may then
+  observe a sibling call's _result_ (results no longer all postdate the
+  approval moment). For an interactive user that is the point; the
+  fail-safe direction is untouched — any call may still be denied at any
+  time, undecided calls at the wait's timeout deny, and a closed command
+  channel denies the remainder.
+- Unchanged: the L0–L3 tiers, rejection-as-tool-result (denied calls enter
+  the trajectory as `approval_rejected` feedback), and the batch
+  presentation itself.

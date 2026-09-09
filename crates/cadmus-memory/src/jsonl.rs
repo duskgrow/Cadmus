@@ -205,6 +205,7 @@ mod tests {
 
     fn event(trace_id: &str, id: u32) -> cadmus_contract::Event {
         cadmus_contract::Event::new(
+            u64::from(id),
             format!("e{id}"),
             trace_id.into(),
             "s1".into(),
