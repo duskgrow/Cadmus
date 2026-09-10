@@ -310,6 +310,7 @@ dependencies = [
  "cadmus-contract",
  "serde_json",
  "thiserror",
+ "time",
  "tracing",
 ]
 

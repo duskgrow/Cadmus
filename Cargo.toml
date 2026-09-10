@@ -47,9 +47,9 @@ grep-searcher = { version = "0.1", default-features = false }
 # unified diffs in the write tools' results (execution-verification feedback,
 # ADR-0008 item 5); insta's snapshot diffing already trusts this crate
 similar = { version = "2", default-features = false, features = ["text"] }
-# civil date/time rendering (the trailer's local-time clock): std offers
-# epoch arithmetic only — no calendar, no timezone database. Never hand-roll
-# calendar math (maintainer, 2026-09-10).
+# civil date/time rendering (the trailer's local-time clock) and the trace-id
+# shard date: std offers epoch arithmetic only — no civil calendar, no
+# timezone database. Never hand-roll calendar math (maintainer, 2026-09-10).
 time = { version = "0.3", default-features = false }
 
 # ---- internal crates ----

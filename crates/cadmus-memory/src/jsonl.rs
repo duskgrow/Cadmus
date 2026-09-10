@@ -26,6 +26,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use cadmus_contract::{ArtifactSink, Event, EventSink, LogError};
+use time::OffsetDateTime;
 
 pub struct JsonlLog {
     /// `roots[0]` is the write root; the rest are read-only tiering roots.
@@ -184,9 +185,18 @@ pub enum ReadError {
 #[must_use]
 pub fn mint_trace_id(nanos_since_epoch: u128, pid: u32, sequence: u64) -> String {
     let millis = u64::try_from(nanos_since_epoch / 1_000_000).unwrap_or(u64::MAX);
-    let days = i64::try_from(millis / 86_400_000).unwrap_or(i64::MAX);
-    let (year, month, day) = civil_from_days(days);
-    format!("tr-{year:04}{month:02}{day:02}-{nanos_since_epoch:016x}-{pid:x}-{sequence}")
+    let secs = i64::try_from(millis / 1_000).unwrap_or(i64::MAX);
+    // The shard date is UTC (machine-facing, AGENTS.md Style); the calendar
+    // is the time crate's — calendar math is never hand-rolled.
+    let date = OffsetDateTime::from_unix_timestamp(secs)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .date();
+    format!(
+        "tr-{:04}{:02}{:02}-{nanos_since_epoch:016x}-{pid:x}-{sequence}",
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+    )
 }
 
 /// `tr-YYYYMMDD-…` → `YYYY/MM/DD/<trace-id>.jsonl`. Loose day validation
@@ -216,31 +226,6 @@ fn shard_rel_path(trace_id: &str) -> Option<PathBuf> {
         &date[4..6],
         &date[6..8],
     )))
-}
-
-/// Days since the Unix epoch → civil date (Howard Hinnant's algorithm;
-/// std-only date math, no calendar dependency).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = u64::try_from(shifted.rem_euclid(146_097)).expect("euclid rem is unsigned");
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = i64::try_from(year_of_era).expect("year_of_era is small") + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    (
-        year,
-        u32::try_from(month).expect("month in 1..=12"),
-        u32::try_from(day).expect("day in 1..=31"),
-    )
 }
 
 #[cfg(test)]
@@ -294,6 +279,14 @@ mod tests {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
             "filesystem-safe charset, got {first}"
         );
+        // Leap day lands right (2024-02-29T12:34:56Z): the calendar is the
+        // time crate's; this pins that OUR conversion feeds it correctly.
+        let leap = mint_trace_id(1_709_210_096_000_000_000, 42, 0);
+        assert!(leap.starts_with("tr-20240229-"), "got {leap}");
+        // Absurd input degrades to the epoch date instead of panicking or
+        // emitting an unshardable segment (the time crate's range ceiling).
+        let absurd = mint_trace_id(u128::MAX, 42, 0);
+        assert!(absurd.starts_with("tr-19700101-"), "got {absurd}");
     }
 
     #[test]
@@ -467,13 +460,5 @@ mod tests {
         log.append(&event("tr-20260904-new", 1))
             .expect("append new");
         assert!(hot.0.join("new/2026/09/04/tr-20260904-new.jsonl").is_file());
-    }
-
-    #[test]
-    fn civil_dates_match_known_epochs() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_699), (2026, 9, 3));
-        // Leap day: 2024-02-29 = day 19782.
-        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
     }
 }
