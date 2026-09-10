@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use cadmus_contract::{
     FoldedRef, InstructionFile, Message, PrefixRecord, SkillSummary, TodoItem, TodoStatus, ToolSpec,
 };
+use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 
 /// The v1 system prompt (ADR-0007 item 1(a)). Two content rules, both
 /// load-bearing: it never names an individual tool — tool-specific guidance
@@ -221,28 +223,22 @@ pub fn format_injected(file: &InstructionFile) -> String {
     )
 }
 
-/// Epoch millis → `YYYY-MM-DDTHH:MM:SSZ`. Hand-rolled civil math under the
-/// zero-new-dependency policy (std has no calendar): Howard Hinnant's
-/// civil-from-days algorithm, UTC only — std exposes no local timezone, and
-/// an unambiguous `Z` beats a wrong local guess. `z` is always positive
-/// (u64 epoch days + the era offset), so Hinnant's negative-era adjustment
-/// is deliberately omitted.
-fn civil_utc(epoch_ms: u64) -> String {
-    let ms = i64::try_from(epoch_ms).unwrap_or(i64::MAX);
-    let days = ms.div_euclid(86_400_000);
-    let secs = ms.rem_euclid(86_400_000) / 1000;
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + i64::from(month <= 2);
-    let (hh, mm, ss) = (secs / 3600, secs / 60 % 60, secs % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
+/// Epoch millis rendered as RFC 3339 at the given offset
+/// (`2026-09-03T08:42:17+08:00`). Calendar math and offset handling come
+/// from the `time` crate — never hand-roll calendars (maintainer,
+/// 2026-09-10); the offset arrives as data (the wiring layer owns the tzdb
+/// lookup), keeping this pure.
+fn format_local(epoch_ms: u64, offset: UtcOffset) -> String {
+    let secs = i64::try_from(epoch_ms / 1000).unwrap_or(i64::MAX);
+    OffsetDateTime::from_unix_timestamp(secs)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset)
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| {
+            OffsetDateTime::UNIX_EPOCH
+                .format(&Rfc3339)
+                .expect("epoch formats")
+        })
 }
 
 /// Run-elapsed render, bounded to the largest two units (`17s`, `42m17s`,
@@ -270,6 +266,10 @@ pub struct TrailerView<'a> {
     /// the per-turn `LlmRequest` event, so replay never re-derives them.
     pub now_ms: u64,
     pub run_start_ms: u64,
+    /// The machine's local offset for the clock line: times describing the
+    /// user's world render in local time; machine-facing records stay
+    /// epoch/UTC (AGENTS.md Style).
+    pub offset: UtcOffset,
     pub tool_counts: &'a BTreeMap<String, usize>,
     pub todos: &'a [TodoItem],
 }
@@ -296,7 +296,7 @@ pub fn render_trailer(view: &TrailerView) -> String {
         }
     }
     out.push_str("time: ");
-    out.push_str(&civil_utc(view.now_ms));
+    out.push_str(&format_local(view.now_ms, view.offset));
     out.push_str(" (run elapsed ");
     out.push_str(&format_elapsed(
         view.now_ms.saturating_sub(view.run_start_ms),
@@ -676,15 +676,17 @@ mod tests {
     }
 
     #[test]
-    fn civil_utc_matches_known_dates() {
-        assert_eq!(civil_utc(0), "1970-01-01T00:00:00Z");
-        // The leap rules both ways: 2024 divisible by 4, 2000 divisible by
-        // 400 (IS leap — pins the doe/146096 correction), 2100 divisible by
-        // 100 but not 400 (NOT leap).
-        assert_eq!(civil_utc(1_709_210_096_000), "2024-02-29T12:34:56Z");
-        assert_eq!(civil_utc(951_782_400_000), "2000-02-29T00:00:00Z");
-        assert_eq!(civil_utc(4_107_542_400_000), "2100-03-01T00:00:00Z");
-        assert_eq!(civil_utc(1_788_393_600_000), "2026-09-03T00:00:00Z");
+    fn format_local_applies_the_offset() {
+        // 2026-09-03T00:00:00Z on the wall clock…
+        let epoch = 1_788_393_600_000;
+        assert_eq!(format_local(epoch, UtcOffset::UTC), "2026-09-03T00:00:00Z");
+        // …is 08:00 at +08:00 and 19:00 the previous day at -05:00. The
+        // calendar itself is the time crate's (leap rules included) — what
+        // these pin is that OUR wiring applies the offset.
+        let plus8 = UtcOffset::from_hms(8, 0, 0).expect("valid");
+        assert_eq!(format_local(epoch, plus8), "2026-09-03T08:00:00+08:00");
+        let minus5 = UtcOffset::from_hms(-5, 0, 0).expect("valid");
+        assert_eq!(format_local(epoch, minus5), "2026-09-02T19:00:00-05:00");
     }
 
     #[test]
@@ -711,6 +713,7 @@ mod tests {
             git: None,
             now_ms: 1_000,
             run_start_ms: 2_000,
+            offset: UtcOffset::UTC,
             tool_counts: &BTreeMap::new(),
             todos: &[],
         });
@@ -749,6 +752,7 @@ mod tests {
             }),
             now_ms,
             run_start_ms,
+            offset: UtcOffset::UTC,
             tool_counts: &counts,
             todos: &todos,
         });
@@ -769,6 +773,7 @@ mod tests {
             git: None,
             now_ms,
             run_start_ms,
+            offset: UtcOffset::UTC,
             tool_counts: &BTreeMap::new(),
             todos: &[],
         });
@@ -786,6 +791,7 @@ mod tests {
             }),
             now_ms,
             run_start_ms,
+            offset: UtcOffset::UTC,
             tool_counts: &BTreeMap::new(),
             todos: &[],
         });

@@ -343,6 +343,16 @@ pub enum TurnOutcome {
 /// timestamp comes from here, so tests run on a fixed timeline.
 pub trait Clock: Send + Sync {
     fn now_unix_ms(&self) -> u64;
+
+    /// The machine's local UTC offset in minutes — display only: times
+    /// describing the user's world (the trailer clock) render in local
+    /// time, while machine-facing records stay epoch/UTC (AGENTS.md Style).
+    /// Defaults to UTC; only the wiring layer's `SystemClock` knows the
+    /// real offset. Primitive at the boundary so the contract's dependency
+    /// set stays closed (arch-test item 3).
+    fn utc_offset_minutes(&self) -> i32 {
+        0
+    }
 }
 
 /// Trace-unique sequence numbers. The core formats kind-prefixed ids (`e7`

@@ -18,6 +18,16 @@ impl Clock for SystemClock {
             .map_or(0, |duration| duration.as_millis());
         u64::try_from(millis).unwrap_or(u64::MAX)
     }
+
+    /// The machine's local offset, asked fresh on each call — a run can
+    /// cross a DST transition. An indeterminate offset degrades to UTC:
+    /// cosmetically wrong, never a run failure. The tzdb lookup lives here
+    /// (the wiring layer owns OS interaction); the core only ever computes
+    /// with the offset as data.
+    fn utc_offset_minutes(&self) -> i32 {
+        time::UtcOffset::current_local_offset()
+            .map_or(0, |offset| i32::from(offset.whole_minutes()))
+    }
 }
 
 /// Sequential ids per run: 1, 2, 3, …

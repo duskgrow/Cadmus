@@ -918,6 +918,12 @@ impl AgentLoop {
             git,
             now_ms: self.telemetry.clock.now_unix_ms(),
             run_start_ms,
+            // Minutes cross the contract boundary as a primitive (its dep
+            // set is closed); the conversion is range-checked here.
+            offset: time::UtcOffset::from_whole_seconds(
+                self.telemetry.clock.utc_offset_minutes().saturating_mul(60),
+            )
+            .unwrap_or(time::UtcOffset::UTC),
             tool_counts: &counts,
             todos: &todos,
         })
@@ -2968,6 +2974,68 @@ mod tests {
             recorded.as_deref(),
             Some(trailer.as_str()),
             "the request event carries the exact rendered trailer"
+        );
+    }
+
+    /// A clock with a configurable UTC offset: pins the Clock → conversion →
+    /// trailer wiring (without it, hardcoding UTC in `render_trailer` would
+    /// keep every test green while the production feature died).
+    struct OffsetClock(u64, i32);
+
+    impl Clock for OffsetClock {
+        fn now_unix_ms(&self) -> u64 {
+            self.0
+        }
+        fn utc_offset_minutes(&self) -> i32 {
+            self.1
+        }
+    }
+
+    /// Runs one turn on a fixed clock (2026-09-03T00:00:00Z) with the given
+    /// offset and returns the rendered trailer.
+    async fn trailer_on_offset(offset_minutes: i32) -> String {
+        let provider = Arc::new(
+            ReplayProvider::new([text_script("done")]).with_capabilities(test_capabilities()),
+        );
+        let sink = Arc::new(crate::testing::RecordingSink::default());
+        let telemetry = Telemetry {
+            sink,
+            clock: Arc::new(OffsetClock(1_788_393_600_000, offset_minutes)),
+            ids: Arc::new(crate::testing::SeqIds::default()),
+            trace_id: "tr-offset".into(),
+            run_attributes: std::collections::BTreeMap::new(),
+        };
+        let agent = AgentLoop::new(
+            provider.clone(),
+            vec![],
+            crate::testing::test_context(),
+            crate::testing::auto_approving().0,
+            8,
+            telemetry,
+        );
+        agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("run");
+        let requests = provider.requests();
+        text_of(requests[0].messages.last().expect("trailer message"))
+    }
+
+    #[tokio::test]
+    async fn the_trailer_clock_renders_at_the_clock_offset() {
+        let trailer = trailer_on_offset(480).await;
+        assert!(
+            trailer.contains("time: 2026-09-03T08:00:00+08:00 (run elapsed 0s)"),
+            "{trailer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_garbage_offset_falls_back_to_utc() {
+        let trailer = trailer_on_offset(i32::MAX).await;
+        assert!(
+            trailer.contains("time: 2026-09-03T00:00:00Z (run elapsed 0s)"),
+            "{trailer}"
         );
     }
 
