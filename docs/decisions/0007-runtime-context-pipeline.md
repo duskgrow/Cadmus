@@ -93,6 +93,58 @@ teardowns establish:
    everything time-varying lives in the trailer. Few-shot examples, when
    used, are 2–3 byte-stable boundary cases.
 
+## Amendment — 2026-09-10: trailer outside history; fold cadence and the ceiling rule
+
+Implementation discussion (maintainer, 2026-09-09/10) with a same-day
+baseline re-check (the agents.md and agentskills.io specs; Claude Code,
+Codex CLI and Gemini CLI docs/source; Anthropic's context-editing docs):
+
+1. **The trailer renders outside history.** Item 1(c)'s status bar is
+   appended at request-render time and never enters the message history:
+   under server-side request-prefix caching, accumulating it buys nothing
+   (generated output is not part of the cache key on today's server APIs)
+   while polluting the context with contradictory stale bars. The known
+   cost is phase 3's: llama-server's generation-extended KV cache then
+   recomputes the previous assistant turn per request (open item). Exact
+   replay is preserved by recording the rendered trailer on the per-turn
+   `LlmRequest` event (additive, ADR-0005's rule). Git state enters the
+   trailer as bounded scalars only — branch + dirty count, never a file
+   list; enumeration is one tool call away if the model wants it.
+2. **Fold is periodic hygiene, not a threshold response.** Item 2's single
+   80% trigger is replaced: a fold runs every Δ estimated tokens of growth
+   (default Δ = min(100k, 10% of `max_context`)) and folds tool results
+   older than the last X turns (default X = 5; Anthropic's context-editing
+   `keep: 3` is the mainstream anchor). The post-fold size triggers nothing
+   — the run continues regardless. (Layer-1's placement note also slips:
+   the write-tools PR shipped only the per-tool truncation standard; the
+   fold machinery lands with the context-pipeline implementation.) Δ and X
+   are tunables to validate against trace evidence — the cadence trades
+   extra cache invalidations for attention hygiene, and the book's
+   batch-at-80% experiment is the counter-evidence to watch.
+3. **The ceiling rule.** At the hard line — estimated usage ≥ 80% of
+   `max_context`, the window ceiling rather than an attention threshold —
+   fold first if foldable content remains; LLM compaction fires only when
+   nothing is foldable or the context is still over the line afterwards.
+   Until the phase-2 compactor exists, that case surfaces as the provider's
+   `ContextLength` error (the pre-existing path); the compactor's trigger
+   is re-anchored from "ContextLength observed in traces" to this rule
+   (open item). The ceiling is a tunable, not an attention optimum —
+   mainstream anchors fire earlier (Gemini CLI compresses at 0.5 by
+   default; Anthropic's context editing clears tool results at 100k input
+   tokens).
+4. **Estimation.** Provider-reported input tokens when available, a
+   chars/4 heuristic otherwise; the estimate rides every fold/compaction
+   decision event.
+5. **Prefix details.** Instruction-file loading recognizes only
+   `AGENTS.md` (no vendor-specific fallbacks — the
+   universal-standards-first rule); the user-global file lives at the XDG
+   config path; a nested file is injected as a standalone user message when
+   the run first touches its subtree, never appended to a tool result. The
+   SOP system prompt never names individual tools — tool-specific guidance
+   rides each tool's own `description`, so disabling a tool removes its
+   rules with its schema; the prompt keeps an explicit identity slot for
+   the persona/profile layer (open item).
+
 ## Consequences
 
 - Phase placement: segment assembly + status bar + layer-1 compaction land

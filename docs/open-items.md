@@ -169,3 +169,45 @@ Design constraint from §7.1.1: the report's answer to approval fatigue is
 architectural enforcement (sandbox + allowlist), not rule-learning —
 users approve ~93% of prompts anyway, so scoped "always" rules are comfort
 for the last mile, never the safety mechanism.
+
+## LLM compaction fires on the ceiling rule, not on ContextLength sightings
+
+Consumer: the phase-2 compaction ADR.
+
+ADR-0007's 2026-09-10 amendment re-anchors the layer-2 trigger: the
+compactor fires when a fold at the 80% ceiling finds nothing foldable or
+leaves the context over the line. Until it lands, that case is the
+provider's ContextLength error. Mainstream anchors (2026-09-10): Gemini
+CLI compresses at 0.5 of the window by default; Anthropic's context
+editing clears tool results at 100k input tokens with keep=3. The
+compounding-summaries risk stands (a summary of a summary), so the
+original circuit breaker and the full-fidelity log stay load-bearing.
+
+## Loop health: stuck detection and budget caps, never periodic nudges
+
+Consumer: the loop-health mechanism (TUI era, or the first long-task pain
+in traces).
+
+Research digest (2026-09-10, official docs + source): no mainstream agent
+injects periodic re-planning nudges, and no controlled evidence for them
+exists — Anthropic's context-engineering guidance is a minimal
+high-signal token set with structured notes (the todo list) as the
+persistence mechanism. The evidence-backed form is event-driven:
+OpenHands' StuckDetector injects one nudge on repeated action-error
+patterns, then hard-stops past its thresholds; budget caps exist as
+Claude's `--max-budget-usd` and Codex's `rollout_budget`. The same
+convergence leaves interactive sessions without a turn limit
+(Claude/Codex/Gemini default unlimited or none) while headless keeps a
+hard cap — the TUI's interactive default is unlimited; the headless cap
+rises to 100 alongside the context-pipeline work.
+
+## The trailer's no-history choice costs a turn recompute on llama-server
+
+Consumer: the phase-3 local-inference ADR.
+
+ADR-0007's 2026-09-10 amendment keeps the status bar out of the message
+history (right call under server-side request-prefix caching). On
+llama-server's generation-extended KV cache, every request then
+recomputes the previous assistant turn (~seconds of prefill per turn at
+local speeds). If phase-3 measurements make that hurt, the revisit is a
+transport-aware history policy, not a silent revert.

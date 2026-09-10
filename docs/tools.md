@@ -70,9 +70,9 @@ security floor: modes can ask more than the floor requires, never less.
 
 ## Task tracking
 
-| Tool         | Tier | Phase | Status  | Intent / design notes                                                                                                                   | Serves    |
-| ------------ | ---- | ----- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- | --------- |
-| `todo_write` | L0   | 1     | planned | atomic whole-list replace; rendered in the ADR-0007 status bar; description carries oh-my-pi's rule: never the sole tool call of a turn | 0007/0011 |
+| Tool         | Tier | Phase | Status  | Intent / design notes                                                                                                                                                                                                                                                                                                                                                                                                                                              | Serves    |
+| ------------ | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| `todo_write` | L0   | 1     | planned | atomic whole-list replace; three fields per item (content, status pending/in_progress/completed, optional activeForm — the TUI spinner's present-continuous wording, Claude Code TaskCreate-compatible); rendered in the ADR-0007 status bar in full, completed included (Claude TaskList / Codex update_plan convergence), no item cap (no mainstream cap; revisit if traces show bloat); description carries oh-my-pi's rule: never the sole tool call of a turn | 0007/0011 |
 
 ## Skills and memory
 
