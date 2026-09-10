@@ -9,9 +9,17 @@
 //!   its freshness note;
 //! - `CLAUDE.md` is only a reference to AGENTS.md, never a second copy.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+// The frontmatter parser is shared with the runtime skill loader: xtask's
+// zero-dependency policy (crates/xtask/src/arch.rs) forbids a Cargo edge to
+// cadmus-core, so the same source file compiles into this crate via #[path]
+// — std-only and free of crate:: references by construction (see the file's
+// module doc). Issues come back structured; this checker prepends the
+// repo-relative path, keeping its failure messages byte-identical.
+#[path = "../../cadmus-core/src/skills/frontmatter.rs"]
+mod frontmatter;
 
 /// The repository root is baked in at compile time, so the check works from
 /// any working directory (hooks, CI jobs and the bootstrap app alike).
@@ -86,7 +94,7 @@ fn check_skill(path: &Path, root: &Path, failures: &mut Vec<String>) {
         failures.push(format!("{rel}: unreadable"));
         return;
     };
-    let (frontmatter_text, body) = match split_frontmatter(&text) {
+    let (frontmatter_text, body) = match frontmatter::split_frontmatter(&text) {
         Ok(parts) => parts,
         Err(reason) => {
             failures.push(format!("{rel}: {reason}"));
@@ -94,7 +102,8 @@ fn check_skill(path: &Path, root: &Path, failures: &mut Vec<String>) {
         }
     };
 
-    let frontmatter = parse_frontmatter(&frontmatter_text, &rel, failures);
+    let (frontmatter, issues) = frontmatter::parse_frontmatter(&frontmatter_text);
+    failures.extend(issues.iter().map(|issue| format!("{rel}: {issue}")));
 
     let unknown: Vec<&String> = frontmatter
         .keys()
@@ -136,63 +145,6 @@ fn check_skill(path: &Path, root: &Path, failures: &mut Vec<String>) {
             body.chars().count()
         ));
     }
-}
-
-/// Split raw file text into (frontmatter, body), keeping the two failure
-/// modes apart for actionable messages. Windows checkouts may carry CRLF
-/// line endings (git autocrlf); YAML hosts accept both, so normalize before
-/// the line-oriented split.
-fn split_frontmatter(text: &str) -> Result<(String, String), &'static str> {
-    let text = text.replace("\r\n", "\n");
-    let Some(rest) = text.strip_prefix("---\n") else {
-        return Err("missing YAML frontmatter (must start with ---)");
-    };
-    let Some(end) = rest.find("\n---\n") else {
-        return Err("frontmatter is not closed with ---");
-    };
-    Ok((rest[..end].to_string(), rest[end + 5..].to_string()))
-}
-
-/// Parse the single-line `key: value` subset this checker supports. There is
-/// no YAML parser in std, so validate against what strict YAML hosts reject:
-/// an unquoted `: ` (or trailing `:`) ends the scalar there, and a leading
-/// indicator char starts a construct this line-based format forbids.
-fn parse_frontmatter(text: &str, rel: &str, failures: &mut Vec<String>) -> HashMap<String, String> {
-    let mut frontmatter = HashMap::new();
-    for line in text.lines() {
-        let stripped = line.trim();
-        if stripped.is_empty() || stripped.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            failures.push(format!("{rel}: unparseable frontmatter line: {line:?}"));
-            continue;
-        };
-        let key = key.trim().to_string();
-        let value = value.trim();
-        if value.starts_with('"') || value.starts_with('\'') {
-            let quote = value.as_bytes()[0];
-            if value.len() < 2 || !value.ends_with(char::from(quote)) {
-                failures.push(format!("{rel}: unterminated quoted scalar for {key:?}"));
-                continue;
-            }
-        } else if !value.is_empty() {
-            if value.contains(": ") || value.ends_with(':') {
-                failures.push(format!(
-                    "{rel}: plain scalar for {key:?} contains ':' — strict YAML hosts reject this; wrap the value in double quotes"
-                ));
-                continue;
-            }
-            if ">|&*!%@`[{".contains(value.as_bytes()[0] as char) {
-                failures.push(format!(
-                    "{rel}: value for {key:?} starts with a YAML indicator — only single-line plain or quoted scalars are supported in SKILL.md frontmatter"
-                ));
-                continue;
-            }
-        }
-        frontmatter.insert(key, value.trim_matches(['"', '\'']).to_string());
-    }
-    frontmatter
 }
 
 fn check_claude_skills_link(root: &Path, failures: &mut Vec<String>) {
@@ -263,67 +215,5 @@ fn check_claude_md(root: &Path, failures: &mut Vec<String>) {
             "CLAUDE.md: must contain only the @AGENTS.md reference (SSOT — never a copy)"
                 .to_string(),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(text: &str) -> (HashMap<String, String>, Vec<String>) {
-        let mut failures = Vec::new();
-        let frontmatter = parse_frontmatter(text, "test/SKILL.md", &mut failures);
-        (frontmatter, failures)
-    }
-
-    #[test]
-    fn split_tolerates_crlf_checkouts() {
-        // git materializes CRLF on Windows checkouts (autocrlf); YAML hosts
-        // accept both endings, so the checker must too.
-        let (frontmatter, body) =
-            split_frontmatter("---\r\nname: x\r\n---\r\nbody\r\n").expect("valid frontmatter");
-        assert_eq!(frontmatter, "name: x");
-        assert_eq!(body, "body\n");
-    }
-
-    #[test]
-    fn split_distinguishes_open_and_close_failures() {
-        assert_eq!(
-            split_frontmatter("name: x\n").unwrap_err(),
-            "missing YAML frontmatter (must start with ---)"
-        );
-        assert_eq!(
-            split_frontmatter("---\nname: x\n").unwrap_err(),
-            "frontmatter is not closed with ---"
-        );
-    }
-
-    #[test]
-    fn plain_scalars_parse() {
-        let (frontmatter, failures) = parse("name: pr-preflight\ndescription: short\n");
-        assert!(failures.is_empty());
-        assert_eq!(frontmatter["description"], "short");
-    }
-
-    #[test]
-    fn unquoted_colon_space_is_rejected() {
-        let (_, failures) = parse("description: layer on top: diff self-review\n");
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("wrap the value in double quotes"));
-    }
-
-    #[test]
-    fn quoted_colon_space_is_accepted() {
-        let (frontmatter, failures) = parse("description: \"layer on top: diff\"\n");
-        assert!(failures.is_empty());
-        assert_eq!(frontmatter["description"], "layer on top: diff");
-    }
-
-    #[test]
-    fn unterminated_quote_and_indicators_are_rejected() {
-        let (_, failures) = parse("description: \"never closed\n");
-        assert_eq!(failures.len(), 1);
-        let (_, failures) = parse("description: >- folded\n");
-        assert_eq!(failures.len(), 1);
     }
 }

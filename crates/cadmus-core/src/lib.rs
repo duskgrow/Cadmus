@@ -13,6 +13,7 @@ mod assembler;
 pub mod context;
 mod eval;
 mod replay;
+pub mod skills;
 pub mod testing;
 mod trajectory;
 
