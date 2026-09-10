@@ -1,8 +1,12 @@
 //! Smoke check for agent-facing docs ("can the host even load it?"):
 //!
-//! - every `.agents/skills/<name>/SKILL.md` has frontmatter whose `name` equals
-//!   the directory name, whose `description` is 1..=1024 chars, whose keys stay
-//!   within [`ALLOWED_KEYS`], and whose body fits the progressive-disclosure budget;
+//! - every `.agents/skills/<name>/SKILL.md` has spec-valid frontmatter (the
+//!   shared validator in `cadmus-core/src/skills/frontmatter.rs`: required
+//!   `name`/`description`, the spec's name charset and length windows, name
+//!   == directory name — the same rules the runtime loader applies, so the
+//!   repo can never ship a skill its own agent refuses), whose keys stay
+//!   within [`ALLOWED_KEYS`], and whose body fits the
+//!   progressive-disclosure budget;
 //! - `.claude/skills` points at `.agents/skills` (single source of truth —
 //!   tolerates git's text-file fallback on platforms without symlink support);
 //! - `AGENTS.md` exists, stays within the always-on line budget, and carries
@@ -120,23 +124,8 @@ fn check_skill(path: &Path, root: &Path, failures: &mut Vec<String>) {
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    match frontmatter.get("name") {
-        None => failures.push(format!("{rel}: frontmatter requires `name`")),
-        Some(name) if *name != dir_name => failures.push(format!(
-            "{rel}: name {name:?} must equal directory name {dir_name:?}"
-        )),
-        Some(_) => {}
-    }
-
-    match frontmatter.get("description") {
-        None => failures.push(format!("{rel}: frontmatter requires `description`")),
-        Some(description) if !(1..=1024).contains(&description.chars().count()) => {
-            failures.push(format!(
-                "{rel}: description must be 1..1024 chars (got {})",
-                description.chars().count()
-            ));
-        }
-        Some(_) => {}
+    if let Err(reason) = frontmatter::validate(&frontmatter, &dir_name) {
+        failures.push(format!("{rel}: {reason}"));
     }
 
     if body.chars().count() > SKILL_BODY_BUDGET_CHARS {

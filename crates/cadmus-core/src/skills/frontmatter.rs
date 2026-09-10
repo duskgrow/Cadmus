@@ -108,6 +108,53 @@ pub fn parse_frontmatter(text: &str) -> (HashMap<String, String>, Vec<Frontmatte
     (frontmatter, issues)
 }
 
+/// Validates one parsed SKILL.md frontmatter against the Agent Skills spec
+/// (agentskills.io, verified 2026-09-10): `name` and `description` are
+/// required; the name is 1–64 chars of lowercase letters, digits and
+/// hyphens with no leading, trailing or consecutive hyphens, and must equal
+/// the skill's directory name; the description is 1–1024 chars.
+///
+/// This is the one validator both surfaces share — the runtime loader
+/// (warn-skip) and the agent-check smoke gate (hard failure) must agree on
+/// what a loadable skill is, or the repo could ship a skill its own loader
+/// refuses. The failure text is the diagnostic both prepend context to.
+pub fn validate<S: ::std::hash::BuildHasher>(
+    frontmatter: &HashMap<String, String, S>,
+    dir_name: &str,
+) -> Result<(String, String), String> {
+    let name = frontmatter
+        .get("name")
+        .ok_or_else(|| "frontmatter requires `name`".to_string())?;
+    // ASCII-only by construction: the byte check rejects anything else, so
+    // byte length equals char count for every accepted name.
+    let well_formed = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--");
+    if !well_formed {
+        return Err(format!(
+            "name {name:?} must be 1-64 chars of lowercase letters, digits and hyphens, with no leading, trailing or consecutive hyphens"
+        ));
+    }
+    if name != dir_name {
+        return Err(format!(
+            "name {name:?} must equal directory name {dir_name:?}"
+        ));
+    }
+    let description = frontmatter
+        .get("description")
+        .ok_or_else(|| "frontmatter requires `description`".to_string())?;
+    let chars = description.chars().count();
+    if !(1..=1024).contains(&chars) {
+        return Err(format!("description must be 1..1024 chars (got {chars})"));
+    }
+    Ok((name.clone(), description.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +274,73 @@ mod tests {
             issues[0],
             "value for \"name\" starts with a YAML indicator — only single-line plain or quoted scalars are supported in SKILL.md frontmatter"
         );
+    }
+
+    fn frontmatter(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_valid_skill_validates() {
+        let (name, description) = validate(
+            &frontmatter(&[("name", "pr-preflight"), ("description", "review a PR")]),
+            "pr-preflight",
+        )
+        .expect("valid");
+        assert_eq!(name, "pr-preflight");
+        assert_eq!(description, "review a PR");
+    }
+
+    #[test]
+    fn name_and_description_are_required() {
+        let err = validate(&frontmatter(&[("description", "d")]), "x").unwrap_err();
+        assert_eq!(err, "frontmatter requires `name`");
+        let err = validate(&frontmatter(&[("name", "x")]), "x").unwrap_err();
+        assert_eq!(err, "frontmatter requires `description`");
+    }
+
+    #[test]
+    fn the_name_charset_is_the_spec_subset() {
+        for bad in ["Foo", "a_b", "a b", "-lead", "trail-", "double--dash", ""] {
+            let err =
+                validate(&frontmatter(&[("name", bad), ("description", "d")]), bad).unwrap_err();
+            assert!(err.contains("1-64 chars"), "{bad:?}: {err}");
+        }
+        // 65 chars exceeds the cap; 64 is the last legal length.
+        let long = "a".repeat(65);
+        let err = validate(
+            &frontmatter(&[("name", &long), ("description", "d")]),
+            &long,
+        )
+        .unwrap_err();
+        assert!(err.contains("1-64 chars"));
+        let max = "a".repeat(64);
+        validate(&frontmatter(&[("name", &max), ("description", "d")]), &max).expect("64 is legal");
+    }
+
+    #[test]
+    fn the_name_must_equal_the_directory_name() {
+        let err = validate(
+            &frontmatter(&[("name", "x"), ("description", "d")]),
+            "other",
+        )
+        .unwrap_err();
+        assert_eq!(err, "name \"x\" must equal directory name \"other\"");
+    }
+
+    #[test]
+    fn the_description_length_window_is_enforced() {
+        let err = validate(&frontmatter(&[("name", "x"), ("description", "")]), "x").unwrap_err();
+        assert_eq!(err, "description must be 1..1024 chars (got 0)");
+        let over = "d".repeat(1025);
+        let err =
+            validate(&frontmatter(&[("name", "x"), ("description", &over)]), "x").unwrap_err();
+        assert_eq!(err, "description must be 1..1024 chars (got 1025)");
+        let max = "d".repeat(1024);
+        validate(&frontmatter(&[("name", "x"), ("description", &max)]), "x")
+            .expect("1024 is legal");
     }
 }

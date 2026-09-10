@@ -76,11 +76,11 @@ security floor: modes can ask more than the floor requires, never less.
 
 ## Skills and memory
 
-| Tool            | Tier | Phase | Status  | Intent / design notes                                                                                                                      | Serves    |
-| --------------- | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
-| `skill`         | L0   | 1     | planned | activates a skill by name → body injected as the tool result (progressive disclosure L2; the L1 catalog lives in the frozen prefix)        | 0006/0007 |
-| `memory_search` | L0   | 2     | planned | read-only search over the user-memory log once it outgrows the prefix cap                                                                  | 0009      |
-| `remember`      | L0   | 2     | planned | proposal-only: enqueues a memory/skill delta for the human gate; writes nothing itself — the in-session half of ADR-0009's propose/approve | 0009/0010 |
+| Tool            | Tier | Phase | Status  | Intent / design notes                                                                                                                                                                                                                                                                                                                            | Serves    |
+| --------------- | ---- | ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| `skill`         | L0   | 1     | shipped | activates a skill by name → body injected as the tool result (progressive disclosure L2; the L1 catalog lives in the frozen prefix); discovery: workspace `.agents/skills` + user `~/.agents/skills`, the workspace wins name conflicts; invalid frontmatter warns and skips at load; an unknown name returns the available list as a correction | 0006/0007 |
+| `memory_search` | L0   | 2     | planned | read-only search over the user-memory log once it outgrows the prefix cap                                                                                                                                                                                                                                                                        | 0009      |
+| `remember`      | L0   | 2     | planned | proposal-only: enqueues a memory/skill delta for the human gate; writes nothing itself — the in-session half of ADR-0009's propose/approve                                                                                                                                                                                                       | 0009/0010 |
 
 ## Web (candidates)
 

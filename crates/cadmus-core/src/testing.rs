@@ -254,7 +254,7 @@ impl StatusProbe for FixedProbe {
 #[must_use]
 pub fn test_context() -> ContextBundle {
     ContextBundle {
-        prefix: FrozenPrefix::assemble("test prompt", &[], &[]),
+        prefix: FrozenPrefix::assemble("test prompt", &[], &[], &[]),
         probe: Arc::new(FixedProbe(None)),
         tracker: Arc::new(NoInstructions),
         cwd: "/test".into(),

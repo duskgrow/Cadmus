@@ -105,6 +105,10 @@ fn every_kind_round_trips() {
                     path: "/repo/AGENTS.md".into(),
                     content: "project rules".into(),
                 }],
+                skills: vec![cadmus_contract::SkillSummary {
+                    name: "pr-preflight".into(),
+                    description: "review a PR before opening it".into(),
+                }],
             }),
         }),
         EventKind::Command(Command::ResolveApproval {

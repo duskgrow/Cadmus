@@ -333,23 +333,30 @@ async fn run_case(
         commands: Arc::new(commands),
     };
     // The context pipeline runs hermetically (ADR-0007): workspace-only
-    // instructions and the scratch's own (absent) git state, so scores never
-    // depend on the operator's machine.
-    let tools = coding_tools(scratch.0.clone());
+    // instructions and skills and the scratch's own (absent) git state, so
+    // scores never depend on the operator's machine. Canonicalize first
+    // (mirroring chat): the temp dir rides symlinks on some platforms, and
+    // the tools' confinement compares canonical paths.
+    let root = scratch
+        .0
+        .canonicalize()
+        .unwrap_or_else(|_| scratch.0.clone());
+    let skills = crate::skills::discover(&root, &crate::context::Scope::WorkspaceOnly);
+    let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
+    let tools = coding_tools(root.clone(), skills);
     let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
-    let instructions = crate::context::instruction_chain(
-        &scratch.0,
-        &crate::context::InstructionScope::WorkspaceOnly,
-    );
+    let instructions =
+        crate::context::instruction_chain(&root, &crate::context::Scope::WorkspaceOnly);
     let pipeline = cadmus_core::ContextBundle {
         prefix: cadmus_core::FrozenPrefix::assemble(
             cadmus_core::context::SYSTEM_PROMPT,
             &instructions,
+            &catalog,
             &specs,
         ),
         probe: std::sync::Arc::new(cadmus_core::context::NoProbe),
         tracker: std::sync::Arc::new(cadmus_core::context::NoInstructions),
-        cwd: scratch.0.display().to_string(),
+        cwd: root.display().to_string(),
         artifacts: std::sync::Arc::new(
             log.artifacts(&trace_id)
                 .expect("a minted trace id resolves its artifact dir"),

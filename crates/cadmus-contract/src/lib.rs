@@ -25,7 +25,7 @@ pub mod testing;
 
 pub use approval::Approval;
 pub use capabilities::{CacheSupport, Capabilities, ReasoningCaps, SoSupport, Support};
-pub use context::{InstructionFile, PrefixRecord, TodoItem, TodoStatus};
+pub use context::{InstructionFile, PrefixRecord, SkillSummary, TodoItem, TodoStatus};
 pub use error::ModelError;
 pub use eval::{CaseResult, EvalCase, EvalReport, EvalSplit, Expectation};
 pub use event::{

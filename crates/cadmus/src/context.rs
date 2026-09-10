@@ -11,11 +11,13 @@ use std::sync::Mutex;
 use cadmus_contract::{InstructionFile, ToolCall};
 use cadmus_core::context::{GitStatus, InstructionTracker, StatusProbe};
 
-/// Which files the chain may include (ADR-0007 item 1(a)).
-pub enum InstructionScope {
-    /// Interactive runs: the user-global file plus ancestors root→cwd.
+/// Which files a run may load (ADR-0007 item 1(a) instruction chains,
+/// ADR-0006 skill discovery).
+pub enum Scope {
+    /// Interactive runs: user-level files (the user-global `AGENTS.md`,
+    /// `~/.agents/skills`) plus the workspace's own.
     UserAndWorkspace,
-    /// Eval runs: workspace files only — the operator's user-global file
+    /// Eval runs: workspace files only — the operator's user-level files
     /// would make scores depend on the machine the eval runs on.
     WorkspaceOnly,
 }
@@ -30,9 +32,9 @@ pub enum InstructionScope {
 /// are skipped with a warning: a broken instruction file must never block
 /// the run, but the skip is never silent.
 #[must_use]
-pub fn instruction_chain(root: &Path, scope: &InstructionScope) -> Vec<InstructionFile> {
+pub fn instruction_chain(root: &Path, scope: &Scope) -> Vec<InstructionFile> {
     let mut files = Vec::new();
-    if let InstructionScope::UserAndWorkspace = scope {
+    if let Scope::UserAndWorkspace = scope {
         if let Some(path) = user_global_instructions() {
             load(&mut files, &path);
         }
@@ -46,18 +48,18 @@ pub fn instruction_chain(root: &Path, scope: &InstructionScope) -> Vec<Instructi
     files
 }
 
-/// One instruction file's size ceiling: these bytes ride every request's
+/// One loaded context file's size ceiling: these bytes ride every request's
 /// system prompt for the whole run (and the trajectory), so the ADR-0007
 /// layer-1 bounding discipline applies here too — 256 KiB is far past any
-/// real instruction file, and the model can still read an oversized one
-/// explicitly via the tools.
-const MAX_INSTRUCTION_BYTES: u64 = 256 * 1024;
+/// real instruction file or SKILL.md, and the model can still read an
+/// oversized one explicitly via the tools.
+const MAX_CONTEXT_FILE_BYTES: u64 = 256 * 1024;
 
 /// Reads one file into the chain, honoring the cap; `None`-equivalent
 /// outcomes (absent, unreadable, oversized) never fail, but the abnormal
 /// ones always warn.
 fn load(files: &mut Vec<InstructionFile>, path: &Path) {
-    if let Some(content) = read_capped(path) {
+    if let Some(content) = read_capped(path, "instruction file") {
         files.push(InstructionFile {
             path: path.display().to_string(),
             content,
@@ -65,16 +67,20 @@ fn load(files: &mut Vec<InstructionFile>, path: &Path) {
     }
 }
 
-fn read_capped(path: &Path) -> Option<String> {
+/// The capped read shared by every prefix-bound file load (instruction
+/// files here, SKILL.md bodies in `crate::skills`): absent is silent,
+/// oversized and unreadable warn. `kind` names the file's role in the
+/// warning so the operator sees which load skipped.
+pub(crate) fn read_capped(path: &Path, kind: &str) -> Option<String> {
     match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_INSTRUCTION_BYTES => {
-            tracing::warn!(path = %path.display(), bytes = meta.len(), "skipping oversized instruction file");
+        Ok(meta) if meta.len() > MAX_CONTEXT_FILE_BYTES => {
+            tracing::warn!(path = %path.display(), bytes = meta.len(), "skipping oversized {kind}");
             None
         }
         Ok(_) => match std::fs::read_to_string(path) {
             Ok(content) => Some(content),
             Err(err) => {
-                tracing::warn!(path = %path.display(), %err, "skipping unreadable instruction file");
+                tracing::warn!(path = %path.display(), %err, "skipping unreadable {kind}");
                 None
             }
         },
@@ -213,7 +219,7 @@ impl InstructionTracker for NestedInstructions {
                 // Insert only after a successful read: a failed read warns
                 // (never silent) and stays retryable on the next call,
                 // rather than skipping the file for the rest of the run.
-                if let Some(content) = read_capped(&path) {
+                if let Some(content) = read_capped(&path, "instruction file") {
                     injected.insert(path.clone());
                     found.push(InstructionFile {
                         path: path.display().to_string(),
@@ -258,7 +264,7 @@ mod tests {
         std::fs::write(scratch.0.join("repo/AGENTS.md"), "outer").expect("write");
         std::fs::write(scratch.0.join("repo/nested/AGENTS.md"), "inner").expect("write");
 
-        let chain = instruction_chain(&root, &InstructionScope::UserAndWorkspace);
+        let chain = instruction_chain(&root, &Scope::UserAndWorkspace);
         let contents: Vec<&str> = chain.iter().map(|file| file.content.as_str()).collect();
         // Whatever the machine contributes (user-global, stray ancestors),
         // the workspace ancestors always close the chain, outer → cwd.
@@ -277,7 +283,7 @@ mod tests {
         std::fs::write(scratch.0.join("AGENTS.md"), "ancestor rules").expect("write");
         std::fs::write(root.join("AGENTS.md"), "fixture rules").expect("write");
 
-        let chain = instruction_chain(&root, &InstructionScope::WorkspaceOnly);
+        let chain = instruction_chain(&root, &Scope::WorkspaceOnly);
         let contents: Vec<&str> = chain.iter().map(|file| file.content.as_str()).collect();
         assert_eq!(
             contents,

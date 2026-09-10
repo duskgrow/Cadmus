@@ -2888,6 +2888,7 @@ mod tests {
                     content: "project rules".into(),
                 }],
                 &[],
+                &[],
             ),
             probe: Arc::new(crate::testing::FixedProbe(git)),
             tracker,

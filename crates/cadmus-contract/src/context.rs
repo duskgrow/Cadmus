@@ -26,12 +26,25 @@ pub struct PrefixRecord {
     /// the [`PREFIX_HASH`](crate::attrs::PREFIX_HASH) attribute.
     pub hash: String,
     /// The assembled system-message text (system prompt + instruction
-    /// chain rendered in), exactly as sent.
+    /// chain + skill catalog rendered in), exactly as sent.
     pub system: String,
     /// The structured provenance of `system` (phase 2's reflector consumes
     /// it); empty when no instruction files applied.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instructions: Vec<InstructionFile>,
+    /// The skill catalog's structured provenance (ADR-0006); empty when no
+    /// skills were discovered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillSummary>,
+}
+
+/// One skill's level-1 catalog entry (ADR-0006's progressive disclosure):
+/// name+description is the always-loaded discovery unit; the body stays on
+/// disk until the `skill` tool activates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSummary {
+    pub name: String,
+    pub description: String,
 }
 
 /// One todo-list item (ADR-0007 item 1(c)'s model-authored exception):
@@ -86,5 +99,24 @@ mod tests {
             serde_json::to_value(&full).unwrap()["activeForm"],
             serde_json::json!("doing x")
         );
+    }
+
+    #[test]
+    fn prefix_record_skills_are_additive() {
+        // Empty catalogs serialize to the pre-skills wire shape, and traces
+        // recorded before the field existed still parse (ADR-0005's
+        // additive-event rule).
+        let record = PrefixRecord {
+            hash: "h".into(),
+            system: "s".into(),
+            instructions: Vec::new(),
+            skills: Vec::new(),
+        };
+        let wire = serde_json::to_value(&record).unwrap();
+        assert!(wire.get("skills").is_none(), "empty catalog stays absent");
+        let parsed: PrefixRecord =
+            serde_json::from_value(serde_json::json!({"hash": "h", "system": "s"}))
+                .expect("a pre-skills record still parses");
+        assert!(parsed.skills.is_empty());
     }
 }

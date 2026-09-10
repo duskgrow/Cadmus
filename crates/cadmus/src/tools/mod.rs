@@ -18,6 +18,7 @@ mod edit_file;
 mod grep;
 mod list_dir;
 mod read_file;
+mod skill;
 mod todo_write;
 mod write_file;
 
@@ -30,21 +31,25 @@ use edit_file::EditFile;
 use grep::Grep;
 use list_dir::ListDir;
 use read_file::ReadFile;
+use skill::Skill;
 use todo_write::TodoWrite;
 use write_file::WriteFile;
 
+use crate::skills::LoadedSkill;
+
 /// The phase-1 coding toolset: `read_file`, `grep`, `list_dir`,
-/// `write_file`, `edit_file`, `todo_write`.
+/// `write_file`, `edit_file`, `todo_write`, `skill`.
 #[must_use]
-pub fn coding_tools(root: PathBuf) -> Vec<Arc<dyn AgentTool>> {
+pub fn coding_tools(root: PathBuf, skills: Vec<LoadedSkill>) -> Vec<Arc<dyn AgentTool>> {
     let root = canonical_root(root);
     vec![
         Arc::new(ReadFile { root: root.clone() }),
         Arc::new(Grep { root: root.clone() }),
         Arc::new(ListDir { root: root.clone() }),
         Arc::new(WriteFile { root: root.clone() }),
-        Arc::new(EditFile { root }),
+        Arc::new(EditFile { root: root.clone() }),
         Arc::new(TodoWrite),
+        Arc::new(Skill::new(skills, root)),
     ]
 }
 
@@ -116,7 +121,7 @@ mod tests {
     #[test]
     fn effect_declarations_match_the_tool_kind() {
         let scratch = Scratch::new("effects");
-        let tools = coding_tools(scratch.0.clone());
+        let tools = coding_tools(scratch.0.clone(), Vec::new());
         let effect_of = |name: &str| {
             tools
                 .iter()
@@ -130,6 +135,8 @@ mod tests {
         assert_eq!(effect_of("edit_file"), Some(Effect::Mutation));
         // Harness-internal state, no workspace effect: never gated.
         assert_eq!(effect_of("todo_write"), Some(Effect::Perception));
+        // A lookup over harness-held text, no workspace effect.
+        assert_eq!(effect_of("skill"), Some(Effect::Perception));
     }
 
     /// A scratch workspace under the OS temp dir, unique per test name and
@@ -163,7 +170,7 @@ mod tests {
     }
 
     pub(super) fn tool(root: &Path, name: &str) -> Arc<dyn AgentTool> {
-        coding_tools(root.to_path_buf())
+        coding_tools(root.to_path_buf(), Vec::new())
             .into_iter()
             .find(|tool| tool.spec().name == name)
             .expect("tool exists")

@@ -90,16 +90,19 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
     let root = std::env::current_dir().map_err(Error::Workdir)?;
     let root = root.canonicalize().unwrap_or(root);
     // The context pipeline (ADR-0007): frozen prefix (system prompt +
-    // AGENTS.md chain + tool specs in the hash), git probe and nested-file
-    // tracker — the loop renders prefix + history + fresh trailer per turn.
-    let tools = coding_tools(root.clone());
+    // AGENTS.md chain + skill catalog + tool specs in the hash), git probe
+    // and nested-file tracker — the loop renders prefix + history + fresh
+    // trailer per turn.
+    let skills = crate::skills::discover(&root, &context::Scope::UserAndWorkspace);
+    let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
+    let tools = coding_tools(root.clone(), skills);
     let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
-    let instructions =
-        context::instruction_chain(&root, &context::InstructionScope::UserAndWorkspace);
+    let instructions = context::instruction_chain(&root, &context::Scope::UserAndWorkspace);
     let pipeline = ContextBundle {
         prefix: cadmus_core::FrozenPrefix::assemble(
             cadmus_core::context::SYSTEM_PROMPT,
             &instructions,
+            &catalog,
             &specs,
         ),
         probe: Arc::new(context::GitProbe::new(root.clone())),

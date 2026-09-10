@@ -10,6 +10,7 @@ mod error;
 mod eval;
 pub mod provider;
 mod render;
+mod skills;
 mod telemetry;
 mod tools;
 

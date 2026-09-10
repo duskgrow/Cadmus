@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use cadmus_contract::{
-    FoldedRef, InstructionFile, Message, PrefixRecord, TodoItem, TodoStatus, ToolSpec,
+    FoldedRef, InstructionFile, Message, PrefixRecord, SkillSummary, TodoItem, TodoStatus, ToolSpec,
 };
 
 /// The v1 system prompt (ADR-0007 item 1(a)). Two content rules, both
@@ -37,24 +37,31 @@ A status block maintained by code (never by you) ends every request: cwd, git st
 pub const TODO_WRITE: &str = "todo_write";
 
 /// The frozen prefix (ADR-0007 item 1(a)): assembled once per run from the
-/// system prompt, the instruction chain and the tool specs, then byte-stable
-/// for the whole run — the prompt-cache boundary. The hash is the
-/// comparability key: runs with different hashes are not eval-comparable
-/// (ADR-0010).
+/// system prompt, the instruction chain, the skill catalog and the tool
+/// specs, then byte-stable for the whole run — the prompt-cache boundary.
+/// The hash is the comparability key: runs with different hashes are not
+/// eval-comparable (ADR-0010).
 pub struct FrozenPrefix {
     text: String,
     hash: String,
     instructions: Vec<InstructionFile>,
+    skills: Vec<SkillSummary>,
 }
 
 impl FrozenPrefix {
     /// Assembles the prefix and its hash. `specs` enter the hash (a tool
     /// schema change is a prefix change) but not the system text — on the
-    /// wire they travel in the request's `tools` field, in wire order.
+    /// wire they travel in the request's `tools` field, in wire order. The
+    /// skill catalog renders as level-1 name+description lines only
+    /// (ADR-0006's progressive disclosure): bodies stay out of the prefix
+    /// and load on activation. The section text names no tool — the
+    /// zero-tool-names rule of the system prompt applies here too; the
+    /// activation loop closes in the activating tool's own description.
     #[must_use]
     pub fn assemble(
         system_prompt: &str,
         instructions: &[InstructionFile],
+        skills: &[SkillSummary],
         specs: &[cadmus_contract::ToolSpec],
     ) -> Self {
         let mut text = String::from(system_prompt);
@@ -73,11 +80,32 @@ impl FrozenPrefix {
                 text.push('\n');
             }
         }
+        if !skills.is_empty() {
+            // Section separator discipline: exactly one blank line whether
+            // the predecessor is the instructions block (trailing newline)
+            // or the bare prompt (none).
+            text.truncate(text.trim_end().len());
+            text.push_str(
+                "\n\n# Skills\n\n\
+                 Skills available to this run, as name: description pairs — a skill's \
+                 description says when it applies. When the task matches one, activate \
+                 that skill before starting the work; its full instructions then join \
+                 the conversation.\n\n",
+            );
+            for skill in skills {
+                text.push_str("- ");
+                text.push_str(&skill.name);
+                text.push_str(": ");
+                text.push_str(&skill.description);
+                text.push('\n');
+            }
+        }
         let hash = prefix_hash(&text, specs);
         Self {
             text,
             hash,
             instructions: instructions.to_vec(),
+            skills: skills.to_vec(),
         }
     }
 
@@ -101,6 +129,7 @@ impl FrozenPrefix {
             hash: self.hash.clone(),
             system: self.text.clone(),
             instructions: self.instructions.clone(),
+            skills: self.skills.clone(),
         }
     }
 
@@ -442,9 +471,16 @@ mod tests {
         }
     }
 
+    fn skill(name: &str, description: &str) -> SkillSummary {
+        SkillSummary {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
     #[test]
-    fn prefix_without_instructions_is_the_prompt_alone() {
-        let prefix = FrozenPrefix::assemble("PROMPT", &[], &[spec("read_file")]);
+    fn prefix_without_instructions_or_skills_is_the_prompt_alone() {
+        let prefix = FrozenPrefix::assemble("PROMPT", &[], &[], &[spec("read_file")]);
         let Message { role, content, .. } = prefix.message();
         assert_eq!(role, cadmus_contract::Role::System);
         assert!(
@@ -460,12 +496,16 @@ mod tests {
                 file("/home/u/.config/cadmus/AGENTS.md", "global rules\n"),
                 file("/repo/AGENTS.md", "project rules"),
             ],
-            &[spec("read_file"), spec("edit_file")],
+            &[
+                skill("pr-preflight", "review a PR before opening it"),
+                skill("self-review", "review your own diff before committing"),
+            ],
+            &[spec("read_file"), spec("edit_file"), spec("skill")],
         );
         // The hash is deterministic for fixed inputs — pinned verbatim, so
         // any prompt, chain or tool-schema change fails two readable diffs
         // (this one and the text below) for hand review.
-        insta::assert_snapshot!(prefix.hash(), @"958ef9aebc18938b");
+        insta::assert_snapshot!(prefix.hash(), @"6f9d1be9047c5d95");
         insta::assert_snapshot!(prefix.record().system, @"
         You are Cadmus, a coding agent working in a terminal workspace.
 
@@ -490,6 +530,13 @@ mod tests {
         ## /repo/AGENTS.md
 
         project rules
+
+        # Skills
+
+        Skills available to this run, as name: description pairs — a skill's description says when it applies. When the task matches one, activate that skill before starting the work; its full instructions then join the conversation.
+
+        - pr-preflight: review a PR before opening it
+        - self-review: review your own diff before committing
         ");
         insta::assert_debug_snapshot!(prefix.record().instructions, @r#"
         [
@@ -503,21 +550,77 @@ mod tests {
             },
         ]
         "#);
+        insta::assert_debug_snapshot!(prefix.record().skills, @r#"
+        [
+            SkillSummary {
+                name: "pr-preflight",
+                description: "review a PR before opening it",
+            },
+            SkillSummary {
+                name: "self-review",
+                description: "review your own diff before committing",
+            },
+        ]
+        "#);
+    }
+
+    #[test]
+    fn each_section_renders_without_the_other() {
+        // The two optional sections are independent: instructions-only (the
+        // common production shape — a workspace with AGENTS.md and no
+        // skills) and skills-only both pin their exact bytes, including the
+        // one-blank-line boundary each way.
+        let instructions_only = FrozenPrefix::assemble(
+            "PROMPT",
+            &[file("/repo/AGENTS.md", "project rules")],
+            &[],
+            &[spec("read_file")],
+        );
+        insta::assert_snapshot!(instructions_only.record().system, @"
+        PROMPT
+
+        # Workspace instructions
+
+        Instruction files applying to this workspace, in precedence order: a file nearer the edited path wins on conflict, and the user's explicit prompt wins over everything.
+
+        ## /repo/AGENTS.md
+
+        project rules
+        ");
+
+        let skills_only = FrozenPrefix::assemble(
+            "PROMPT",
+            &[],
+            &[skill("pr-preflight", "review a PR before opening it")],
+            &[],
+        );
+        insta::assert_snapshot!(skills_only.record().system, @"
+        PROMPT
+
+        # Skills
+
+        Skills available to this run, as name: description pairs — a skill's description says when it applies. When the task matches one, activate that skill before starting the work; its full instructions then join the conversation.
+
+        - pr-preflight: review a PR before opening it
+        ");
     }
 
     #[test]
     fn hash_is_sensitive_to_every_prefix_input() {
-        let base = FrozenPrefix::assemble("P", &[file("/a", "x")], &[spec("t")]);
-        let prompt_changed = FrozenPrefix::assemble("Q", &[file("/a", "x")], &[spec("t")]);
-        let file_changed = FrozenPrefix::assemble("P", &[file("/a", "y")], &[spec("t")]);
-        let tool_changed = FrozenPrefix::assemble("P", &[file("/a", "x")], &[spec("u")]);
+        let base = FrozenPrefix::assemble("P", &[file("/a", "x")], &[], &[spec("t")]);
+        let prompt_changed = FrozenPrefix::assemble("Q", &[file("/a", "x")], &[], &[spec("t")]);
+        let file_changed = FrozenPrefix::assemble("P", &[file("/a", "y")], &[], &[spec("t")]);
+        let skills_changed =
+            FrozenPrefix::assemble("P", &[file("/a", "x")], &[skill("s", "d")], &[spec("t")]);
+        let tool_changed = FrozenPrefix::assemble("P", &[file("/a", "x")], &[], &[spec("u")]);
         assert_ne!(base.hash(), prompt_changed.hash());
         assert_ne!(base.hash(), file_changed.hash());
+        assert_ne!(base.hash(), skills_changed.hash());
         assert_ne!(base.hash(), tool_changed.hash());
         // … and stable for identical inputs (the comparability contract).
         assert_eq!(
             base.hash(),
-            FrozenPrefix::assemble("P", &[file("/a", "x")], &[spec("t")]).hash()
+            FrozenPrefix::assemble("P", &[file("/a", "x")], &[], &[spec("t")]).hash()
         );
     }
 
