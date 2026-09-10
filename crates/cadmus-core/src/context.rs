@@ -29,7 +29,7 @@ Working discipline:
 - Never abandon a broken intermediate state: finish the change or revert it, so the workspace is never left worse than you found it.
 - When a task is unclear or has multiple valid interpretations, ask instead of guessing.
 
-A status block maintained by code (never by you) ends every request: cwd, git state, tool counters and the task list. Trust it over your own recollection of these facts.";
+A status block maintained by code (never by you) ends every request: cwd, git state, the clock, tool counters and the task list. Trust it over your own recollection of these facts.";
 
 /// `todo_write`'s wire name, shared by the loop (which folds its calls into
 /// the trailer state) and the wiring layer's tool definition — one SSOT for
@@ -221,11 +221,55 @@ pub fn format_injected(file: &InstructionFile) -> String {
     )
 }
 
+/// Epoch millis → `YYYY-MM-DDTHH:MM:SSZ`. Hand-rolled civil math under the
+/// zero-new-dependency policy (std has no calendar): Howard Hinnant's
+/// civil-from-days algorithm, UTC only — std exposes no local timezone, and
+/// an unambiguous `Z` beats a wrong local guess. `z` is always positive
+/// (u64 epoch days + the era offset), so Hinnant's negative-era adjustment
+/// is deliberately omitted.
+fn civil_utc(epoch_ms: u64) -> String {
+    let ms = i64::try_from(epoch_ms).unwrap_or(i64::MAX);
+    let days = ms.div_euclid(86_400_000);
+    let secs = ms.rem_euclid(86_400_000) / 1000;
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(month <= 2);
+    let (hh, mm, ss) = (secs / 3600, secs / 60 % 60, secs % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Run-elapsed render, bounded to the largest two units (`17s`, `42m17s`,
+/// `3h02m`) — two units keep the line short regardless of run length.
+fn format_elapsed(delta_ms: u64) -> String {
+    let secs = delta_ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, secs / 60 % 60)
+    }
+}
+
 /// The per-request trailer's inputs: the run-static cwd, the probed git
-/// state, and the loop-folded tool counters and todo list.
+/// state, the injected clock's reading, and the loop-folded tool counters
+/// and todo list.
 pub struct TrailerView<'a> {
     pub cwd: &'a str,
     pub git: Option<GitStatus>,
+    /// Wall-clock now and the run's recorded start (the `StartRun` event's
+    /// timestamp), epoch millis — minted from the injected clock, never
+    /// read directly (ADR-0002's time seam). Rendered bytes are recorded on
+    /// the per-turn `LlmRequest` event, so replay never re-derives them.
+    pub now_ms: u64,
+    pub run_start_ms: u64,
     pub tool_counts: &'a BTreeMap<String, usize>,
     pub todos: &'a [TodoItem],
 }
@@ -251,6 +295,13 @@ pub fn render_trailer(view: &TrailerView) -> String {
             out.push_str(")\n");
         }
     }
+    out.push_str("time: ");
+    out.push_str(&civil_utc(view.now_ms));
+    out.push_str(" (run elapsed ");
+    out.push_str(&format_elapsed(
+        view.now_ms.saturating_sub(view.run_start_ms),
+    ));
+    out.push_str(")\n");
     if !view.tool_counts.is_empty() {
         out.push_str("tools: ");
         let mut first = true;
@@ -505,7 +556,7 @@ mod tests {
         // The hash is deterministic for fixed inputs — pinned verbatim, so
         // any prompt, chain or tool-schema change fails two readable diffs
         // (this one and the text below) for hand review.
-        insta::assert_snapshot!(prefix.hash(), @"6f9d1be9047c5d95");
+        insta::assert_snapshot!(prefix.hash(), @"e919c6682d3d425c");
         insta::assert_snapshot!(prefix.record().system, @"
         You are Cadmus, a coding agent working in a terminal workspace.
 
@@ -517,7 +568,7 @@ mod tests {
         - Never abandon a broken intermediate state: finish the change or revert it, so the workspace is never left worse than you found it.
         - When a task is unclear or has multiple valid interpretations, ask instead of guessing.
 
-        A status block maintained by code (never by you) ends every request: cwd, git state, tool counters and the task list. Trust it over your own recollection of these facts.
+        A status block maintained by code (never by you) ends every request: cwd, git state, the clock, tool counters and the task list. Trust it over your own recollection of these facts.
 
         # Workspace instructions
 
@@ -625,6 +676,48 @@ mod tests {
     }
 
     #[test]
+    fn civil_utc_matches_known_dates() {
+        assert_eq!(civil_utc(0), "1970-01-01T00:00:00Z");
+        // The leap rules both ways: 2024 divisible by 4, 2000 divisible by
+        // 400 (IS leap — pins the doe/146096 correction), 2100 divisible by
+        // 100 but not 400 (NOT leap).
+        assert_eq!(civil_utc(1_709_210_096_000), "2024-02-29T12:34:56Z");
+        assert_eq!(civil_utc(951_782_400_000), "2000-02-29T00:00:00Z");
+        assert_eq!(civil_utc(4_107_542_400_000), "2100-03-01T00:00:00Z");
+        assert_eq!(civil_utc(1_788_393_600_000), "2026-09-03T00:00:00Z");
+    }
+
+    #[test]
+    fn elapsed_render_is_bounded_to_two_units() {
+        assert_eq!(format_elapsed(0), "0s");
+        assert_eq!(format_elapsed(999), "0s");
+        assert_eq!(format_elapsed(17_000), "17s");
+        // The unit boundaries: 59.999s stays seconds, 60s rolls to minutes.
+        assert_eq!(format_elapsed(59_999), "59s");
+        assert_eq!(format_elapsed(60_000), "1m00s");
+        assert_eq!(format_elapsed(2_537_000), "42m17s");
+        assert_eq!(format_elapsed(3_599_000), "59m59s");
+        assert_eq!(format_elapsed(3_600_000), "1h00m");
+        assert_eq!(format_elapsed(3_600_000 + 120_000 + 5_000), "1h02m");
+        assert_eq!(format_elapsed(25 * 3_600_000), "25h00m");
+    }
+
+    #[test]
+    fn a_clock_reading_before_the_run_start_clamps_to_zero() {
+        // Clock skew (now < run start) must never produce a negative or
+        // garbage elapsed — the render saturates at zero.
+        let out = render_trailer(&TrailerView {
+            cwd: "/repo",
+            git: None,
+            now_ms: 1_000,
+            run_start_ms: 2_000,
+            tool_counts: &BTreeMap::new(),
+            todos: &[],
+        });
+        assert!(out.contains("run elapsed 0s"), "{out}");
+    }
+
+    #[test]
     fn trailer_render_is_snapshot_locked() {
         let mut counts = BTreeMap::new();
         counts.insert("edit_file".into(), 1);
@@ -646,12 +739,16 @@ mod tests {
                 active_form: None,
             },
         ];
+        // Fixed clock readings: run start 2026-09-03T00:00:00Z, now +42m17s.
+        let (run_start_ms, now_ms) = (1_788_393_600_000, 1_788_396_137_000);
         let full = render_trailer(&TrailerView {
             cwd: "/repo",
             git: Some(GitStatus {
                 branch: "main".into(),
                 dirty_count: 2,
             }),
+            now_ms,
+            run_start_ms,
             tool_counts: &counts,
             todos: &todos,
         });
@@ -659,6 +756,7 @@ mod tests {
         [cadmus status]
         cwd: /repo
         git: main, dirty(2)
+        time: 2026-09-03T00:42:17Z (run elapsed 42m17s)
         tools: edit_file: 1, read_file: 3
         todo:
           [x] done thing
@@ -669,12 +767,15 @@ mod tests {
         let minimal = render_trailer(&TrailerView {
             cwd: "/repo",
             git: None,
+            now_ms,
+            run_start_ms,
             tool_counts: &BTreeMap::new(),
             todos: &[],
         });
         insta::assert_snapshot!(minimal, @"
         [cadmus status]
         cwd: /repo
+        time: 2026-09-03T00:42:17Z (run elapsed 42m17s)
         ");
 
         let clean = render_trailer(&TrailerView {
@@ -683,6 +784,8 @@ mod tests {
                 branch: "main".into(),
                 dirty_count: 0,
             }),
+            now_ms,
+            run_start_ms,
             tool_counts: &BTreeMap::new(),
             todos: &[],
         });
@@ -690,6 +793,7 @@ mod tests {
         [cadmus status]
         cwd: /repo
         git: main, clean
+        time: 2026-09-03T00:42:17Z (run elapsed 42m17s)
         ");
     }
 

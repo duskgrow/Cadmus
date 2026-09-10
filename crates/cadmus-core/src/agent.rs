@@ -274,6 +274,9 @@ impl AgentLoop {
             .attributes
             .insert(attrs::PREFIX_HASH.into(), self.context.prefix.hash().into());
         self.emit(&start_run)?;
+        // The trailer's elapsed anchors to the recorded run start — one
+        // fact, one home (the StartRun event's own timestamp).
+        let run_start_ms = start_run.time_unix_ms;
 
         for turn in 1..=self.max_turns {
             // Turn-boundary command application: a pending interrupt ends
@@ -291,7 +294,7 @@ impl AgentLoop {
             // fresh trailer. The trailer never enters `messages` — the
             // history stays the true conversation; the rendered bytes ride
             // the request event so replay audits exactly what the model saw.
-            let trailer = self.render_trailer();
+            let trailer = self.render_trailer(run_start_ms);
             let mut request_messages = Vec::with_capacity(messages.len() + 2);
             request_messages.push(self.context.prefix.message());
             {
@@ -902,16 +905,19 @@ impl AgentLoop {
         }
     }
 
-    /// Renders this turn's trailer from the probe's fresh snapshot and the
-    /// folded state. The probe runs before any lock is taken — it may block
-    /// on a subprocess, and the folded state does not depend on it.
-    fn render_trailer(&self) -> String {
+    /// Renders this turn's trailer from the probe's fresh snapshot, the
+    /// injected clock and the folded state. The probe runs before any lock
+    /// is taken — it may block on a subprocess, and the folded state does
+    /// not depend on it.
+    fn render_trailer(&self, run_start_ms: u64) -> String {
         let git = self.context.probe.snapshot();
         let counts = self.tool_counts.lock().expect("tool counts poisoned");
         let todos = self.todos.lock().expect("todos poisoned");
         render_trailer(&TrailerView {
             cwd: &self.context.cwd,
             git,
+            now_ms: self.telemetry.clock.now_unix_ms(),
+            run_start_ms,
             tool_counts: &counts,
             todos: &todos,
         })
