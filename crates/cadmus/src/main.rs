@@ -38,7 +38,7 @@ enum Commands {
         #[arg(long, default_value_t = 4_096)]
         max_tokens: u32,
         /// Maximum assistant turns before the run fails
-        #[arg(long, default_value_t = 16)]
+        #[arg(long, default_value_t = 100)]
         max_turns: usize,
         /// Approve workspace-write tool calls without prompting; unattended
         /// runs deny them by default
@@ -74,7 +74,7 @@ enum Commands {
         #[arg(long, default_value_t = 4_096)]
         max_tokens: u32,
         /// Maximum assistant turns before a case's run fails
-        #[arg(long, default_value_t = 16)]
+        #[arg(long, default_value_t = 100)]
         max_turns: usize,
         /// Directory the trajectory JSONL logs are written under (default:
         /// the `CADMUS_TRACE_ROOT` env var, else the platform data dir)

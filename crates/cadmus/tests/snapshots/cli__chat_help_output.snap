@@ -14,7 +14,7 @@ Options:
       --model <MODEL>            Model name (required for --provider custom; registry dialects pin their model)
       --base-url <BASE_URL>      Endpoint base URL (required for --provider custom; key comes from `CADMUS_CUSTOM_API_KEY`)
       --max-tokens <MAX_TOKENS>  Maximum output tokens per assistant turn [default: 4096]
-      --max-turns <MAX_TURNS>    Maximum assistant turns before the run fails [default: 16]
+      --max-turns <MAX_TURNS>    Maximum assistant turns before the run fails [default: 100]
   -y, --yes                      Approve workspace-write tool calls without prompting; unattended runs deny them by default
       --trace-root <TRACE_ROOT>  Directory the trajectory JSONL log is written under (default: the `CADMUS_TRACE_ROOT` env var, else the platform data dir)
       --json                     Emit the full message sequence as JSON on stdout
