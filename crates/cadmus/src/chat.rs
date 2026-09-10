@@ -105,6 +105,11 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         probe: Arc::new(context::GitProbe::new(root.clone())),
         tracker: Arc::new(context::NestedInstructions::new(root.clone())),
         cwd: root.display().to_string(),
+        artifacts: log
+            .artifacts(&trace_id)
+            .map(|sink| Arc::new(sink) as Arc<dyn cadmus_contract::ArtifactSink>)
+            .expect("a minted trace id resolves its artifact dir"),
+        fold_policy: cadmus_core::context::FoldPolicy::default(),
     };
     // The client protocol (ADR-0013): the renderer subscribes to the live
     // stream; approvals auto-resolve through the command channel per the

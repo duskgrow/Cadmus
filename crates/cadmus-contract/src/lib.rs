@@ -29,14 +29,14 @@ pub use context::{InstructionFile, PrefixRecord, TodoItem, TodoStatus};
 pub use error::ModelError;
 pub use eval::{CaseResult, EvalCase, EvalReport, EvalSplit, Expectation};
 pub use event::{
-    Clock, Command, Event, EventError, EventKind, IdSequence, ScoreEvent, Status, SteerMode,
-    TurnOutcome, attrs, error_kinds,
+    Clock, Command, EstimateSource, Event, EventError, EventKind, FoldedRef, IdSequence,
+    ScoreEvent, Status, SteerMode, TurnOutcome, attrs, error_kinds,
 };
 pub use live::{
     Attachment, CallSnapshot, CommandSource, InFlight, LiveItem, LiveKind, LiveSink, LiveUpdate,
     OpenTurn, PendingApproval, Sync, TurnSnapshot,
 };
-pub use log::{EventSink, LogError};
+pub use log::{ArtifactSink, EventSink, LogError};
 pub use message::{ContentPart, Message, Role, ToolCall};
 pub use profile::{CacheHints, FewShotFormat, ModelProfile, ToolDescriptionStyle};
 pub use provider::{ChunkStream, Provider};

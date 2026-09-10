@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cadmus_contract::{
-    Approval, Clock, Command, CommandSource, Event, EventSink, IdSequence, LiveItem, LiveKind,
-    LiveSink, LogError, ToolCall,
+    Approval, ArtifactSink, Clock, Command, CommandSource, Event, EventSink, IdSequence, LiveItem,
+    LiveKind, LiveSink, LogError, ToolCall,
 };
 
-use crate::context::{FrozenPrefix, GitStatus, NoInstructions, StatusProbe};
+use crate::context::{FoldPolicy, FrozenPrefix, GitStatus, NoInstructions, StatusProbe};
 use crate::{ClientProtocol, ContextBundle, Telemetry};
 
 /// An in-memory [`EventSink`] keeping every appended event, in order.
@@ -214,6 +214,30 @@ impl IdSequence for SeqIds {
     }
 }
 
+/// An in-memory [`ArtifactSink`] keeping every spill by name — the fold
+/// tests assert on the spilled content itself.
+#[derive(Default)]
+pub struct RecordingArtifacts {
+    spills: Mutex<BTreeMap<String, String>>,
+}
+
+impl RecordingArtifacts {
+    /// A snapshot of everything spilled so far (name → content).
+    pub fn spills(&self) -> BTreeMap<String, String> {
+        self.spills.lock().expect("artifacts poisoned").clone()
+    }
+}
+
+impl ArtifactSink for RecordingArtifacts {
+    fn spill(&self, name: &str, content: &str) -> Result<String, LogError> {
+        self.spills
+            .lock()
+            .expect("artifacts poisoned")
+            .insert(name.to_string(), content.to_string());
+        Ok(format!("test-artifacts/{name}"))
+    }
+}
+
 /// A [`StatusProbe`] with a scripted answer (ADR-0002's injected-IO rule).
 pub struct FixedProbe(pub Option<GitStatus>);
 
@@ -224,8 +248,9 @@ impl StatusProbe for FixedProbe {
 }
 
 /// A minimal context bundle for loop tests: a one-word prompt, no
-/// instruction files, `/test` cwd, no git, no nested tracking. Tests that
-/// exercise the pipeline assemble their own.
+/// instruction files, `/test` cwd, no git, no nested tracking, recording
+/// artifacts and the default fold policy. Tests that exercise the pipeline
+/// assemble their own.
 #[must_use]
 pub fn test_context() -> ContextBundle {
     ContextBundle {
@@ -233,6 +258,8 @@ pub fn test_context() -> ContextBundle {
         probe: Arc::new(FixedProbe(None)),
         tracker: Arc::new(NoInstructions),
         cwd: "/test".into(),
+        artifacts: Arc::new(RecordingArtifacts::default()),
+        fold_policy: FoldPolicy::default(),
     }
 }
 

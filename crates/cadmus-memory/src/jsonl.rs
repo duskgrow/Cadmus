@@ -25,7 +25,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use cadmus_contract::{Event, EventSink, LogError};
+use cadmus_contract::{ArtifactSink, Event, EventSink, LogError};
 
 pub struct JsonlLog {
     /// `roots[0]` is the write root; the rest are read-only tiering roots.
@@ -111,6 +111,51 @@ impl EventSink for JsonlLog {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(line.as_bytes())?;
         Ok(())
+    }
+}
+
+/// The per-trace [`ArtifactSink`] (ADR-0007 item 2/3): spill files live in
+/// `<shard>/<trace-id>.artifacts/` — the same pure function of the trace id
+/// as the trace file itself, so artifacts shard, tier and archive exactly
+/// like their trace. Minted per run via [`JsonlLog::artifacts`].
+pub struct JsonlArtifacts {
+    /// The write root's artifact directory for this trace.
+    dir: PathBuf,
+    /// The shard-relative directory the returned references start from —
+    /// references stay valid when shards relocate across tiering roots.
+    rel_dir: PathBuf,
+}
+
+impl JsonlLog {
+    /// The per-run artifact sink; `None` when the trace id carries no
+    /// parseable shard date (same rejection discipline as the trace file).
+    #[must_use]
+    pub fn artifacts(&self, trace_id: &str) -> Option<JsonlArtifacts> {
+        let rel = shard_rel_path(trace_id)?;
+        let rel_dir = rel.with_extension("artifacts");
+        Some(JsonlArtifacts {
+            dir: self.roots[0].join(&rel_dir),
+            rel_dir,
+        })
+    }
+}
+
+impl ArtifactSink for JsonlArtifacts {
+    fn spill(&self, name: &str, content: &str) -> Result<String, LogError> {
+        // Names are loop-minted (`m<index>.txt`); the guard keeps the
+        // shard-relative layout honest against any future caller.
+        if name.contains(['/', '\\']) {
+            return Err(LogError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("artifact name must not contain a path separator: `{name}`"),
+            )));
+        }
+        fs::create_dir_all(&self.dir)?;
+        fs::write(self.dir.join(name), content)?;
+        // The reference is `/`-joined by construction (`shard_rel_path`
+        // formats with `/`): the log bytes stay platform-identical, and
+        // relocation across tiering roots keeps string equality.
+        Ok(format!("{}/{name}", self.rel_dir.display()))
     }
 }
 
@@ -299,6 +344,23 @@ mod tests {
             .append(&event("tr-no-date-here", 1))
             .expect_err("must reject");
         assert!(matches!(err, LogError::InvalidTraceId(_)));
+    }
+
+    #[test]
+    fn artifacts_spill_under_the_trace_shard_and_reference_it_relatively() {
+        let scratch = Scratch::new("artifacts");
+        let log = JsonlLog::new(scratch.0.clone()).expect("log");
+        let trace_id = "tr-20260903-abc123";
+        let sink = log.artifacts(trace_id).expect("shard parses");
+        let reference = sink.spill("m4.txt", "full text").expect("spill");
+        assert_eq!(
+            reference, "2026/09/03/tr-20260903-abc123.artifacts/m4.txt",
+            "shard-relative, so artifacts relocate with their trace"
+        );
+        let written = std::fs::read_to_string(scratch.0.join(&reference)).expect("read back");
+        assert_eq!(written, "full text");
+        // The name guard keeps the shard-relative layout honest.
+        assert!(sink.spill("../escape.txt", "x").is_err());
     }
 
     #[test]

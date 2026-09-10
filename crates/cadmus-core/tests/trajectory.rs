@@ -418,6 +418,7 @@ async fn loop_events_replay_to_the_run_state() {
             EventKind::Command(Command::Steer { .. }) => "steer",
             EventKind::Command(Command::Interrupt { .. }) => "interrupt",
             EventKind::LlmRequest { .. } => "llm_request",
+            EventKind::Fold { .. } => "fold",
             EventKind::InstructionInjected { .. } => "instruction_injected",
             EventKind::LlmResponse { .. } => "llm_response",
             EventKind::ToolCall { .. } => "tool_call",

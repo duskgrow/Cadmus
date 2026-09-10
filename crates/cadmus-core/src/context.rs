@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use cadmus_contract::{InstructionFile, Message, PrefixRecord, TodoItem, TodoStatus, ToolSpec};
+use cadmus_contract::{
+    FoldedRef, InstructionFile, Message, PrefixRecord, TodoItem, TodoStatus, ToolSpec,
+};
 
 /// The v1 system prompt (ADR-0007 item 1(a)). Two content rules, both
 /// load-bearing: it never names an individual tool — tool-specific guidance
@@ -100,6 +102,13 @@ impl FrozenPrefix {
             system: self.text.clone(),
             instructions: self.instructions.clone(),
         }
+    }
+
+    /// The assembled system text's byte length — the usage heuristic's
+    /// prefix term, without cloning the string.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.text.len()
     }
 }
 
@@ -243,6 +252,174 @@ pub fn render_trailer(view: &TrailerView) -> String {
         }
     }
     out
+}
+
+// ---- The fold machinery (ADR-0007 item 2 + the 2026-09-10 amendment) ----
+
+/// The fold's tunables (the amendment: validate against trace evidence).
+/// Production uses `Default`; tests shrink the numbers to fold early.
+#[derive(Debug, Clone)]
+pub struct FoldPolicy {
+    /// Tool results from the last N completed turns stay verbatim — the
+    /// model is still actively working with them.
+    pub recent_turns: usize,
+    /// Nothing smaller is worth folding: a folded result must always
+    /// shrink, and the placeholder itself runs ~1.2 KB with the marker.
+    pub min_bytes: usize,
+    /// The growth cadence cap: Δ = `min(growth_max_tokens, max_context/10)`.
+    pub growth_max_tokens: u64,
+    /// The ceiling rule's hard line, as a percentage of the window — the
+    /// overflow line, never an attention optimum. Fold first there; the
+    /// (phase-2) compactor answers "nothing foldable or still over".
+    pub ceiling_percent: u64,
+}
+
+impl Default for FoldPolicy {
+    fn default() -> Self {
+        Self {
+            recent_turns: FOLD_RECENT_TURNS,
+            min_bytes: FOLD_MIN_BYTES,
+            growth_max_tokens: FOLD_GROWTH_MAX_TOKENS,
+            ceiling_percent: FOLD_CEILING_PERCENT,
+        }
+    }
+}
+
+/// A fold fires every Δ estimated tokens of growth; Δ caps at 100k and
+/// scales with the window. Tunable, per the amendment: validate against
+/// trace evidence (the cache-invalidation trade).
+pub const FOLD_GROWTH_MAX_TOKENS: u64 = 100_000;
+
+/// The ceiling rule's default hard line: 80% of the window.
+pub const FOLD_CEILING_PERCENT: u64 = 80;
+
+/// The recency scope: tool results from the last X completed turns stay
+/// verbatim — the model is still actively working with them.
+pub const FOLD_RECENT_TURNS: usize = 5;
+
+/// The size floor: a folded result must always shrink. With 512-byte
+/// excerpts and the marker, the placeholder lands near 1.2 KB, so nothing
+/// under 2 KB is worth folding.
+pub const FOLD_MIN_BYTES: usize = 2048;
+
+/// The head/tail excerpt kept visible in a folded placeholder (the ADR's
+/// head+tail truncation standard).
+pub const FOLD_EXCERPT_BYTES: usize = 512;
+
+// The placeholder must always shrink: floor > head + tail + marker.
+const _: () = assert!(FOLD_MIN_BYTES > 2 * FOLD_EXCERPT_BYTES);
+
+/// The placeholder text standing in for a folded tool result. Explicit
+/// (never silent, ADR-0007 item 2): the fold marker names the folded size
+/// and where the full text lives — the spill artifact (trace store, outside
+/// the workspace, for audit) and the safe re-obtaining path for the model
+/// (re-read the source narrower; never re-run a side-effecting command).
+#[must_use]
+pub fn fold_placeholder_text(original: &str, folded: &FoldedRef) -> String {
+    let head = excerpt_boundary(original, FOLD_EXCERPT_BYTES, true);
+    let tail = excerpt_boundary(original, FOLD_EXCERPT_BYTES, false);
+    format!(
+        "{head}\n\n[COMPRESSED: the middle of this tool result was folded for context budget \
+         — {} bytes in total. The full text is archived in spill artifact {} (trace store, \
+         outside the workspace). To re-obtain it, re-read the original source with a narrower \
+         window or pattern — never re-run a side-effecting command just to regenerate output.]\n\n{tail}",
+        folded.original_bytes, folded.spill
+    )
+}
+
+/// The substituted message for one folded tool result: role, call id and
+/// the `is_error` flag carry over verbatim; only the text is replaced.
+#[must_use]
+pub fn fold_placeholder_message(original: &Message, folded: &FoldedRef) -> Message {
+    let text = message_text(original);
+    let mut placeholder = Message::tool_result(
+        original
+            .tool_call_id
+            .clone()
+            .expect("a folded message is a tool result"),
+        serde_json::Value::String(fold_placeholder_text(&text, folded)),
+    );
+    placeholder.is_error = original.is_error;
+    placeholder
+}
+
+/// The message's text body (its text parts concatenated) — the spill
+/// content and the placeholder's excerpt source.
+#[must_use]
+pub fn message_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            cadmus_contract::ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A UTF-8-boundary-safe head or tail excerpt of at most `bytes` bytes.
+fn excerpt_boundary(text: &str, bytes: usize, head: bool) -> &str {
+    if text.len() <= bytes {
+        return text;
+    }
+    if head {
+        let mut end = bytes;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        let mut start = text.len() - bytes;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        &text[start..]
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn placeholder_render_is_snapshot_locked() {
+        let original = format!("{}middle{}", "h".repeat(600), "t".repeat(600));
+        let folded = FoldedRef {
+            event_id: "e12".into(),
+            call_id: "c7".into(),
+            spill: "2026/09/10/tr-x.artifacts/m4.txt".into(),
+            original_bytes: original.len() as u64,
+        };
+        let message = Message::tool_result("c7", json!(original));
+        let placeholder = fold_placeholder_message(&message, &folded);
+        insta::assert_snapshot!(message_text(&placeholder), @"
+        hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+
+        [COMPRESSED: the middle of this tool result was folded for context budget — 1206 bytes in total. The full text is archived in spill artifact 2026/09/10/tr-x.artifacts/m4.txt (trace store, outside the workspace). To re-obtain it, re-read the original source with a narrower window or pattern — never re-run a side-effecting command just to regenerate output.]
+
+        tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+        ");
+    }
+
+    #[test]
+    fn excerpt_respects_char_boundaries() {
+        // 3-byte characters: a naive byte cut would split one.
+        let text = "€".repeat(400);
+        let head = excerpt_boundary(&text, 10, true);
+        assert_eq!(head.len(), 9);
+        let tail = excerpt_boundary(&text, 10, false);
+        assert_eq!(tail.len(), 9);
+    }
+
+    #[test]
+    fn fold_policy_defaults_match_the_amendment() {
+        let policy = FoldPolicy::default();
+        assert_eq!(policy.recent_turns, 5);
+        assert_eq!(policy.min_bytes, FOLD_MIN_BYTES);
+        assert_eq!(policy.growth_max_tokens, 100_000);
+        assert_eq!(policy.ceiling_percent, 80);
+    }
 }
 
 #[cfg(test)]

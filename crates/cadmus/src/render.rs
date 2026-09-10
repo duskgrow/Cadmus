@@ -71,6 +71,9 @@ fn render(item: &LiveItem, calls: &mut HashMap<String, String>) -> bool {
             EventKind::InstructionInjected { path, .. } => {
                 eprintln!("  + instructions: {path}");
             }
+            EventKind::Fold { folded, .. } => {
+                eprintln!("  ⑃ context folded: {} result(s) compressed", folded.len());
+            }
             EventKind::ToolCall { call } => {
                 calls.insert(call.id.clone(), call.name.clone());
                 eprintln!("  → {}", call.name);

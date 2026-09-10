@@ -31,6 +31,10 @@
 //! - `instruction_injected` appends its user message through the same pure
 //!   formatter the loop used, so folded and live bytes match (ADR-0005's
 //!   fold invariant);
+//! - `fold` is asset-only: the log keeps the true history (full result
+//!   text) forever — directives steer the *request render*, never this
+//!   fold. The exact-context reconstruction the directive enables is the
+//!   phase-2 reflector's render, a different consumer;
 //! - `eval_score` accumulates; `run_finished` is the trace's terminal record.
 
 use std::collections::HashSet;
@@ -82,9 +86,11 @@ pub fn replay_trace(events: &[Event]) -> RunState {
             // snapshotted (its trailer rides it for audit, but the trailer
             // is render output, not history); a resolve's effects arrive as
             // tool results, an interrupt's as the truncated turn and
-            // terminal record.
+            // terminal record; a fold directive steers the request render —
+            // the true history here keeps the full text.
             EventKind::Command(Command::ResolveApproval { .. } | Command::Interrupt { .. })
-            | EventKind::LlmRequest { .. } => {}
+            | EventKind::LlmRequest { .. }
+            | EventKind::Fold { .. } => {}
             EventKind::InstructionInjected { path, content } => {
                 let file = cadmus_contract::InstructionFile {
                     path: path.clone(),

@@ -167,12 +167,53 @@ pub enum EventKind {
     /// touches its subtree — path + content inline, so the fold rebuilds
     /// byte-identical messages without the filesystem.
     InstructionInjected { path: String, content: String },
+    /// A fold directive (ADR-0007 item 3 + the 2026-09-10 amendment): the
+    /// listed tool results render as `[COMPRESSED]` placeholders from this
+    /// point on. The log keeps the full text forever — directives never
+    /// rewrite history; the request render substitutes, and replay walks
+    /// both (the true history from the result events, the exact context the
+    /// model saw from record + directives).
+    Fold {
+        /// The folded results, each referenced by its tool-result event id
+        /// (the log's reference discipline: by id, never by path).
+        folded: Vec<FoldedRef>,
+        /// The usage estimate (tokens) that triggered the fold, with its
+        /// source — every compaction decision is auditable.
+        estimate: u64,
+        estimator: EstimateSource,
+    },
     /// A client command (ADR-0002): validated, ordered and appended by the
     /// owning node; retries apply idempotently via the envelope id.
     Command(Command),
     /// Clean terminal record of the run. A trace without it ended in a crash
     /// window; the failure detail rides the envelope.
     RunFinished { turns: u32 },
+}
+
+/// One folded tool result within a [`Fold`](EventKind::Fold) directive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoldedRef {
+    /// The tool-result event id being folded.
+    pub event_id: String,
+    /// The call that produced it (redundant with `event_id` — kept so a
+    /// directive reads self-describing in the raw log).
+    pub call_id: String,
+    /// The spill artifact's log-stable reference (shard-relative), where
+    /// the full text lives outside the log.
+    pub spill: String,
+    /// The folded content's size in bytes — the placeholder cites it, and
+    /// the fold's own audit trail sums it.
+    pub original_bytes: u64,
+}
+
+/// Which estimator produced a fold directive's usage estimate (ADR-0007's
+/// 2026-09-10 amendment item 4: provider-reported input tokens win, the
+/// chars/4 heuristic is the fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateSource {
+    Provider,
+    Chars4,
 }
 
 /// One (case, metric) eval score recorded against a run.

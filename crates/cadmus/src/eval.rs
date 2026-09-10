@@ -350,6 +350,11 @@ async fn run_case(
         probe: std::sync::Arc::new(cadmus_core::context::NoProbe),
         tracker: std::sync::Arc::new(cadmus_core::context::NoInstructions),
         cwd: scratch.0.display().to_string(),
+        artifacts: std::sync::Arc::new(
+            log.artifacts(&trace_id)
+                .expect("a minted trace id resolves its artifact dir"),
+        ),
+        fold_policy: cadmus_core::context::FoldPolicy::default(),
     };
     let agent = AgentLoop::new(
         provider.clone(),

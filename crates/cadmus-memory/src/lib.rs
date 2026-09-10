@@ -5,4 +5,4 @@
 
 mod jsonl;
 
-pub use jsonl::{JsonlLog, ReadError, mint_trace_id};
+pub use jsonl::{JsonlArtifacts, JsonlLog, ReadError, mint_trace_id};

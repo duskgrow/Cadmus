@@ -4,8 +4,8 @@
 //! one canonical snapshot of a fully populated event.
 
 use cadmus_contract::{
-    Approval, ChatRequest, Command, Event, EventError, EventKind, FinishReason, Message, Role,
-    ScoreEvent, Status, SteerMode, ToolCall, TurnOutcome, Usage, attrs,
+    Approval, ChatRequest, Command, EstimateSource, Event, EventError, EventKind, FinishReason,
+    FoldedRef, Message, Role, ScoreEvent, Status, SteerMode, ToolCall, TurnOutcome, Usage, attrs,
 };
 use serde_json::json;
 
@@ -63,6 +63,16 @@ fn every_kind_round_trips() {
         EventKind::InstructionInjected {
             path: "/repo/crates/x/AGENTS.md".into(),
             content: "crate rules".into(),
+        },
+        EventKind::Fold {
+            folded: vec![FoldedRef {
+                event_id: "e9".into(),
+                call_id: "c4".into(),
+                spill: "2026/09/10/tr-x.artifacts/m3.txt".into(),
+                original_bytes: 45_210,
+            }],
+            estimate: 102_400,
+            estimator: EstimateSource::Chars4,
         },
         sample_event().kind,
         EventKind::ToolCall {

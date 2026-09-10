@@ -15,6 +15,17 @@ pub trait EventSink: Send + Sync {
     fn append(&self, event: &Event) -> Result<(), LogError>;
 }
 
+/// The spill-artifact port (ADR-0007 items 2/3): a folded tool result's
+/// full text spills to a per-trace artifact file, and the fold directive
+/// references the returned reference. Implementations must return a
+/// log-stable reference (shard-relative, so artifacts stay relocatable
+/// across tiering roots) — never a bare absolute path. A spill failure is
+/// fatal to the run: a silently unspilled fold would orphan the
+/// placeholder's re-obtaining pointer (the never-silent rule).
+pub trait ArtifactSink: Send + Sync {
+    fn spill(&self, name: &str, content: &str) -> Result<String, LogError>;
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
     #[error("event serialization failed: {0}")]
