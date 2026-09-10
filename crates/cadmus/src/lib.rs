@@ -5,6 +5,7 @@
 
 mod approval;
 mod chat;
+mod context;
 mod error;
 mod eval;
 pub mod provider;

@@ -23,7 +23,7 @@ or install from crates.io:
     export MOONSHOT_API_KEY=sk-…   # or DEEPSEEK_API_KEY for --provider deepseek
     cadmus chat "explain crates/cadmus-core/src/agent.rs"
 
-The coding tools (`read_file`, `grep`, `list_dir`, `write_file`, `edit_file`) are confined to the current directory; writes are denied unless approved — pass `-y` to approve them in headless use. See `cadmus --help` for all options.
+The coding tools (`read_file`, `grep`, `list_dir`, `write_file`, `edit_file`, `todo_write`) are confined to the current directory; writes are denied unless approved — pass `-y` to approve them in headless use. Workspace instruction files (`AGENTS.md` — user-global plus ancestors root→cwd) are loaded into the system prompt. See `cadmus --help` for all options.
 
 ## Development
 

@@ -332,9 +332,29 @@ async fn run_case(
         )),
         commands: Arc::new(commands),
     };
+    // The context pipeline runs hermetically (ADR-0007): workspace-only
+    // instructions and the scratch's own (absent) git state, so scores never
+    // depend on the operator's machine.
+    let tools = coding_tools(scratch.0.clone());
+    let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
+    let instructions = crate::context::instruction_chain(
+        &scratch.0,
+        &crate::context::InstructionScope::WorkspaceOnly,
+    );
+    let pipeline = cadmus_core::ContextBundle {
+        prefix: cadmus_core::FrozenPrefix::assemble(
+            cadmus_core::context::SYSTEM_PROMPT,
+            &instructions,
+            &specs,
+        ),
+        probe: std::sync::Arc::new(cadmus_core::context::NoProbe),
+        tracker: std::sync::Arc::new(cadmus_core::context::NoInstructions),
+        cwd: scratch.0.display().to_string(),
+    };
     let agent = AgentLoop::new(
         provider.clone(),
-        coding_tools(scratch.0.clone()),
+        tools,
+        pipeline,
         protocol,
         config.max_turns,
         telemetry,

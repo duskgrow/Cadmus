@@ -20,6 +20,7 @@ enum ReplayScript {
 pub struct ReplayProvider {
     capabilities: Capabilities,
     scripts: Mutex<VecDeque<ReplayScript>>,
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl ReplayProvider {
@@ -30,6 +31,7 @@ impl ReplayProvider {
         Self {
             capabilities: Self::default_capabilities(),
             scripts: Mutex::new(scripts.into_iter().map(ReplayScript::Stream).collect()),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -42,6 +44,12 @@ impl ReplayProvider {
     /// A script of all-Ok chunks.
     pub fn script(chunks: Vec<StreamChunk>) -> Vec<Result<StreamChunk, ModelError>> {
         chunks.into_iter().map(Ok).collect()
+    }
+
+    /// Every request received so far, in order — the assertions on what
+    /// the loop sent (context renders, tool lists) read this.
+    pub fn requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().expect("requests poisoned").clone()
     }
 
     fn default_capabilities() -> Capabilities {
@@ -73,6 +81,10 @@ impl Provider for ReplayProvider {
                 "replay profile declares no tool support".into(),
             ));
         }
+        self.requests
+            .lock()
+            .expect("requests poisoned")
+            .push(request.clone());
         match self
             .scripts
             .lock()

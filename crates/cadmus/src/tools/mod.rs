@@ -18,6 +18,7 @@ mod edit_file;
 mod grep;
 mod list_dir;
 mod read_file;
+mod todo_write;
 mod write_file;
 
 use std::path::{Path, PathBuf};
@@ -29,10 +30,11 @@ use edit_file::EditFile;
 use grep::Grep;
 use list_dir::ListDir;
 use read_file::ReadFile;
+use todo_write::TodoWrite;
 use write_file::WriteFile;
 
 /// The phase-1 coding toolset: `read_file`, `grep`, `list_dir`,
-/// `write_file`, `edit_file`.
+/// `write_file`, `edit_file`, `todo_write`.
 #[must_use]
 pub fn coding_tools(root: PathBuf) -> Vec<Arc<dyn AgentTool>> {
     let root = canonical_root(root);
@@ -42,6 +44,7 @@ pub fn coding_tools(root: PathBuf) -> Vec<Arc<dyn AgentTool>> {
         Arc::new(ListDir { root: root.clone() }),
         Arc::new(WriteFile { root: root.clone() }),
         Arc::new(EditFile { root }),
+        Arc::new(TodoWrite),
     ]
 }
 
@@ -52,7 +55,7 @@ fn canonical_root(root: PathBuf) -> PathBuf {
 /// Resolves `path` against `root` and confines it: the canonical result must
 /// stay inside the root. Absolute paths are honored only if they still point
 /// into the workspace.
-fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     // `has_root`, not `is_absolute`: on Windows `/foo` has a root but no
     // drive prefix, and `is_absolute` says false — which would silently
     // re-root it into the workspace. Root-relative input gets the same
@@ -125,6 +128,8 @@ mod tests {
         assert_eq!(effect_of("list_dir"), Some(Effect::Perception));
         assert_eq!(effect_of("write_file"), Some(Effect::Mutation));
         assert_eq!(effect_of("edit_file"), Some(Effect::Mutation));
+        // Harness-internal state, no workspace effect: never gated.
+        assert_eq!(effect_of("todo_write"), Some(Effect::Perception));
     }
 
     /// A scratch workspace under the OS temp dir, unique per test name and

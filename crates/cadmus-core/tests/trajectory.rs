@@ -54,11 +54,12 @@ fn full_log() -> Vec<Event> {
             1,
             EventKind::Command(Command::StartRun {
                 base: Box::new(base),
+                prefix: None,
             }),
         )
         .with_attribute(attrs::PROVIDER, "kimi")
         .with_attribute(attrs::MODEL, "kimi-k3"),
-        envelope(2, 2, EventKind::LlmRequest).with_attribute(attrs::TURN, 1),
+        envelope(2, 2, EventKind::LlmRequest { trailer: None }).with_attribute(attrs::TURN, 1),
         envelope(
             3,
             2,
@@ -94,7 +95,7 @@ fn full_log() -> Vec<Event> {
                 result: json!("fn main() {\n    // TODO\n}"),
             },
         ),
-        envelope(6, 4, EventKind::LlmRequest).with_attribute(attrs::TURN, 2),
+        envelope(6, 4, EventKind::LlmRequest { trailer: None }).with_attribute(attrs::TURN, 2),
         envelope(
             7,
             4,
@@ -295,6 +296,7 @@ fn a_second_start_run_is_ignored() {
             1,
             EventKind::Command(Command::StartRun {
                 base: Box::new(ChatRequest::user_text("a different run entirely", 1_024)),
+                prefix: None,
             }),
         )
         .with_attribute(attrs::PROVIDER, "deepseek"),
@@ -391,6 +393,7 @@ async fn run_two_turn_loop() -> (Vec<Event>, cadmus_core::RunOutcome) {
     let agent = AgentLoop::new(
         provider,
         vec![Arc::new(EchoTool)],
+        cadmus_core::testing::test_context(),
         cadmus_core::testing::auto_approving().0,
         8,
         telemetry,
@@ -414,7 +417,8 @@ async fn loop_events_replay_to_the_run_state() {
             EventKind::Command(Command::ResolveApproval { .. }) => "resolve_approval",
             EventKind::Command(Command::Steer { .. }) => "steer",
             EventKind::Command(Command::Interrupt { .. }) => "interrupt",
-            EventKind::LlmRequest => "llm_request",
+            EventKind::LlmRequest { .. } => "llm_request",
+            EventKind::InstructionInjected { .. } => "instruction_injected",
             EventKind::LlmResponse { .. } => "llm_response",
             EventKind::ToolCall { .. } => "tool_call",
             EventKind::ToolResult { .. } => "tool_result",

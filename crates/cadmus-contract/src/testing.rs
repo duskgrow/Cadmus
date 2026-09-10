@@ -365,6 +365,7 @@ fn start_run(seq: u64) -> LiveItem {
         seq,
         EventKind::Command(Command::StartRun {
             base: Box::new(ChatRequest::user_text("fix the typo", 4_096)),
+            prefix: None,
         }),
         None,
     )
@@ -416,7 +417,7 @@ pub fn attach_at_zero_tails_every_item_in_order(subject: &impl ProtocolSubject) 
 
     let script = vec![
         start_run(1),
-        recorded(2, EventKind::LlmRequest, Some(1)),
+        recorded(2, EventKind::LlmRequest { trailer: None }, Some(1)),
         delta(3, 1, StreamChunk::TextDelta("hel".into())),
         delta(4, 1, StreamChunk::TextDelta("lo".into())),
         text_done(5, 1, "hello"),
@@ -434,7 +435,11 @@ pub fn attach_at_zero_tails_every_item_in_order(subject: &impl ProtocolSubject) 
 /// past `as_of_seq` — no gap, no duplicate, no jump when the response lands.
 pub fn mid_run_attach_syncs_history_and_in_flight(subject: &impl ProtocolSubject) {
     subject.publish(&start_run(1));
-    subject.publish(&recorded(2, EventKind::LlmRequest, Some(1)));
+    subject.publish(&recorded(
+        2,
+        EventKind::LlmRequest { trailer: None },
+        Some(1),
+    ));
     subject.publish(&delta(3, 1, StreamChunk::TextDelta("partial".into())));
 
     let attachment = subject.attach();
@@ -465,7 +470,11 @@ pub fn mid_run_attach_syncs_history_and_in_flight(subject: &impl ProtocolSubject
 /// 3); the recorded resolve clears the pending request for later attaches.
 pub fn attach_during_approval_wait_shows_the_pending_request(subject: &impl ProtocolSubject) {
     subject.publish(&start_run(1));
-    subject.publish(&recorded(2, EventKind::LlmRequest, Some(1)));
+    subject.publish(&recorded(
+        2,
+        EventKind::LlmRequest { trailer: None },
+        Some(1),
+    ));
     subject.publish(&LiveItem {
         seq: 3,
         trace_id: SUITE_TRACE.into(),
@@ -547,7 +556,11 @@ pub fn a_lagging_subscriber_is_told_to_resync(subject: &impl ProtocolSubject) {
 /// completed message in the fold.
 pub fn turn_close_clears_the_in_flight_turn(subject: &impl ProtocolSubject) {
     subject.publish(&start_run(1));
-    subject.publish(&recorded(2, EventKind::LlmRequest, Some(1)));
+    subject.publish(&recorded(
+        2,
+        EventKind::LlmRequest { trailer: None },
+        Some(1),
+    ));
     subject.publish(&delta(3, 1, StreamChunk::TextDelta("do".into())));
     subject.publish(&delta(4, 1, StreamChunk::TextDelta("ne".into())));
     subject.publish(&text_done(5, 1, "done"));
@@ -566,7 +579,7 @@ pub fn turn_close_clears_the_in_flight_turn(subject: &impl ProtocolSubject) {
 pub fn fixed_sync_script() -> Vec<LiveItem> {
     vec![
         start_run(1),
-        recorded(2, EventKind::LlmRequest, Some(1)),
+        recorded(2, EventKind::LlmRequest { trailer: None }, Some(1)),
         delta(3, 1, StreamChunk::TextDelta("partial".into())),
         delta(
             4,

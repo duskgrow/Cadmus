@@ -56,7 +56,14 @@ fn serializes_to_a_single_line() {
 #[test]
 fn every_kind_round_trips() {
     let kinds = vec![
-        EventKind::LlmRequest,
+        EventKind::LlmRequest { trailer: None },
+        EventKind::LlmRequest {
+            trailer: Some("[cadmus status]\ncwd: /repo\n".into()),
+        },
+        EventKind::InstructionInjected {
+            path: "/repo/crates/x/AGENTS.md".into(),
+            content: "crate rules".into(),
+        },
         sample_event().kind,
         EventKind::ToolCall {
             call: ToolCall {
@@ -77,6 +84,18 @@ fn every_kind_round_trips() {
         }),
         EventKind::Command(Command::StartRun {
             base: Box::new(ChatRequest::user_text("fix the typo", 4_096)),
+            prefix: None,
+        }),
+        EventKind::Command(Command::StartRun {
+            base: Box::new(ChatRequest::user_text("fix the typo", 4_096)),
+            prefix: Some(cadmus_contract::PrefixRecord {
+                hash: "4fe2a901c5e0b3a8".into(),
+                system: "You are Cadmus.".into(),
+                instructions: vec![cadmus_contract::InstructionFile {
+                    path: "/repo/AGENTS.md".into(),
+                    content: "project rules".into(),
+                }],
+            }),
         }),
         EventKind::Command(Command::ResolveApproval {
             command_id: "cmd-1".into(),

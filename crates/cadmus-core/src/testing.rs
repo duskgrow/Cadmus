@@ -12,7 +12,8 @@ use cadmus_contract::{
     LiveSink, LogError, ToolCall,
 };
 
-use crate::{ClientProtocol, Telemetry};
+use crate::context::{FrozenPrefix, GitStatus, NoInstructions, StatusProbe};
+use crate::{ClientProtocol, ContextBundle, Telemetry};
 
 /// An in-memory [`EventSink`] keeping every appended event, in order.
 #[derive(Default)]
@@ -210,6 +211,28 @@ pub struct SeqIds(AtomicU64);
 impl IdSequence for SeqIds {
     fn next(&self) -> u64 {
         self.0.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// A [`StatusProbe`] with a scripted answer (ADR-0002's injected-IO rule).
+pub struct FixedProbe(pub Option<GitStatus>);
+
+impl StatusProbe for FixedProbe {
+    fn snapshot(&self) -> Option<GitStatus> {
+        self.0.clone()
+    }
+}
+
+/// A minimal context bundle for loop tests: a one-word prompt, no
+/// instruction files, `/test` cwd, no git, no nested tracking. Tests that
+/// exercise the pipeline assemble their own.
+#[must_use]
+pub fn test_context() -> ContextBundle {
+    ContextBundle {
+        prefix: FrozenPrefix::assemble("test prompt", &[], &[]),
+        probe: Arc::new(FixedProbe(None)),
+        tracker: Arc::new(NoInstructions),
+        cwd: "/test".into(),
     }
 }
 

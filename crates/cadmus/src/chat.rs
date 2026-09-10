@@ -16,13 +16,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cadmus_contract::{ChatRequest, ContentPart, Message, Usage};
-use cadmus_core::{AgentLoop, ClientProtocol, RunOutcome, Telemetry};
+use cadmus_core::{AgentLoop, ClientProtocol, ContextBundle, RunOutcome, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
 
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
 use crate::tools::coding_tools;
-use crate::{Error, approval, provider, render};
+use crate::{Error, approval, context, provider, render};
 
 /// Everything a chat run needs, resolved from CLI arguments. The provider
 /// name is passed through verbatim — the vendor registry lives in
@@ -88,6 +88,24 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         .expect("minted id resolves to a shard path");
     tracing::info!(trace_id, path = %trace_path.display(), "recording trajectory");
     let root = std::env::current_dir().map_err(Error::Workdir)?;
+    let root = root.canonicalize().unwrap_or(root);
+    // The context pipeline (ADR-0007): frozen prefix (system prompt +
+    // AGENTS.md chain + tool specs in the hash), git probe and nested-file
+    // tracker — the loop renders prefix + history + fresh trailer per turn.
+    let tools = coding_tools(root.clone());
+    let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
+    let instructions =
+        context::instruction_chain(&root, &context::InstructionScope::UserAndWorkspace);
+    let pipeline = ContextBundle {
+        prefix: cadmus_core::FrozenPrefix::assemble(
+            cadmus_core::context::SYSTEM_PROMPT,
+            &instructions,
+            &specs,
+        ),
+        probe: Arc::new(context::GitProbe::new(root.clone())),
+        tracker: Arc::new(context::NestedInstructions::new(root.clone())),
+        cwd: root.display().to_string(),
+    };
     // The client protocol (ADR-0013): the renderer subscribes to the live
     // stream; approvals auto-resolve through the command channel per the
     // `--yes` policy — the same two ports the TUI will drive. The attach
@@ -105,7 +123,8 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
     let renderer = render::spawn(broadcaster.clone(), first);
     let agent = AgentLoop::new(
         Arc::new(provider),
-        coding_tools(root),
+        tools,
+        pipeline,
         ClientProtocol {
             live: Arc::new(resolver),
             commands: Arc::new(commands),

@@ -19,7 +19,7 @@
     export MOONSHOT_API_KEY=sk-…   # 或 DEEPSEEK_API_KEY（配合 --provider deepseek）
     cadmus chat "解释一下 crates/cadmus-core/src/agent.rs"
 
-编码工具（`read_file`、`grep`、`list_dir`、`write_file`、`edit_file`）限制在当前目录内；写操作默认拒绝，无人值守使用时传 `-y` 批准。完整选项见 `cadmus --help`。
+编码工具（`read_file`、`grep`、`list_dir`、`write_file`、`edit_file`、`todo_write`）限制在当前目录内；写操作默认拒绝，无人值守使用时传 `-y` 批准。工作区指令文件（`AGENTS.md`——用户全局加上从根到当前目录的祖先链）会加载进系统提示。完整选项见 `cadmus --help`。
 
 ## 开发
 

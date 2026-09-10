@@ -10,7 +10,10 @@
 //!   the same command/event (ADR-0002's idempotent-retry seam) folds once;
 //! - the first `start_run` seeds the message history and run metadata (a
 //!   later one is a writer anomaly and is ignored) — a trace is
-//!   self-sufficient;
+//!   self-sufficient. Its prefix record is *request-render* material, not
+//!   conversational history, so it never enters `messages` (the exact
+//!   rendered request is reconstructible from record + fold + per-request
+//!   trailer — phase 2's reflector is that consumer);
 //! - `llm_request` is asset-only (full text for audit/training), no state;
 //! - `llm_response` appends the assistant message; only an `ok` response
 //!   counts as a completed turn. An errored response still appends its
@@ -25,6 +28,9 @@
 //!   application, so the fold matches the live history); `resolve_approval`
 //!   and `interrupt` are asset-only — their effects already arrive as tool
 //!   results, the truncated turn and the terminal record;
+//! - `instruction_injected` appends its user message through the same pure
+//!   formatter the loop used, so folded and live bytes match (ADR-0005's
+//!   fold invariant);
 //! - `eval_score` accumulates; `run_finished` is the trace's terminal record.
 
 use std::collections::HashSet;
@@ -57,7 +63,7 @@ pub fn replay_trace(events: &[Event]) -> RunState {
             continue;
         }
         match &event.kind {
-            EventKind::Command(Command::StartRun { base }) => {
+            EventKind::Command(Command::StartRun { base, .. }) => {
                 if started {
                     continue;
                 }
@@ -73,10 +79,21 @@ pub fn replay_trace(events: &[Event]) -> RunState {
                 state.messages.push(Message::user(text.clone()));
             }
             // Asset-only arms: a request's history is rebuilt, never
-            // snapshotted; a resolve's effects arrive as tool results, an
-            // interrupt's as the truncated turn and terminal record.
+            // snapshotted (its trailer rides it for audit, but the trailer
+            // is render output, not history); a resolve's effects arrive as
+            // tool results, an interrupt's as the truncated turn and
+            // terminal record.
             EventKind::Command(Command::ResolveApproval { .. } | Command::Interrupt { .. })
-            | EventKind::LlmRequest => {}
+            | EventKind::LlmRequest { .. } => {}
+            EventKind::InstructionInjected { path, content } => {
+                let file = cadmus_contract::InstructionFile {
+                    path: path.clone(),
+                    content: content.clone(),
+                };
+                state
+                    .messages
+                    .push(Message::user(crate::context::format_injected(&file)));
+            }
             EventKind::LlmResponse {
                 message, warnings, ..
             } => {

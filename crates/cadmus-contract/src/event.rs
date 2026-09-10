@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Approval, ChatRequest, FinishReason, Message, ToolCall, Usage};
+use crate::{Approval, ChatRequest, FinishReason, Message, PrefixRecord, ToolCall, Usage};
 
 /// One event in a trajectory log: a fixed envelope with the per-kind payload
 /// flattened under the `kind` tag.
@@ -128,7 +128,14 @@ pub enum EventKind {
     /// turn would grow the log quadratically in turns. Per-call parameters
     /// arrive as attributes when cascade routing (phase 3) makes them vary
     /// within a run.
-    LlmRequest,
+    LlmRequest {
+        /// The status trailer rendered into this one request (ADR-0007's
+        /// 2026-09-10 amendment): appended at render time, never part of
+        /// the message history. Recorded so replay reconstructs the exact
+        /// context the model saw; `None` only in pre-pipeline logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trailer: Option<String>,
+    },
     /// The assembled assistant turn. `status == error` with a partial
     /// `message` records a stream that died mid-flight.
     LlmResponse {
@@ -155,6 +162,11 @@ pub enum EventKind {
     ToolResult { call_id: String, result: Value },
     /// One (case, metric) score for this run (eval set v1, ADR-0005 §7).
     EvalScore(ScoreEvent),
+    /// A nested workspace-instruction file entering the history (ADR-0007
+    /// item 1(a)): injected as a standalone user message when the run first
+    /// touches its subtree — path + content inline, so the fold rebuilds
+    /// byte-identical messages without the filesystem.
+    InstructionInjected { path: String, content: String },
     /// A client command (ADR-0002): validated, ordered and appended by the
     /// owning node; retries apply idempotently via the envelope id.
     Command(Command),
@@ -188,7 +200,15 @@ pub struct ScoreEvent {
 pub enum Command {
     /// Opens a run: the base request the loop started from. Replaying a log
     /// re-seeds the message history from here, so a trace is self-sufficient.
-    StartRun { base: Box<ChatRequest> },
+    StartRun {
+        base: Box<ChatRequest>,
+        /// The frozen prefix (ADR-0007): system prompt + instruction chain +
+        /// prefix hash. Recorded once here — per-turn requests render it
+        /// from this record, never from the live filesystem. `None` only in
+        /// pre-pipeline logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix: Option<PrefixRecord>,
+    },
     /// Resolves one approval request (ADR-0008 item 4 / ADR-0013 item 6):
     /// one decision per presented call, in call order. A short reply denies
     /// the remainder — unanswered is deny; extra decisions are ignored. A
@@ -337,4 +357,8 @@ pub mod attrs {
     /// eval run's start-run command and every score event, so reflection
     /// input selection excludes holdout traces by construction.
     pub const EVAL_SPLIT: &str = "selfevol.eval_split";
+    /// The frozen-prefix change-detection hash (ADR-0007 item 1(a)): the
+    /// eval-pairing comparability key — scores group only within one prompt
+    /// build. On every start-run command.
+    pub const PREFIX_HASH: &str = "selfevol.prefix_hash";
 }

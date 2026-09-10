@@ -10,16 +10,18 @@
 
 mod agent;
 mod assembler;
+pub mod context;
 mod eval;
 mod replay;
 pub mod testing;
 mod trajectory;
 
 pub use agent::{
-    AgentError, AgentLoop, AgentTool, ClientProtocol, Concurrency, Effect, RunOutcome, Telemetry,
-    ToolError,
+    AgentError, AgentLoop, AgentTool, ClientProtocol, Concurrency, ContextBundle, Effect,
+    RunOutcome, Telemetry, ToolError,
 };
 pub use assembler::{AssembledTurn, MessageAssembler};
+pub use context::FrozenPrefix;
 // The trajectory's llm_response events carry the outcome (ADR-0005), so the
 // enum moved to the contract crate; re-exported here for continuity. The
 // fold output types followed it (ADR-0013: `Sync` carries the fold).

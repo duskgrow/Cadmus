@@ -60,13 +60,16 @@ fn render(item: &LiveItem, calls: &mut HashMap<String, String>) -> bool {
             eprintln!("  ! approval requested: {names}");
         }
         LiveKind::Recorded { event } => match &event.kind {
-            EventKind::LlmRequest => {
+            EventKind::LlmRequest { .. } => {
                 let turn = event
                     .attributes
                     .get(attrs::TURN)
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
                 eprintln!("• turn {turn}");
+            }
+            EventKind::InstructionInjected { path, .. } => {
+                eprintln!("  + instructions: {path}");
             }
             EventKind::ToolCall { call } => {
                 calls.insert(call.id.clone(), call.name.clone());

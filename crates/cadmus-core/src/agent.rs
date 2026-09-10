@@ -4,12 +4,16 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use cadmus_contract::{
     Approval, ChatRequest, Clock, Command, CommandSource, Event, EventError, EventKind, EventSink,
-    FinishReason, IdSequence, LiveItem, LiveKind, LiveSink, Message, ModelError, Provider,
-    SteerMode, ToolCall, ToolSpec, TurnOutcome, attrs, error_kinds,
+    FinishReason, IdSequence, InstructionFile, LiveItem, LiveKind, LiveSink, Message, ModelError,
+    Provider, SteerMode, TodoItem, ToolCall, ToolSpec, TurnOutcome, attrs, error_kinds,
 };
 use serde_json::Value;
 use tokio_stream::StreamExt;
 
+use crate::context::{
+    FrozenPrefix, InstructionTracker, StatusProbe, TODO_WRITE, TrailerView, format_injected,
+    render_trailer,
+};
 use crate::{AssembledTurn, MessageAssembler};
 
 /// A tool the agent may call. rmcp servers are wrapped into this trait at the
@@ -66,10 +70,21 @@ pub struct ToolError {
     pub message: String,
 }
 
+/// The context pipeline's injected bundle (ADR-0007): the run-frozen prefix,
+/// the per-turn freshness probe, the nested-instruction tracker and the
+/// run-static cwd. Assembly and rendering stay pure (`crate::context`); the
+/// wiring layer fills these from the filesystem.
+pub struct ContextBundle {
+    pub prefix: FrozenPrefix,
+    pub probe: Arc<dyn StatusProbe>,
+    pub tracker: Arc<dyn InstructionTracker>,
+    pub cwd: String,
+}
+
 /// The client-protocol bundle injected into the loop (ADR-0013): `live` is
-/// the ephemeral downstream (deltas, span boundaries via recorded events,
-/// approval requests), `commands` the only upstream (resolve, steer,
-/// interrupt). A client is an event subscriber plus a command producer —
+/// the ephemeral downstream (deltas, span boundaries via recorded-event
+/// republication, approval requests), `commands` the only upstream (resolve,
+/// steer, interrupt). A client is an event subscriber plus a command producer —
 /// the loop never talks to a client any other way, so the TUI, headless
 /// clients and phase 5's remote attach all share this one path.
 pub struct ClientProtocol {
@@ -132,11 +147,17 @@ pub enum AgentError {
 pub struct AgentLoop {
     provider: Arc<dyn Provider>,
     tools: HashMap<String, Arc<dyn AgentTool>>,
+    context: ContextBundle,
     protocol: ClientProtocol,
     specs: Vec<ToolSpec>,
     max_turns: usize,
     telemetry: Telemetry,
     inbox: Mutex<Inbox>,
+    /// Trailer state (ADR-0007 item 1(c)): per-tool execution counters and
+    /// the `todo_write` list — code-folded from settled calls, never
+    /// model-recomputed.
+    tool_counts: Mutex<BTreeMap<String, usize>>,
+    todos: Mutex<Vec<TodoItem>>,
 }
 
 /// Commands received ahead of their application point, classified on
@@ -167,6 +188,7 @@ impl AgentLoop {
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn AgentTool>>,
+        context: ContextBundle,
         protocol: ClientProtocol,
         max_turns: usize,
         telemetry: Telemetry,
@@ -185,11 +207,14 @@ impl AgentLoop {
         Self {
             provider,
             tools,
+            context,
             protocol,
             specs,
             max_turns,
             telemetry,
             inbox: Mutex::new(Inbox::default()),
+            tool_counts: Mutex::new(BTreeMap::new()),
+            todos: Mutex::new(Vec::new()),
         }
     }
 
@@ -214,9 +239,13 @@ impl AgentLoop {
             None,
             EventKind::Command(Command::StartRun {
                 base: Box::new(base.clone()),
+                prefix: Some(self.context.prefix.record()),
             }),
         );
         start_run.attributes = self.telemetry.run_attributes.clone();
+        start_run
+            .attributes
+            .insert(attrs::PREFIX_HASH.into(), self.context.prefix.hash().into());
         self.emit(&start_run)?;
 
         for turn in 1..=self.max_turns {
@@ -227,20 +256,38 @@ impl AgentLoop {
             // one (ADR-0005's fold invariant).
             self.drain_boundary(&mut messages, &root_span, turn)?;
             let turn_span = self.next_span();
-            // Per-turn clone is deliberate: the provider borrows an immutable
+            // Three-segment render (ADR-0007): frozen prefix + history +
+            // fresh trailer. The trailer never enters `messages` — the
+            // history stays the true conversation; the rendered bytes ride
+            // the request event so replay audits exactly what the model saw.
+            let trailer = self.render_trailer();
+            let mut request_messages = Vec::with_capacity(messages.len() + 2);
+            request_messages.push(self.context.prefix.message());
+            request_messages.extend(messages.iter().cloned());
+            request_messages.push(Message::user(trailer.clone()));
+            // Per-turn rebuild is deliberate: the provider borrows an immutable
             // request while the loop owns the growing history. The cost is a
             // turn-boundary memcpy — negligible against the network call that
             // follows (the hot path, stream aggregation, stays clone-light).
-            let request = base.clone().with_messages(messages.clone());
-            // The span-open marker only; the full per-turn history is
-            // reconstructible from the fold, never snapshotted here.
-            self.emit(&self.turn_event(&turn_span, &root_span, turn, EventKind::LlmRequest))?;
+            let request = base.clone().with_messages(request_messages);
+            self.emit(&self.turn_event(
+                &turn_span,
+                &root_span,
+                turn,
+                EventKind::LlmRequest {
+                    trailer: Some(trailer),
+                },
+            ))?;
 
             let turn_result = self
                 .assistant_turn(&request, &turn_span, &root_span, turn)
                 .await?;
             messages.push(turn_result.message.clone());
             let calls: Vec<_> = turn_result.message.tool_calls().cloned().collect();
+            // Newly-entered subtrees surface before dispatch: the tracker
+            // reads the calls' intent, so a failed or denied call still
+            // injects — the model is already operating there.
+            let nested = self.context.tracker.on_calls(&calls);
             if calls.is_empty() {
                 self.poll_incoming();
                 // An interrupt at the exact finish line is moot — the run
@@ -261,6 +308,7 @@ impl AgentLoop {
             }
             self.dispatch_tools(calls, &mut messages, &root_span, turn)
                 .await?;
+            self.inject_nested(nested, &mut messages, &root_span, turn)?;
         }
 
         let error = AgentError::TurnLimit(self.max_turns);
@@ -632,6 +680,7 @@ impl AgentLoop {
         turn: usize,
     ) -> Result<(), AgentError> {
         let (result, error) = outcome;
+        self.note_outcome(call, error.as_ref());
         let is_error = error.is_some();
         let mut result_event = self.turn_event(
             tool_span,
@@ -651,6 +700,76 @@ impl AgentLoop {
         } else {
             Message::tool_result(call.id.clone(), result)
         });
+        Ok(())
+    }
+
+    /// Folds one settled call into the trailer state (ADR-0007 item 1(c)):
+    /// the per-tool counter counts executions — gate rejections and
+    /// unknown-tool answers never executed, so neither is counted — and a
+    /// successful `todo_write` replaces the todo list verbatim (the one
+    /// model-authored value code may store, per the item's own exception).
+    fn note_outcome(&self, call: &ToolCall, error: Option<&EventError>) {
+        let never_executed = matches!(
+            error,
+            Some(e) if e.kind == error_kinds::APPROVAL_REJECTED || e.kind == error_kinds::UNKNOWN_TOOL
+        );
+        if !never_executed {
+            *self
+                .tool_counts
+                .lock()
+                .expect("tool counts poisoned")
+                .entry(call.name.clone())
+                .or_insert(0) += 1;
+        }
+        if error.is_none()
+            && call.name == TODO_WRITE
+            && let Some(items) = call.arguments.get("items")
+            && let Ok(items) = serde_json::from_value::<Vec<TodoItem>>(items.clone())
+        {
+            *self.todos.lock().expect("todos poisoned") = items;
+        }
+    }
+
+    /// Renders this turn's trailer from the probe's fresh snapshot and the
+    /// folded state. The probe runs before any lock is taken — it may block
+    /// on a subprocess, and the folded state does not depend on it.
+    fn render_trailer(&self) -> String {
+        let git = self.context.probe.snapshot();
+        let counts = self.tool_counts.lock().expect("tool counts poisoned");
+        let todos = self.todos.lock().expect("todos poisoned");
+        render_trailer(&TrailerView {
+            cwd: &self.context.cwd,
+            git,
+            tool_counts: &counts,
+            todos: &todos,
+        })
+    }
+
+    /// Appends newly-entered subtrees' instruction files as standalone user
+    /// messages (ADR-0007 item 1(a)): never folded into a tool result (that
+    /// would pollute the errors-are-corrections channel), each recorded as
+    /// an `instruction_injected` event so the fold rebuilds identical bytes.
+    fn inject_nested(
+        &self,
+        files: Vec<InstructionFile>,
+        messages: &mut Vec<Message>,
+        root_span: &str,
+        turn: usize,
+    ) -> Result<(), AgentError> {
+        for file in files {
+            let text = format_injected(&file);
+            let span = self.next_span();
+            self.emit(&self.turn_event(
+                &span,
+                root_span,
+                turn,
+                EventKind::InstructionInjected {
+                    path: file.path,
+                    content: file.content,
+                },
+            ))?;
+            messages.push(Message::user(text));
+        }
         Ok(())
     }
 
@@ -1345,6 +1464,7 @@ mod tests {
             AgentLoop::new(
                 Arc::new(provider),
                 tools,
+                crate::testing::test_context(),
                 crate::testing::auto_approving().0,
                 max_turns,
                 telemetry,
@@ -1370,7 +1490,14 @@ mod tests {
         let (telemetry, sink) = test_telemetry("tr-test");
         let (protocol, live, _sender) = crate::testing::protocol_with(policy);
         (
-            AgentLoop::new(Arc::new(provider), tools, protocol, 8, telemetry),
+            AgentLoop::new(
+                Arc::new(provider),
+                tools,
+                crate::testing::test_context(),
+                protocol,
+                8,
+                telemetry,
+            ),
             sink,
             live,
         )
@@ -1466,6 +1593,7 @@ mod tests {
                 name: "step",
                 log: log.clone(),
             })],
+            crate::testing::test_context(),
             protocol,
             8,
             telemetry,
@@ -2008,6 +2136,7 @@ mod tests {
         let agent = AgentLoop::new(
             Arc::new(provider),
             vec![Arc::new(EchoTool)],
+            crate::testing::test_context(),
             protocol,
             8,
             telemetry,
@@ -2054,7 +2183,14 @@ mod tests {
         };
         sender.send(steer()).expect("first send");
         sender.send(steer()).expect("the retry");
-        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![],
+            crate::testing::test_context(),
+            protocol,
+            8,
+            telemetry,
+        );
 
         let outcome = agent
             .run(&ChatRequest::user_text("hi", 1_024))
@@ -2121,6 +2257,7 @@ mod tests {
         let agent = AgentLoop::new(
             Arc::new(provider),
             vec![Arc::new(EchoTool)],
+            crate::testing::test_context(),
             protocol,
             8,
             telemetry,
@@ -2174,7 +2311,14 @@ mod tests {
                 mode: SteerMode::Queue,
             })
             .expect("send");
-        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![],
+            crate::testing::test_context(),
+            protocol,
+            8,
+            telemetry,
+        );
 
         let outcome = agent
             .run(&ChatRequest::user_text("hi", 1_024))
@@ -2221,7 +2365,14 @@ mod tests {
             live,
             commands: std::sync::Arc::new(commands),
         };
-        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![],
+            crate::testing::test_context(),
+            protocol,
+            8,
+            telemetry,
+        );
 
         let err = agent
             .run(&ChatRequest::user_text("hi", 1_024))
@@ -2301,6 +2452,7 @@ mod tests {
                 name: "step",
                 log: log.clone(),
             })],
+            crate::testing::test_context(),
             protocol,
             8,
             telemetry,
@@ -2368,6 +2520,7 @@ mod tests {
         let agent = AgentLoop::new(
             Arc::new(provider),
             vec![Arc::new(InterruptTool(sender))],
+            crate::testing::test_context(),
             protocol,
             8,
             telemetry,
@@ -2407,6 +2560,7 @@ mod tests {
         let agent = AgentLoop::new(
             Arc::new(provider),
             vec![Arc::new(EchoTool)],
+            crate::testing::test_context(),
             protocol,
             8,
             telemetry,
@@ -2470,7 +2624,14 @@ mod tests {
             live: std::sync::Arc::new(reactive),
             commands: std::sync::Arc::new(commands),
         };
-        let agent = AgentLoop::new(Arc::new(provider), vec![], protocol, 8, telemetry);
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![],
+            crate::testing::test_context(),
+            protocol,
+            8,
+            telemetry,
+        );
 
         let outcome = agent
             .run(&ChatRequest::user_text("hi", 1_024))
@@ -2495,13 +2656,307 @@ mod tests {
         assert_eq!(finished.status, Status::Ok);
     }
 
+    struct TodoTool;
+
+    #[async_trait]
+    impl AgentTool for TodoTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: TODO_WRITE.into(),
+                description: "test todo tool".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        async fn invoke(&self, _arguments: Value) -> Result<Value, ToolError> {
+            Ok(Value::String("recorded".into()))
+        }
+    }
+
+    /// A tracker that yields its files on the first call batch, then nothing.
+    struct OneShotTracker(std::sync::Mutex<Option<Vec<InstructionFile>>>);
+
+    impl InstructionTracker for OneShotTracker {
+        fn on_calls(&self, calls: &[ToolCall]) -> Vec<InstructionFile> {
+            if calls.is_empty() {
+                return Vec::new();
+            }
+            self.0
+                .lock()
+                .expect("tracker poisoned")
+                .take()
+                .unwrap_or_default()
+        }
+    }
+
+    /// The text parts of one message, concatenated (test assertion helper).
+    fn text_of(message: &Message) -> String {
+        use cadmus_contract::ContentPart;
+        message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A context bundle with a real instruction chain and a scripted git
+    /// probe, for the pipeline tests.
+    fn pipeline_context(
+        git: Option<crate::context::GitStatus>,
+        tracker: Arc<dyn InstructionTracker>,
+    ) -> ContextBundle {
+        ContextBundle {
+            prefix: FrozenPrefix::assemble(
+                "test prompt",
+                &[InstructionFile {
+                    path: "/repo/AGENTS.md".into(),
+                    content: "project rules".into(),
+                }],
+                &[],
+            ),
+            probe: Arc::new(crate::testing::FixedProbe(git)),
+            tracker,
+            cwd: "/repo".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn requests_render_three_segments_and_start_run_records_the_prefix() {
+        let provider = Arc::new(
+            ReplayProvider::new([text_script("done")]).with_capabilities(test_capabilities()),
+        );
+        let (telemetry, sink) = test_telemetry("tr-context");
+        let context = pipeline_context(
+            Some(crate::context::GitStatus {
+                branch: "main".into(),
+                dirty_count: 3,
+            }),
+            Arc::new(crate::context::NoInstructions),
+        );
+        let agent = AgentLoop::new(
+            provider.clone(),
+            vec![],
+            context,
+            crate::testing::auto_approving().0,
+            8,
+            telemetry,
+        );
+        agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("run");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        let messages = &requests[0].messages;
+        assert_eq!(messages.len(), 3, "prefix + prompt + trailer");
+        assert_eq!(messages[0].role, cadmus_contract::Role::System);
+        let system = text_of(&messages[0]);
+        assert!(system.contains("test prompt"));
+        assert!(system.contains("## /repo/AGENTS.md"));
+        assert!(system.contains("project rules"));
+        assert_eq!(messages[1], Message::user("hi"));
+        let trailer = text_of(&messages[2]);
+        assert!(trailer.contains("[cadmus status]"));
+        assert!(trailer.contains("cwd: /repo"));
+        assert!(trailer.contains("git: main, dirty(3)"));
+
+        let events = sink.events();
+        let EventKind::Command(Command::StartRun { prefix, .. }) = &events[0].kind else {
+            panic!("first event is start_run");
+        };
+        let record = prefix.as_ref().expect("prefix recorded on start_run");
+        assert!(record.system.contains("test prompt"));
+        assert_eq!(record.instructions.len(), 1);
+        assert_eq!(
+            Some(record.hash.as_str()),
+            events[0].attributes[attrs::PREFIX_HASH].as_str(),
+            "the hash attribute matches the record"
+        );
+        let request_event = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::LlmRequest { .. }))
+            .expect("request event");
+        let EventKind::LlmRequest { trailer: recorded } = &request_event.kind else {
+            unreachable!()
+        };
+        assert_eq!(
+            recorded.as_deref(),
+            Some(trailer.as_str()),
+            "the request event carries the exact rendered trailer"
+        );
+    }
+
+    #[tokio::test]
+    async fn todo_write_folds_into_the_next_trailer() {
+        let provider = Arc::new(ReplayProvider::new([
+            ReplayProvider::script(vec![
+                StreamChunk::ToolCallStart {
+                    index: 0,
+                    id: "c1".into(),
+                    name: TODO_WRITE.into(),
+                },
+                StreamChunk::ToolArgsDelta {
+                    index: 0,
+                    fragment: "{\"items\":[{\"content\":\"write tests\",\"status\":\"in_progress\"},{\"content\":\"ship it\",\"status\":\"pending\"}]}".into(),
+                },
+                StreamChunk::ToolCallEnd { index: 0 },
+                StreamChunk::Done {
+                    finish: FinishReason::ToolCalls,
+                },
+            ]),
+            text_script("done"),
+        ]));
+        let (telemetry, _sink) = test_telemetry("tr-todo");
+        let agent = AgentLoop::new(
+            provider.clone(),
+            vec![Arc::new(TodoTool)],
+            crate::testing::test_context(),
+            crate::testing::auto_approving().0,
+            8,
+            telemetry,
+        );
+        agent
+            .run(&ChatRequest::user_text("plan it", 1_024))
+            .await
+            .expect("run");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        let trailer = text_of(requests[1].messages.last().expect("trailer message"));
+        assert!(
+            trailer.contains("tools: todo_write: 1"),
+            "counter: {trailer}"
+        );
+        assert!(
+            trailer.contains("[>] write tests"),
+            "in-progress: {trailer}"
+        );
+        assert!(trailer.contains("[ ] ship it"), "pending: {trailer}");
+    }
+
+    #[tokio::test]
+    async fn rejected_calls_stay_out_of_the_tool_counters() {
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(ReplayProvider::new([
+            ReplayProvider::script(vec![
+                StreamChunk::ToolCallStart {
+                    index: 0,
+                    id: "c1".into(),
+                    name: "step".into(),
+                },
+                StreamChunk::ToolCallEnd { index: 0 },
+                StreamChunk::Done {
+                    finish: FinishReason::ToolCalls,
+                },
+            ]),
+            text_script("done"),
+        ]));
+        let (telemetry, _sink) = test_telemetry("tr-rejected");
+        let (protocol, _live, _sender) = crate::testing::protocol_with(|calls| {
+            calls
+                .iter()
+                .map(|_| Approval::Rejected { comment: None })
+                .collect()
+        });
+        let agent = AgentLoop::new(
+            provider.clone(),
+            vec![Arc::new(StepTool { name: "step", log })],
+            crate::testing::test_context(),
+            protocol,
+            8,
+            telemetry,
+        );
+        agent
+            .run(&ChatRequest::user_text("try", 1_024))
+            .await
+            .expect("run");
+
+        let requests = provider.requests();
+        let trailer = text_of(requests[1].messages.last().expect("trailer message"));
+        assert!(
+            !trailer.contains("tools:"),
+            "a rejected call never executed, so no counter line: {trailer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_instructions_land_in_history_event_and_fold() {
+        let file = InstructionFile {
+            path: "/repo/crates/x/AGENTS.md".into(),
+            content: "crate rules\n".into(),
+        };
+        let provider = Arc::new(
+            ReplayProvider::new([
+                tool_call_script("c1", "{\"text\":\"ping\"}"),
+                text_script("done"),
+            ])
+            .with_capabilities(test_capabilities()),
+        );
+        let (telemetry, sink) = test_telemetry("tr-nested");
+        let context = ContextBundle {
+            tracker: Arc::new(OneShotTracker(std::sync::Mutex::new(Some(vec![
+                file.clone(),
+            ])))),
+            ..crate::testing::test_context()
+        };
+        let agent = AgentLoop::new(
+            provider.clone(),
+            vec![Arc::new(EchoTool)],
+            context,
+            crate::testing::auto_approving().0,
+            8,
+            telemetry,
+        );
+        let outcome = agent
+            .run(&ChatRequest::user_text("go", 1_024))
+            .await
+            .expect("run");
+
+        let injected_text = format_injected(&file);
+        // The position is load-bearing, not just the presence: the injected
+        // user message must land AFTER the tool results — between the
+        // assistant's tool-call turn and its results it would be an invalid
+        // sequence for strict providers. Pin the whole role sequence.
+        let roles: Vec<cadmus_contract::Role> = outcome
+            .messages
+            .iter()
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                cadmus_contract::Role::User,
+                cadmus_contract::Role::Assistant,
+                cadmus_contract::Role::Tool,
+                cadmus_contract::Role::User,
+                cadmus_contract::Role::Assistant
+            ]
+        );
+        assert_eq!(text_of(&outcome.messages[3]), injected_text);
+        let events = sink.events();
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::InstructionInjected { path, content }
+                if path == &file.path && content == &file.content
+        )));
+        // The fold invariant end to end: replaying the log reproduces the
+        // live history byte for byte, injected messages included.
+        let folded = crate::replay_trace(&events);
+        assert_eq!(folded.messages, outcome.messages);
+    }
+
     fn kind_name(event: &Event) -> &'static str {
         match &event.kind {
             EventKind::Command(Command::StartRun { .. }) => "start_run",
             EventKind::Command(Command::ResolveApproval { .. }) => "resolve_approval",
             EventKind::Command(Command::Steer { .. }) => "steer",
             EventKind::Command(Command::Interrupt { .. }) => "interrupt",
-            EventKind::LlmRequest => "llm_request",
+            EventKind::LlmRequest { .. } => "llm_request",
+            EventKind::InstructionInjected { .. } => "instruction_injected",
             EventKind::LlmResponse { .. } => "llm_response",
             EventKind::ToolCall { .. } => "tool_call",
             EventKind::ToolResult { .. } => "tool_result",
