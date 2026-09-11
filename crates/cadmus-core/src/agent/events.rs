@@ -135,3 +135,89 @@ pub(super) fn model_event_error(error: &ModelError) -> EventError {
         message: error.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use cadmus_contract::{ChatRequest, EventSink, LogError};
+
+    use super::*;
+    use crate::ReplayProvider;
+    use crate::agent::Telemetry;
+    use crate::agent::fixtures::{test_capabilities, text_script};
+    use crate::testing::{FixedClock, RecordingSink, SeqIds, auto_approving, test_context};
+
+    /// A sink that records until the `fail_at`-th append (0-based), which
+    /// fails — the mid-run log-failure seam.
+    struct FailAtSink {
+        inner: RecordingSink,
+        countdown: Mutex<usize>,
+    }
+
+    impl FailAtSink {
+        fn new(fail_at: usize) -> Self {
+            Self {
+                inner: RecordingSink::default(),
+                countdown: Mutex::new(fail_at),
+            }
+        }
+
+        fn events(&self) -> Vec<Event> {
+            self.inner.events()
+        }
+    }
+
+    impl EventSink for FailAtSink {
+        fn append(&self, event: &Event) -> Result<(), LogError> {
+            let mut countdown = self.countdown.lock().expect("countdown poisoned");
+            if *countdown == 0 {
+                return Err(LogError::Io(std::io::Error::other("sink boom")));
+            }
+            *countdown -= 1;
+            self.inner.append(event)
+        }
+    }
+
+    /// Append-before-publish: with the trajectory log failing mid-run, the
+    /// failed event never reaches the live stream — clients never observe
+    /// state the trajectory does not have (ADR-0013 item 2).
+    #[tokio::test]
+    async fn a_failed_append_never_reaches_the_live_stream() {
+        let provider = Arc::new(
+            ReplayProvider::new([text_script("done")]).with_capabilities(test_capabilities()),
+        );
+        // start_run lands; the llm_request append fails.
+        let sink = Arc::new(FailAtSink::new(1));
+        let telemetry = Telemetry {
+            sink: sink.clone(),
+            clock: Arc::new(FixedClock(1_788_393_600_000)),
+            ids: Arc::new(SeqIds::default()),
+            trace_id: "tr-emit".into(),
+            run_attributes: BTreeMap::new(),
+        };
+        let (protocol, live) = auto_approving();
+        let agent = AgentLoop::new(provider, vec![], test_context(), protocol, 8, telemetry);
+
+        let err = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect_err("the log failure aborts the run");
+        assert!(matches!(err, AgentError::Log(_)));
+
+        let appended = sink.events();
+        assert_eq!(appended.len(), 1, "only start_run landed in the log");
+        let items = live.items();
+        assert_eq!(
+            items.len(),
+            appended.len(),
+            "the live stream observes exactly what the trajectory holds"
+        );
+        assert!(matches!(
+            &items[0].kind,
+            LiveKind::Recorded { event }
+                if matches!(event.kind, EventKind::Command(Command::StartRun { .. }))
+        ));
+    }
+}
