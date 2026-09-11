@@ -8,7 +8,7 @@
 //! statistics (ADR-0010 §1) work on per-item pass/fail, and partial credit
 //! would only blur the pairing.
 
-use cadmus_contract::{ContentPart, EvalCase, Expectation, Role, ScoreEvent, Status};
+use cadmus_contract::{EvalCase, Expectation, Role, ScoreEvent, Status};
 
 use crate::RunState;
 
@@ -59,17 +59,7 @@ fn final_answer_text(state: &RunState) -> String {
         .iter()
         .rev()
         .find(|message| message.role == Role::Assistant)
-        .map(|message| {
-            message
-                .content
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+        .map(cadmus_contract::Message::text_body)
         .unwrap_or_default()
 }
 
@@ -85,7 +75,7 @@ fn tool_called(state: &RunState, name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::FinishRecord;
-    use cadmus_contract::{EvalSplit, Message, ToolCall};
+    use cadmus_contract::{ContentPart, EvalSplit, Message, ToolCall};
 
     fn case(expect: Vec<Expectation>) -> EvalCase {
         EvalCase {

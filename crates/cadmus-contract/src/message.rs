@@ -80,6 +80,20 @@ impl Message {
             _ => None,
         })
     }
+
+    /// The text parts joined with newlines — the message's human-readable
+    /// body. Reasoning, tool-call, image and opaque parts are excluded.
+    #[must_use]
+    pub fn text_body(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 // serde's skip_serializing_if requires the by-reference signature.

@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cadmus_contract::{ChatRequest, ContentPart, Message, Usage};
+use cadmus_contract::{ChatRequest, Message, Usage};
 use cadmus_core::{AgentLoop, ClientProtocol, ContextBundle, RunOutcome, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
@@ -152,17 +152,7 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
 }
 
 fn into_result(outcome: RunOutcome, trace_id: String, trace_path: PathBuf) -> ChatResult {
-    let final_text = outcome
-        .final_turn
-        .message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let final_text = outcome.final_turn.message.text_body();
     ChatResult {
         final_text,
         messages: outcome.messages,
