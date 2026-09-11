@@ -11,3 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      comments under a release heading leak into the Release PR body. -->
 
 ## [Unreleased]
+## [0.1.0](https://github.com/duskgrow/Cadmus/releases/tag/v0.1.0) - 2026-09-11
+### Cadmus
+- dedupe the Scratch and env helpers
+- raise the default max turn limit to 100
+- add eval set v1 harness and corpus ([#13](https://github.com/duskgrow/Cadmus/pull/13))
+- replace greet scaffold with chat command and coding tools
+### Contract
+- extract Message::text_body for the text join
+### Core
+- render the trailer clock in local time via the time crate
+- land skill static loading, the prefix catalog and the skill tool
+- land the layer-1 fold machinery
+- land the ADR-0007 context pipeline
+- land the ADR-0013 client protocol
+- extend the tool contract for the write tools
+- trajectory event log SSOT with JSONL adapter and loop wiring ([#4](https://github.com/duskgrow/Cadmus/pull/4))
+### Other
+- initialize from template
+### Tools
+- declare todo_write's concurrency explicitly
+- land write_file/edit_file behind the approval gate
+- make grep smart-case
+- align list_dir's hidden-file policy with grep
+- rebuild grep on ripgrep's library crates
+- split tools.rs into one module per tool
+- make read_file windows resumable past the byte cap
+- display grep paths with forward slashes on windows
