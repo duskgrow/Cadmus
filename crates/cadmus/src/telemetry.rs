@@ -73,21 +73,16 @@ pub fn mint_trace_id() -> String {
 /// `unsafe` in edition 2024 and this workspace forbids `unsafe_code`.
 #[must_use]
 pub fn default_trace_root() -> Option<PathBuf> {
-    fn env(key: &str) -> Option<PathBuf> {
-        std::env::var_os(key)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    }
-    if let Some(root) = env("CADMUS_TRACE_ROOT") {
+    if let Some(root) = crate::env_path("CADMUS_TRACE_ROOT") {
         return Some(root);
     }
-    if let Some(xdg) = env("XDG_DATA_HOME") {
+    if let Some(xdg) = crate::env_path("XDG_DATA_HOME") {
         return Some(xdg.join("cadmus/traces"));
     }
-    if let Some(home) = env("HOME") {
+    if let Some(home) = crate::env_path("HOME") {
         return Some(home.join(".local/share/cadmus/traces"));
     }
-    env("USERPROFILE").map(|profile| profile.join("AppData/Roaming/cadmus/traces"))
+    crate::env_path("USERPROFILE").map(|profile| profile.join("AppData/Roaming/cadmus/traces"))
 }
 
 #[cfg(test)]

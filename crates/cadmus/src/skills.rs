@@ -68,15 +68,10 @@ fn discover_in(root: &Path, user_dir: Option<&Path>) -> Vec<LoadedSkill> {
 /// the user-global AGENTS.md uses; the standard owns this one). Hand-rolled
 /// under the zero-new-dependency policy, mirroring `user_global_instructions`.
 fn user_skills_dir() -> Option<PathBuf> {
-    fn env(key: &str) -> Option<PathBuf> {
-        std::env::var_os(key)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    }
-    if let Some(home) = env("HOME") {
+    if let Some(home) = crate::env_path("HOME") {
         return Some(home.join(".agents/skills"));
     }
-    env("USERPROFILE").map(|profile| profile.join(".agents/skills"))
+    crate::env_path("USERPROFILE").map(|profile| profile.join(".agents/skills"))
 }
 
 /// Scans one skills root: every immediate subdirectory carrying a SKILL.md
@@ -151,25 +146,7 @@ fn load(dir: &Path, skill_md: &Path) -> Option<LoadedSkill> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A scratch tree under the OS temp dir, removed on drop.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("cadmus-skills-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).expect("create scratch");
-            Self(root)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::Scratch;
 
     /// Writes `<base>/.agents/skills/<name>/SKILL.md`.
     fn write_skill(base: &Path, name: &str, skill_md: &str) {

@@ -300,7 +300,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::super::tests::{Scratch, tool};
+    use super::super::tests::tool;
+    use crate::test_support::Scratch;
 
     #[tokio::test]
     async fn read_file_returns_contents_with_line_window() {

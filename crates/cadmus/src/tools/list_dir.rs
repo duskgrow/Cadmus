@@ -130,7 +130,8 @@ fn visible_children(dir: &Path, show_hidden: bool) -> std::io::Result<Vec<(Strin
 mod tests {
     use serde_json::json;
 
-    use super::super::tests::{Scratch, tool};
+    use super::super::tests::tool;
+    use crate::test_support::Scratch;
 
     #[tokio::test]
     async fn list_dir_marks_kinds() {

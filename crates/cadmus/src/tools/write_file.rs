@@ -133,7 +133,8 @@ impl AgentTool for WriteFile {
 mod tests {
     use serde_json::json;
 
-    use super::super::tests::{Scratch, tool};
+    use super::super::tests::tool;
+    use crate::test_support::Scratch;
 
     #[tokio::test]
     async fn write_file_creates_a_new_file_with_parent_dirs() {

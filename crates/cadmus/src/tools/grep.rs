@@ -249,7 +249,8 @@ fn preview(line: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::super::tests::{Scratch, tool};
+    use super::super::tests::tool;
+    use crate::test_support::Scratch;
 
     #[tokio::test]
     async fn grep_respects_gitignore_and_returns_sorted_matches() {

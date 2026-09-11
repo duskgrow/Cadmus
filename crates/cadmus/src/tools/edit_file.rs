@@ -211,7 +211,8 @@ fn apply_edits(original: &str, edits: &[Value], path: &str) -> Result<String, To
 mod tests {
     use serde_json::json;
 
-    use super::super::tests::{Scratch, tool};
+    use super::super::tests::tool;
+    use crate::test_support::Scratch;
 
     #[tokio::test]
     async fn edit_file_applies_an_ordered_batch_all_or_nothing() {

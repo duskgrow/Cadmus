@@ -106,14 +106,14 @@ fn error(tool: &str, message: String) -> ToolError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Arc;
 
     use cadmus_core::{AgentTool, Effect};
     use serde_json::json;
 
     use super::coding_tools;
+    use crate::test_support::Scratch;
 
     /// The gate's fail-safe default is `Mutation` — so the declarations are
     /// pinned here: without them, perception tools would be gated and
@@ -137,36 +137,6 @@ mod tests {
         assert_eq!(effect_of("todo_write"), Some(Effect::Perception));
         // A lookup over harness-held text, no workspace effect.
         assert_eq!(effect_of("skill"), Some(Effect::Perception));
-    }
-
-    /// A scratch workspace under the OS temp dir, unique per test name and
-    /// process, removed on drop. Shared by every tool's test module.
-    pub(super) struct Scratch(pub(super) PathBuf);
-
-    impl Scratch {
-        pub(super) fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("cadmus-tools-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(&root).expect("create scratch");
-            Self(root)
-        }
-
-        pub(super) fn write(&self, path: &str, contents: &str) {
-            self.write_bytes(path, contents.as_bytes());
-        }
-
-        pub(super) fn write_bytes(&self, path: &str, contents: &[u8]) {
-            let full = self.0.join(path);
-            fs::create_dir_all(full.parent().expect("parent")).expect("mkdirs");
-            fs::write(full, contents).expect("write");
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
     }
 
     pub(super) fn tool(root: &Path, name: &str) -> Arc<dyn AgentTool> {

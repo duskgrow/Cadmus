@@ -93,18 +93,13 @@ pub(crate) fn read_capped(path: &Path, kind: &str) -> Option<String> {
 /// `%USERPROFILE%/AppData/Roaming/cadmus/AGENTS.md`. Hand-rolled under the
 /// zero-new-dependency policy, mirroring `default_trace_root`.
 fn user_global_instructions() -> Option<PathBuf> {
-    fn env(key: &str) -> Option<PathBuf> {
-        std::env::var_os(key)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    }
-    if let Some(xdg) = env("XDG_CONFIG_HOME") {
+    if let Some(xdg) = crate::env_path("XDG_CONFIG_HOME") {
         return Some(xdg.join("cadmus/AGENTS.md"));
     }
-    if let Some(home) = env("HOME") {
+    if let Some(home) = crate::env_path("HOME") {
         return Some(home.join(".config/cadmus/AGENTS.md"));
     }
-    env("USERPROFILE").map(|profile| profile.join("AppData/Roaming/cadmus/AGENTS.md"))
+    crate::env_path("USERPROFILE").map(|profile| profile.join("AppData/Roaming/cadmus/AGENTS.md"))
 }
 
 /// The git freshness probe: one `git status` per request render, parsed
@@ -235,26 +230,8 @@ impl InstructionTracker for NestedInstructions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Scratch;
     use serde_json::json;
-
-    /// A scratch tree under the OS temp dir, removed on drop.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("cadmus-context-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).expect("create scratch");
-            Self(root)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn chain_collects_ancestors_root_to_cwd() {
