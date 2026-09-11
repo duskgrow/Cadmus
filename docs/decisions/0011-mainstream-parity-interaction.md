@@ -104,6 +104,58 @@ unpursued. The TUI-first strategy and this ADR's interaction floor are
 unchanged: the floor remains the TUI's acceptance criterion, and the GUI
 inherits parity through the shared protocol rather than a second UX spec.
 
+## Amendment — 2026-09-11: interaction floor re-baselined
+
+First re-baseline of item 3 under item 1's moving-target rule, at the TUI
+kickoff. Source survey: `docs/research/2026-09-11-agent-uiux-landscape.md`
+§2 (official docs fetched 2026-09-11); where it and the 2026-09-06 baseline
+differ, this amendment wins.
+
+1. **Steering gains a third granularity.** Queue-for-next-turn and
+   inject-now are joined by inject-at-next-tool-boundary, which is the
+   default: immediate yet deterministic — the injection point lands in the
+   event stream and replays exactly (ADR-0013's record-on-effect rule).
+   Bindings are chosen at implementation, not copied: the field is split
+   (Claude Code Enter=queue, Codex Enter=inject).
+2. **Mid-turn settings steering.** "Input never blocks" now includes live
+   configuration: `/model` / effort-class changes apply to the next request
+   within the running turn (Claude Code v2 precedent).
+3. **Approval surface extends; modes stay as sugar.** Item 3's per-tool
+   allow/ask/deny rules gain matching over tool input (OpenCode globs,
+   Codex execpolicy precedents) and grant scope — once / turn / session /
+   persisted (Codex `acceptForSession` and `scope: turn|session`
+   precedents). The four approval modes remain, as presets over the rule
+   layer (OpenCode's presets-as-sugar). The scoped-rules open item keeps
+   its consumer (the config-layer implementation); this amendment sets the
+   direction.
+4. **Rewind becomes a four-action algebra.** The existing restore split
+   (conversation-only / code-only / both) and edit-and-fork are joined by
+   summarize (from-here / up-to-here — rewind merged with targeted
+   compaction) and re-decide (restore re-proposes the pending tool call —
+   Gemini CLI precedent). Lands in phases with the checkpoint feature.
+   Storage mechanism: a shadow git repository (Gemini precedent) realizes
+   the shadow store — diff/log semantics for free; the
+   never-mutate-user-git invariant stands.
+5. **Status surface splits and becomes composable.** Footer plus terminal
+   title (OSC), both user-composable via pick-and-reorder pickers (Codex
+   `/statusline` precedent); the model-facing trailer stays core's
+   (ADR-0013 item 7). VCS state may extend to PR/MR review status.
+6. **Notifications: push + pull.** Unfocused-only push stands (OSC works
+   over SSH — crush), joined by a recap-on-refocus pull (Claude Code
+   precedent). A state-truthfulness invariant joins the floor: render
+   unknown rather than a guessed idle (ccmanager #227 lesson:
+   scraping-derived detectors false-idle by design; ours derives from
+   events, and the invariant binds every future heuristic, dashboard
+   included).
+7. **Subagent/background-task visualization joins the floor when the task
+   tool lands** (Codex `/ps`, Claude Code `/tasks` precedents); parked with
+   the persona-profiles open item.
+8. **alt-screen revisited: stance kept, escalation pattern noted.**
+   ADR-0012 item 2's inline-default stands. Claude Code v2's fullscreen
+   renderer demonstrates the escalation pattern (auto `/diff` side panel
+   at ≥144 columns); an opt-in escalation strategy may be evaluated at
+   implementation — no philosophy change.
+
 ## Consequences
 
 - The "daily driver" milestone — write tools + TUI + streaming + approval

@@ -70,7 +70,8 @@ byte-window parameter; do not build it ahead of evidence.
 ## Session attach payload, fold and render all scale with history
 
 Consumer: the TUI session picker / multi-session dashboard — the first
-attaches to live runs carrying real history, and to long finished sessions.
+attaches to live runs carrying real history, and to long finished
+sessions — and the ADR-0014 ACP adapter's `session/load`.
 
 Three coupled costs, all O(history). The in-process broadcaster retains
 every durable event of the run and folds them with `replay_trace` per
@@ -89,20 +90,6 @@ no state, and the two travel separately). The fold itself becomes
 incremental (`replay_trace` rehomed as `push(&Event)` onto a `RunStateFold`
 the broadcaster keeps), so attach is O(window) and the retained event vec
 dies.
-
-## ACP adoption seam assessment
-
-Consumer: the ACP adoption ADR, whenever an ACP frontend is scheduled.
-
-Assessed 2026-09-09 against ADR-0013: an ACP frontend is another client
-kind of the client protocol, and the hard parts already align — trajectory
-events map to session/update tool-call notifications, the approval path is
-a command event shared by local and remote clients (ADR-0008 item 4), and
-the tool-result is_error flag maps to ACP's failed status. The one real
-seam: the built-in tools do their own filesystem IO, so ACP's client-side
-fs capabilities (remote workspaces, editor-native diffs) would need an IO
-port injected into the tools — additive behind `AgentTool`, aligned with
-the constructor-injection style rule, not a redesign.
 
 ## Persona profiles: agent definitions, not settings presets
 
@@ -170,6 +157,12 @@ architectural enforcement (sandbox + allowlist), not rule-learning —
 users approve ~93% of prompts anyway, so scoped "always" rules are comfort
 for the last mile, never the safety mechanism.
 
+Direction set 2026-09-11: rules gain matching over tool input and grant
+scope (once/turn/session/persisted), with the approval modes as presets
+over the rule layer (ADR-0011's 2026-09-11 amendment item 3); one
+decorator may serve N sessions as fleet policy (ADR-0015 item 5). The
+design questions above remain for the config-layer implementation.
+
 ## LLM compaction fires on the ceiling rule, not on ContextLength sightings
 
 Consumer: the phase-2 compaction ADR.
@@ -200,6 +193,24 @@ convergence leaves interactive sessions without a turn limit
 (Claude/Codex/Gemini default unlimited or none) while headless keeps a
 hard cap — the TUI's interactive default is unlimited; the headless cap
 rises to 100 alongside the context-pipeline work.
+
+## Agent UI/UX landscape survey (2026-09-11)
+
+Consumer: the GUI ADR — scheduled (maintainer, 2026-09-11) for right
+after the daily-driver milestone, no longer post-phase-5. Remaining for
+it: the tech re-anchoring (report §5
+— `gpui` is Apache-2.0 but its crates.io line stopped at 0.2.2 (2025-10)
+and the git line's dependency tree is heavy (maintainer-verified); §5.3
+options table) and the orchestration/review patterns of §2.2 as design
+input. The other consumers landed 2026-09-11: floor re-baseline → ADR-0011
+amendment, ACP → ADR-0014, orchestration layer → ADR-0015. Delete once
+the GUI ADR lands.
+
+`docs/research/2026-09-11-agent-uiux-landscape.md` — five-track survey
+(agent TUIs, agent GUIs, Rust terminal-style GUI tech, orchestrator↔agent
+seam mechanics, gap/issue hunting).
+
+## Persona profiles: agent definitions, not settings presets
 
 ## The trailer's no-history choice costs a turn recompute on llama-server
 
