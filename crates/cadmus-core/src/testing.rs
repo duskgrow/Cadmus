@@ -79,16 +79,6 @@ impl ChannelCommands {
         let (tx, rx) = std::sync::mpsc::channel();
         (Self { rx: Mutex::new(rx) }, tx)
     }
-
-    /// A source pre-loaded with commands, in order.
-    #[must_use]
-    pub fn scripted(commands: impl IntoIterator<Item = Command>) -> Self {
-        let (source, tx) = Self::new();
-        for command in commands {
-            tx.send(command).expect("scripted channel open");
-        }
-        source
-    }
 }
 
 #[async_trait::async_trait]

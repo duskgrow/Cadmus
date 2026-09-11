@@ -277,13 +277,11 @@ dependencies = [
  "async-trait",
  "cadmus-contract",
  "insta",
- "serde",
  "serde_json",
  "thiserror",
  "time",
  "tokio",
  "tokio-stream",
- "tracing",
 ]
 
 [[package]]
