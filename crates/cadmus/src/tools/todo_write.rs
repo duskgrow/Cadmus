@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cadmus_contract::{TodoItem, ToolSpec};
-use cadmus_core::{AgentTool, Effect, ToolError};
+use cadmus_core::{AgentTool, Concurrency, Effect, ToolError};
 use serde_json::{Value, json};
 
 use super::error;
@@ -14,9 +14,13 @@ pub(super) struct TodoWrite;
 
 #[async_trait]
 impl AgentTool for TodoWrite {
-    /// Deliberately the fail-safe serial default: two whole-list replaces
-    /// must never race — the later one wins, in call order.
-    ///
+    /// Serial: two whole-list replaces must never race — the later one
+    /// wins, in call order. Declared, not defaulted (ADR-0008 item 2
+    /// amendment: the declaration records the analysis).
+    fn concurrency(&self) -> Concurrency {
+        Concurrency::Serial
+    }
+
     /// Harness-internal state only, no workspace effect: never gated
     /// (ADR-0008 item 4).
     fn effect(&self) -> Effect {
