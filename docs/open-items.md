@@ -163,6 +163,12 @@ over the rule layer (ADR-0011's 2026-09-11 amendment item 3); one
 decorator may serve N sessions as fleet policy (ADR-0015 item 5). The
 design questions above remain for the config-layer implementation.
 
+Direction added 2026-09-13 (ADR-0018 item 7): config files are TOML
+data; the expression zone (computed rule conditions, hooks) is
+Starlark's trigger, deferred until a real consumer lands — a
+programmable-config platform is rejected as a pseudo-requirement at
+single-user scale.
+
 ## LLM compaction fires on the ceiling rule, not on ContextLength sightings
 
 Consumer: the phase-2 compaction ADR.
@@ -202,7 +208,10 @@ it: the tech re-anchoring (report §5
 — `gpui` is Apache-2.0 but its crates.io line stopped at 0.2.2 (2025-10)
 and the git line's dependency tree is heavy (maintainer-verified); §5.3
 options table) and the orchestration/review patterns of §2.2 as design
-input. The other consumers landed 2026-09-11: floor re-baseline → ADR-0011
+input. The design language is no longer its scope: consumed by
+ADR-0017 (2026-09-13, Linear-structured tokens, one theme SSOT,
+renderer-level degradation), which the GUI ADR inherits whole. The
+other consumers landed 2026-09-11: floor re-baseline → ADR-0011
 amendment, ACP → ADR-0014, orchestration layer → ADR-0015. Delete once
 the GUI ADR lands.
 
