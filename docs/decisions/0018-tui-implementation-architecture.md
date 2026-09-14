@@ -89,10 +89,42 @@ preclude_, not as a day-one feature.
    line. Tables hold back from the header until the stream settles and
    transpose to key/value records when too narrow. Item completion is
    authoritative over the delta stream at finalize, so a saturated
-   transport cannot truncate the transcript.
+   transport cannot truncate the transcript. Flush is continuous,
+   never one batch at turn end (Codex's stable/tail two-region model,
+   source-verified in the 2026-09-13 exhibit): a long turn's head must
+   be readable above the band while its tail still streams — the
+   inline spike's flush-on-complete is a harness simplification, not
+   the design. The flush unit is the rendered line whose _shape_ (row
+   count, wrap) no future source line can change — not the closed
+   block. In a terminal this is nearly free: no font metrics, so the
+   renderer keeps every reclassifiable variant shape-identical (a
+   heading renders with the same rows and wraps as its paragraph form;
+   lists use uniform spacing, ignoring tight/loose), and the
+   reclassifications that remain are zero-width inline styling
+   (emphasis spanning lines, reference-style links) — an accepted
+   cost class on frozen rows: rare, cosmetic, self-healed by the next
+   resize reflow (the stock path cannot delete its own scrollback).
+   Line-flushable therefore: paragraphs, completed list items (the
+   open item can still lazy-continue, so the item is the unit), fence
+   and indented-code bodies (literal). The one genuine holdout is
+   tables — column widths depend on all rows — held until settled,
+   the narrow-table record transposition doubling as their streaming
+   presentation. Codex's own flush granularity is not pinned in the
+   exhibit; this invariant is derived from CommonMark semantics and
+   the vt100 suite locks each channel at implementation. A held
+   block's unread head stays reachable live through the from-source
+   transcript fallback (open item).
 5. **Event loop: actors, capped frame rate, input never blocks.** A
    FrameRequester/FrameScheduler actor pair coalesces redraw requests
-   and caps at 60 FPS; frames render inside a synchronized-update
+   and caps at 120 FPS — the Codex precedent, source-verified in the
+   2026-09-13 exhibit (maintainer directive 2026-09-14 overrides that
+   exhibit's start-at-60 suggestion). The cap is a ceiling on
+   demand-driven redraws, not a tick: idle draws nothing. Terminals
+   expose no display-refresh query, and frames past the emulator's own
+   composite rate only burn CPU in the cell diff, so screen-Hz
+   adaptation is neither possible nor missed; the GUI in any case runs
+   its own vsync-driven loop and shares only the item-2 pipelines.
+   Frames render inside a synchronized-update
    (2026h) guard. Stream draining follows a two-regime hysteresis policy
    (smooth typewriter vs catch-up flush) expressed as a pure function
    over unmaterialized-event count and age — the materialized-view-
@@ -183,6 +215,22 @@ costs, all binding on the first TUI PR:
 
 1. **Fixed-height viewport layout** — the inline height has no mutation
    API (source-verified); the layout design works within a fixed height.
+   What is fixed is only the band's total row count: per-frame re-split
+   among the widgets inside it (stream tail, composer, status) is
+   ordinary layout — a growing composer borrows rows from the stream
+   area, never pushes the band taller (dynamic height, the fork's
+   feature, would claim more rows of the existing screen mid-turn; it
+   cannot grow the window itself). Bounding the composer (max lines,
+   then internal scroll) is part of the first PR's layout rule. On
+   terminal resize the band keeps its row count and width always
+   follows; a taller window simply shows more scrollback above the band.
+   If fixed height ever becomes the hard requirement that reopens
+   item 3, the first thing to spike is fact F1's untested escape
+   hatch: recreate the `Terminal` on height change — dynamic height
+   without the fork. _Superseded the same evening in the height
+   dimension: the second 2026-09-14 amendment adopts dynamic height
+   on exactly this escape hatch; the re-split, composer-bounding and
+   resize rules above survive._
 2. **Resize debounce (~75 ms, Codex precedent)** — re-anchoring scrolls
    the terminal, so each processed resize leaves the previous frame as
    scrollback residue; debounce bounds it to ≤1 stale frame per drag
@@ -200,8 +248,62 @@ costs, all binding on the first TUI PR:
 
 The thin-fork fallback (Codex blueprint, MIT attribution) stays on the
 shelf: reconsider if field use shows the residue/duplication costs are
-unacceptable, if dynamic height becomes a hard requirement, or if a
-terminal in the support matrix misbehaves under the portable path.
+unacceptable, or if a terminal in the support matrix misbehaves under
+the portable path.
+
+## Amendment — 2026-09-14 (2nd): band height is dynamic, via Terminal recreation
+
+Maintainer call after the fixed-vs-dynamic review: **the band's row
+count changes at event boundaries**, delivered by recreating the
+`Terminal` — amendment item 1's fixed-height layout is superseded in
+the height dimension (its per-frame re-split, composer-borrows-rows
+and resize rules stand; the escape hatch it pointed at is now the
+mechanism). Rationale: with the shape/style flush invariant (item 4)
+already dissolving most of the long-unstable-block problem at the
+render layer, the remaining cost of a fixed band is UX, not
+mechanism — held blocks taller than the stream area (tables) and a
+composer squeezed against a small window — while the escape hatch's
+verified price is one CPR round-trip plus one in-guard repaint per
+change, and the flush invariant is needed under either height policy.
+
+Mechanism (evidence: `docs/research/2026-09-14-terminal-recreation-spike.md`):
+
+1. Height changes are event-driven, never per-frame: composer line
+   crossings, held-block settle, resize. The height function (desired
+   band height over content, capped at the screen — Codex's
+   `desired_height` precedent) and the layout rules already scoped in
+   amendment item 1 (composer cap, short-window corner) land in PR 1's
+   shell.
+2. Grow: `insert_before(Δ blank rows)`, park the cursor at the future
+   band top, recreate — the re-anchor's append lands exactly at the
+   bottom row (zero scroll), and the taller band's first repaint
+   covers only the inserted blanks (zero history loss, zero residue).
+3. Shrink: `clear()` the old band, park the cursor Δ rows lower,
+   recreate — the vacated Δ rows are the bounded blank residue
+   (consumed by later flushes); collapsing rows upward is the
+   DEC-row-delete trick this stack forgoes.
+4. Height policy works on effective (screen-clamped) heights and
+   no-ops on equality (the full-screen band has nothing to grow into).
+5. One 2026h guard wraps insert + recreate + draw; the PR 1 input
+   broker is the designated seam for the construction-time CPR race
+   (upstream ratatui #2640, open).
+
+Verified: eight vt100 scenarios (`tests/dynamic_height_spike.rs`, in
+CI) plus a three-terminal mechanical matrix (Zed, Windows Terminal,
+tmux — capture-replay, never eyewitness): zero rows lost or
+duplicated, guards balanced, no swallowed keys; the naive-recreation
+control produced exactly its predicted residue on all three. Accepted
+residual: a transient flash on terminals that ignore 2026h — bounded,
+cosmetic, and identical for every implementation including the fork.
+Zellij untested; the portable path emits no DEC scroll regions, so
+its known quirk class is dodged structurally, and field corruption
+reports reopen this item.
+
+Unaffected: the shape/style flush invariant (item 4) — height policy
+and flush policy are orthogonal axes (Codex flushes completed cells
+with dynamic height too); spike disciplines 2–5 stand; the thin fork
+stays shelved, re-entering only if a support-matrix terminal
+misbehaves under the portable path.
 
 ## Consequences
 
@@ -218,3 +320,6 @@ terminal in the support matrix misbehaves under the portable path.
   raising ours.
 - The spike's verdict amends item 3 (stock-viewport vs thin fork); no
   other item is affected by the outcome.
+- Band height is dynamic via Terminal recreation (second 2026-09-14
+  amendment); PR 1 owns the height function, the layout rules and the
+  recreation seam inside the shell.

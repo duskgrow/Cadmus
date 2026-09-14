@@ -242,3 +242,60 @@ wire protocol. When the theme loader lands, resolve deliberately: scope
 the check to actual wire boundaries, or parse `toml::Value` by hand (no
 derives). The check's intent (wire types only in the contract,
 ADR-0002) stands either way.
+
+## Scroll-while-streaming interaction policy
+
+Consumer: the first TUI PR (mouse-capture and transcript-fallback
+decisions) and the inline-spike harness as quirk matrix (scroll-anchor
+probes).
+
+Maintainer-raised surface (2026-09-14). Terminal-owned behaviors to
+probe per terminal in the matrix: the scroll anchor when rows insert
+while the user is scrolled up (content-anchored vs bottom-anchored);
+scroll-to-bottom-on-keypress while composing; selection/copy drift
+under a moving stream. App decisions for the first TUI PR: mouse
+capture on (widget clicks) vs off (native scroll/select/copy — the
+benefits ADR-0012 item 2 chose inline for); an in-app transcript
+fallback for mouse-less contexts (Codex's verified answer is a
+temporary alt-screen transcript view, already permitted by ADR-0012's
+modal-sub-app exception); resize reflow resetting the reading position
+(debounce-bounded, accepted). Evidence-gated, not built ahead: pause
+or batch inserts while the user is scrolled up, only if the matrix
+shows bottom-anchored terminals in the support set.
+
+## The next ratatui bump moves the inline spike's accepted costs
+
+Consumer: the first ratatui version bump (0.30.3 or later).
+
+crates.io still serves 0.30.2 (2026-06-19) — the version the inline
+spike measured — but upstream's inline-viewport area is converging on
+Codex-class behavior fast (GitHub issue tracker, 2026-09-14):
+merged-unreleased #2670 (breaking: no full-screen clear when an
+inline viewport shrinks horizontally) and #2731 (skip the redundant
+shrink clear), #2666 closed (the live viewport duplicating into
+scrollback on resize under continuous draw + insert_before), #2527
+in progress (wide-grapheme continuation cells in insert_before,
+tagged v0.31.0). Two of the spike verdict's accepted costs live
+exactly here: resize residue and the shrink clear+replay. On the
+next bump, before merging: re-run the inline-spike harness matrix —
+the shrink replay may flip from necessary to harmful (inserting rows
+nothing lost) — plus the dynamic-height probe suite
+(`tests/dynamic_height_spike.rs`), and re-check the ADR-0018
+amendment's evidence lines. MSRV holds at 1.88 through 0.30.2.
+
+## The spike harness and the inline shell share one mechanism
+
+Consumer: the PR 1 inline shell.
+
+`inline_spike.rs` carries its own copy of the band mechanism
+(2026h-guarded insert+draw, cursor-query tolerance, shrink replay,
+the one-wrapper invariant) because no shell existed when it was
+written — scaffolding, not a second home. When PR 1 lands the shell,
+the shell owns the mechanism as cadmus-tui library code and the
+harness is refactored into a thin driver over it (fake stream, key
+bindings, diagnostics counters), so the terminal-quirk regression
+tool exercises the production path. Two independent implementations
+would drift, and the quirk matrix would then regress against
+something the TUI does not run. Harness-only fixtures stay in the
+example; the disciplines' knowledge home stays the ADR-0018
+amendment.
