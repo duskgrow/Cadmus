@@ -1,0 +1,30 @@
+[package]
+name = "cadmus-tui"
+description = "Terminal frontend: maps cadmus-ui's semantic IR onto ratatui and owns the event loop, input layer and composer — a client of the ADR-0013 protocol, never of core internals (ADR-0018)"
+# Internal crates carry no semver burden. To publish later, switch to
+# version.workspace = true, drop publish = false, and register the package
+# in release-plz.toml — see CONTRIBUTING.md.
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cadmus-contract.workspace = true
+cadmus-ui.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-stream.workspace = true
+fuzzy-matcher.workspace = true
+toml.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+vt100.workspace = true

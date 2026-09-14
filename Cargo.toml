@@ -52,16 +52,47 @@ similar = { version = "2", default-features = false, features = ["text"] }
 # timezone database. Never hand-roll calendar math (maintainer, 2026-09-10).
 time = { version = "0.3", default-features = false }
 
+# ---- TUI stack (admission record: ADR-0018 item 1, crates.io-verified 2026-09-13) ----
+# MSRV is exactly 1.88.0 — zero headroom: `just toolchain-bump` must check
+# ratatui's published MSRV before raising ours. crossterm_0_29 pins the
+# backend to the crossterm line we depend on directly.
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+# terminal IO + the async event stream; slow release line but an active repo —
+# maintainer-signed staleness exception in ADR-0018 item 1
+crossterm = { version = "0.29", features = ["event-stream"] }
+# streaming-markdown parser: full reparse per chunk, offset_iter as a later
+# optimization (ADR-0018 item 4); defaults off cut the binary/html paths
+pulldown-cmark = { version = "0.13", default-features = false }
+# code-fence highlighting on bat's syntax/theme corpus via the pure-Rust
+# fancy-regex engine (no C toolchain); syntect's bundled dumps stay off —
+# two-face's corpus is strictly larger. Staleness exceptions signed in
+# ADR-0018 item 1.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+# picker scoring (@ completion, command palette): 1.5k-line pure algorithm,
+# "finished, not abandoned" — staleness exception signed in ADR-0018 item 1
+fuzzy-matcher = "0.3"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+# human-maintained config (settings / keymap / theme) is TOML data; machine
+# boundaries (event stream, socket protocol) stay JSON (ADR-0018 item 7)
+toml = "1"
+
 # ---- internal crates ----
 cadmus-contract = { path = "crates/cadmus-contract" }
 cadmus-core = { path = "crates/cadmus-core" }
 cadmus-llm-openai = { path = "crates/cadmus-llm-openai" }
 cadmus-memory = { path = "crates/cadmus-memory" }
 cadmus-transport = { path = "crates/cadmus-transport" }
+cadmus-tui = { path = "crates/cadmus-tui" }
+cadmus-ui = { path = "crates/cadmus-ui" }
 
 # ---- dev dependencies ----
 insta = "1"
 assert_cmd = "2"
+# virtual terminal for TUI snapshot tests: asserts the final screen AND the
+# scrollback, which ratatui's TestBackend has no concept of (ADR-0018 item 9)
+vt100 = "0.16"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

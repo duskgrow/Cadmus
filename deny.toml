@@ -12,6 +12,13 @@ ignore = [
     # Trigger: genai migrates to pastey (or we switch client) and paste
     # leaves Cargo.lock.
     "RUSTSEC-2024-0436",
+    # RUSTSEC-2025-0141: bincode declared complete/unmaintained by its
+    # authors, pulled in by syntect/two-face dump loading; it only ever
+    # deserializes the bat syntax/theme dumps embedded in two-face at our
+    # build time — no attacker-controlled input (maintainer-approved
+    # 2026-09-14). Trigger: syntect migrates off bincode (or we swap the
+    # highlighting stack) and bincode leaves Cargo.lock.
+    "RUSTSEC-2025-0141",
 ]
 
 [bans]
@@ -51,6 +58,11 @@ exceptions = [
     # license whose only condition is carrying the license text alongside the
     # data (include it in third-party notices when shipping binaries).
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+    # foldhash <- hashbrown <- kasuari/lru <- ratatui-core: hashbrown's
+    # default hasher (maintainer-approved 2026-09-14). Zlib is OSI-approved
+    # permissive; the per-crate entry keeps the global allow-list biting new
+    # arrivals.
+    { allow = ["Zlib"], crate = "foldhash" },
 ]
 
 [sources]

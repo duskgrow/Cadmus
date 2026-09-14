@@ -115,6 +115,35 @@ fn posture_of(name: &str) -> Posture {
             dev_internal: Some(&["cadmus-contract", "cadmus-core"]),
             third_party: ThirdParty::Any,
         },
+        // The design system + content pipelines (ADR-0017, ADR-0018 item 2):
+        // every renderer links it (the TUI today, the out-of-repo GUI
+        // tomorrow), so its third-party set is closed like the contract's —
+        // and renderer frameworks can never enter it, since the pipelines
+        // emit the semantic-style IR and only frontend crates map the IR
+        // onto terminal/GUI types.
+        "cadmus-ui" => Posture {
+            deps_internal: Some(&[]),
+            dev_internal: Some(&[]),
+            third_party: ThirdParty::Only(&[
+                "insta",
+                "pulldown-cmark",
+                "similar",
+                "syntect",
+                "toml",
+                "two-face",
+                "unicode-segmentation",
+                "unicode-width",
+            ]),
+        },
+        // The terminal frontend (ADR-0013 item 9): sees the client protocol
+        // and the IR, never core internals (ADR-0018 item 10). Third-party
+        // is unconstrained — like any adapter, it owns its IO (terminal
+        // frameworks included).
+        "cadmus-tui" => Posture {
+            deps_internal: Some(&["cadmus-contract", "cadmus-ui"]),
+            dev_internal: Some(&["cadmus-contract", "cadmus-ui"]),
+            third_party: ThirdParty::Any,
+        },
         // Zero third-party dependencies, by policy.
         "xtask" => Posture {
             deps_internal: Some(&[]),
@@ -131,11 +160,13 @@ fn posture_of(name: &str) -> Posture {
 
 /// Postures pinned by name — renaming or removing one of these crates must
 /// fail loudly instead of silently dropping its rule to the adapter default.
-const NAMED_POSTURES: [&str; 5] = [
+const NAMED_POSTURES: [&str; 7] = [
     "cadmus",
     "cadmus-contract",
     "cadmus-core",
     "cadmus-transport",
+    "cadmus-tui",
+    "cadmus-ui",
     "xtask",
 ];
 
@@ -325,7 +356,7 @@ fn check_manifest_text(
                 }
                 ThirdParty::Only(list) if !list.contains(&name) => {
                     failures.push(format!(
-                        "{rel}: {kind} '{name}' — the contract's third-party deps are a closed set (every crate links it transitively, so a new entry fans out workspace-wide); a deliberate addition edits crates/xtask/src/arch.rs"
+                        "{rel}: {kind} '{name}' — {crate_name}'s third-party deps are a closed set (a new entry fans out to every crate that links it); a deliberate addition edits crates/xtask/src/arch.rs"
                     ));
                 }
                 ThirdParty::Forbid(_) | ThirdParty::Any | ThirdParty::Only(_) => {}
@@ -412,6 +443,8 @@ mod tests {
             "cadmus-core",
             "cadmus-llm-openai",
             "cadmus-transport",
+            "cadmus-tui",
+            "cadmus-ui",
         ]
         .map(str::to_owned)
         .into()
@@ -441,6 +474,8 @@ mod tests {
             "cadmus-contract",
             "cadmus-core",
             "cadmus-transport",
+            "cadmus-tui",
+            "cadmus-ui",
             "xtask",
         ] {
             std::fs::create_dir_all(crates.join(name)).expect("mkdir");
@@ -467,7 +502,7 @@ mod tests {
             .collect();
         assert_eq!(probe_failures.len(), 1, "failures: {failures:?}");
         assert!(probe_failures[0].contains("inverts the dependency direction"));
-        // No staleness fuses: all four named crates exist above.
+        // No staleness fuses: all seven named crates exist above.
         assert!(
             !failures.iter().any(|f| f.contains("staleness fuse")),
             "failures: {failures:?}"
@@ -485,6 +520,8 @@ mod tests {
         assert!(!failures.iter().any(|f| f.contains("cadmus-memory")));
         assert!(!failures.iter().any(|f| f.contains("cadmus-core")));
         assert!(!failures.iter().any(|f| f.contains("cadmus-transport")));
+        assert!(!failures.iter().any(|f| f.contains("cadmus-tui")));
+        assert!(!failures.iter().any(|f| f.contains("cadmus-ui")));
     }
 
     #[test]
@@ -576,6 +613,42 @@ genai.workspace = true
         // The same dep is unconstrained in an adapter — the asymmetry is the
         // point.
         assert!(check("cadmus-llm-openai", client).is_empty());
+    }
+
+    #[test]
+    fn the_tui_sees_the_protocol_and_the_ir_never_core_internals() {
+        // ADR-0018 item 10: core semantics reach the frontend as events only.
+        let core_edge = "\
+[dependencies]
+cadmus-core.workspace = true
+";
+        assert!(check("cadmus-tui", core_edge)[0].contains("inverts the dependency direction"));
+
+        let protocol_and_ir = "\
+[dependencies]
+cadmus-contract.workspace = true
+cadmus-ui.workspace = true
+";
+        assert!(check("cadmus-tui", protocol_and_ir).is_empty());
+    }
+
+    #[test]
+    fn renderer_frameworks_never_enter_the_ir_crate() {
+        // ADR-0018 item 2's seam, mechanized: cadmus-ui emits the
+        // semantic-style IR, so terminal/GUI frameworks belong to the
+        // frontend crates alone.
+        let ratatui_edge = "\
+[dependencies]
+ratatui.workspace = true
+";
+        assert!(check("cadmus-ui", ratatui_edge)[0].contains("closed set"));
+        assert!(check("cadmus-tui", ratatui_edge).is_empty());
+        // And the IR crate takes no internal edges at all.
+        let contract_edge = "\
+[dependencies]
+cadmus-contract.workspace = true
+";
+        assert!(check("cadmus-ui", contract_edge)[0].contains("inverts the dependency direction"));
     }
 
     #[test]

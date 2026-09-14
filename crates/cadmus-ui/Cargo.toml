@@ -1,0 +1,27 @@
+[package]
+name = "cadmus-ui"
+description = "Design system (tokens, palettes, themes, icons, motion — ADR-0017) and content pipelines (markdown, highlighting, diffs) emitting the semantic-style IR — renderer-agnostic, never renderer types (ADR-0018 item 2)"
+# Internal crates carry no semver burden. To publish later, switch to
+# version.workspace = true, drop publish = false, and register the package
+# in release-plz.toml — see CONTRIBUTING.md.
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pulldown-cmark.workspace = true
+syntect.workspace = true
+two-face.workspace = true
+# `inline` adds word-level highlighting inside changed lines (ADR-0018 item 8)
+similar = { workspace = true, features = ["inline"] }
+toml.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

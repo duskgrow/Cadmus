@@ -219,8 +219,6 @@ the GUI ADR lands.
 (agent TUIs, agent GUIs, Rust terminal-style GUI tech, orchestrator↔agent
 seam mechanics, gap/issue hunting).
 
-## Persona profiles: agent definitions, not settings presets
-
 ## The trailer's no-history choice costs a turn recompute on llama-server
 
 Consumer: the phase-3 local-inference ADR.
@@ -231,3 +229,16 @@ llama-server's generation-extended KV cache, every request then
 recomputes the previous assistant turn (~seconds of prefill per turn at
 local speeds). If phase-3 measurements make that hurt, the revisit is a
 transport-aware history policy, not a silent revert.
+
+## The serde-derive tripwire covers config file types too
+
+Consumer: cadmus-ui's theme loader (and later the TUI's settings/keymap
+files).
+
+`check_serialization_boundary` (crates/xtask/src/arch.rs) flags any
+`Serialize`/`Deserialize` derive outside cadmus-contract, but ADR-0018
+item 7 makes theme/settings/keymap files TOML data — local config, not
+wire protocol. When the theme loader lands, resolve deliberately: scope
+the check to actual wire boundaries, or parse `toml::Value` by hand (no
+derives). The check's intent (wire types only in the contract,
+ADR-0002) stands either way.
