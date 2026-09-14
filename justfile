@@ -68,6 +68,24 @@ snapshot-review:
 eval:
     cargo run -q -p cadmus -- eval
 
+# Cross-build the inline-spike harness for the Windows Terminal matrix leg
+# (ADR-0018). Output: target/x86_64-pc-windows-gnu/release/examples/inline_spike.exe
+# (self-contained: system DLLs only). One-time prerequisite: `rustup target
+# add x86_64-pc-windows-gnu` — the flake toolchain intentionally has no
+# windows target (the SSOT stays lean), so this runs on the user-profile
+# rustup while rust-toolchain.toml still pins the channel. The pthreads -L
+# path goes through nix eval because the mingw stdenv does not wire
+# windows.pthreads into the linker search path (libpthread.a otherwise
+# missing at link time).
+spike-windows:
+    #!/usr/bin/env sh
+    set -eu
+    PTHREADS_LIB="$(nix eval --raw nixpkgs#pkgsCross.mingwW64.windows.pthreads.outPath)/lib"
+    nix shell nixpkgs#pkgsCross.mingwW64.stdenv.cc -c env \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+        RUSTFLAGS="-L $PTHREADS_LIB" \
+        cargo build -p cadmus-tui --example inline_spike --release --target x86_64-pc-windows-gnu
+
 # Smoke check for agent-facing docs: SKILL.md frontmatter, size budgets, and
 # pointer integrity (AGENTS.md / CLAUDE.md / .claude/skills). Std-only Rust in
 # crates/xtask; runs on every platform `just ci` runs on.
