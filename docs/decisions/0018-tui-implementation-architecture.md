@@ -55,6 +55,7 @@ preclude_, not as a day-one feature.
    (CC0-1.0), starlark/rhai/nickel (item 7). `textwrap` is deferred:
    ratatui's built-in wrap goes first; admission requires field evidence
    it is insufficient.
+
 2. **Crate topology and the one-pipeline-two-renderers seam.**
    `cadmus-ui` (ADR-0017's crate) also owns the content pipelines —
    streaming markdown, syntax highlighting, diff modeling — whose output
@@ -153,6 +154,54 @@ preclude_, not as a day-one feature.
     god-enum of UI-internal events (Codex's AppEvent) is barred; the
     arch test gains the dependency rule (`cadmus-tui` sees the client
     protocol, not core internals).
+
+## Amendment — 2026-09-14: the inline spike verdict — stock viewport adopted
+
+The item-3 spike landed as `crates/cadmus-tui/examples/inline_spike.rs`
+(manual harness, kept as the terminal-quirk regression tool). Verdict:
+**stock `Viewport::Inline` + `Terminal::insert_before` suffices; no
+fork.** The Windows binary for the WT run was cross-built with the
+windows-gnu target via the nix mingw stdenv.
+
+Evidence (harness diagnostics per terminal):
+
+- Zed terminal (xterm-class), tmux, Windows Terminal: streaming with
+  history inserting above is loss-free and correctly ordered (WT: 19
+  turns / 56 inserts / 1170 rows across 186 resizes).
+- Shrink reflow re-materializes the visible history tail from source at
+  the new width on all three terminals (37 replays on WT, 5 on tmux).
+- WT shows zero sign of its known partial-DEC-scroll-region line drops:
+  the portable insert path never emits DEC regions (source-verified), so
+  the quirk class is dodged structurally rather than by strategy
+  dispatch.
+- Zellij untested (not installed); its known quirk also targets DEC
+  scroll regions. Residual risk accepted: field corruption reports
+  reopen this item.
+
+The spike also pinned three event-loop disciplines and two accepted
+costs, all binding on the first TUI PR:
+
+1. **Fixed-height viewport layout** — the inline height has no mutation
+   API (source-verified); the layout design works within a fixed height.
+2. **Resize debounce (~75 ms, Codex precedent)** — re-anchoring scrolls
+   the terminal, so each processed resize leaves the previous frame as
+   scrollback residue; debounce bounds it to ≤1 stale frame per drag
+   gesture.
+3. **Cursor-query error tolerance on every path** — re-anchoring issues
+   a DA cursor-position round-trip, including inside `draw`'s
+   autoresize; queries time out under resize storms and quirky stdio.
+   Tolerate and repaint on the next tick; never die mid-run.
+4. Accepted cost: scrollback duplication when a shrink replay fires —
+   stock ratatui cannot delete its own scrollback rows (Codex's
+   DEC-row-delete is the unportable trick this decision forgoes).
+5. Accepted cosmetic item: the exit path's treatment of the final
+   viewport frame is a design decision for the first TUI PR (the harness
+   overprints it).
+
+The thin-fork fallback (Codex blueprint, MIT attribution) stays on the
+shelf: reconsider if field use shows the residue/duplication costs are
+unacceptable, if dynamic height becomes a hard requirement, or if a
+terminal in the support matrix misbehaves under the portable path.
 
 ## Consequences
 
