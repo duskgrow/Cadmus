@@ -1,0 +1,688 @@
+---
+source: crates/cadmus-ui/src/markdown.rs
+expression: "render_document(source, 60, highlighter())"
+---
+[
+    Line {
+        spans: [
+            Span {
+                text: "Release notes",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: true,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "The ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "stream",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: true,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " stays ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "readable",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " while it lands.",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "- ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "first item",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "- ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "second with ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "a link",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: true,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "  - ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "nested",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "fn",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            5,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " ",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            0,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "main",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            4,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "() {",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            0,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "    println!(",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            0,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "\"hi\"",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            2,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: ");",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            0,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "}",
+                style: Style {
+                    fg: Some(
+                        Rgb(
+                            0,
+                            0,
+                            0,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "name",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: true,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " | ",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "value",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: true,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "alpha",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " | ",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "1",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "beta",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " | ",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "200",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "---",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [],
+    },
+    Line {
+        spans: [
+            Span {
+                text: "> ",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "quoted ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "tail",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: true,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+]

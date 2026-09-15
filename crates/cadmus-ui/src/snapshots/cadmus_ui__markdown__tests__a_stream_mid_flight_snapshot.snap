@@ -1,0 +1,174 @@
+---
+source: crates/cadmus-ui/src/markdown.rs
+expression: "(render.flushable_len(), render.live_lines())"
+---
+(
+    4,
+    [
+        Line {
+            spans: [
+                Span {
+                    text: "Notes",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: true,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+            ],
+        },
+        Line {
+            spans: [],
+        },
+        Line {
+            spans: [
+                Span {
+                    text: "para ",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: "one",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: true,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+            ],
+        },
+        Line {
+            spans: [],
+        },
+        Line {
+            spans: [
+                Span {
+                    text: "a",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: true,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: " | ",
+                    style: Style {
+                        fg: Some(
+                            Slot(
+                                TextSubtle,
+                            ),
+                        ),
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: "b",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: true,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+            ],
+        },
+        Line {
+            spans: [
+                Span {
+                    text: "1",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: " | ",
+                    style: Style {
+                        fg: Some(
+                            Slot(
+                                TextSubtle,
+                            ),
+                        ),
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: "2",
+                    style: Style {
+                        fg: None,
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+            ],
+        },
+    ],
+)
