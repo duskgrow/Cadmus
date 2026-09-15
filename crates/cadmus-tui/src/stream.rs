@@ -1,0 +1,356 @@
+//! The stream widget: the band's live tail over `cadmus-ui`'s markdown
+//! pipeline (ADR-0018 items 2 and 4). The widget owns the pipeline's flush
+//! contract with the shell — completed content leaves the band into real
+//! scrollback continuously, never in one batch at turn end — and re-derives
+//! everything (resize replay included) from the source SSOT.
+//!
+//! Wrapping discipline: ratatui's own word wrapper is the single wrap
+//! implementation (the `textwrap` crate stays deferred — ADR-0018 item 1).
+//! Flush rows, band rows and height math all come from
+//! [`Paragraph`]-wrapping the same mapped lines, so they can never disagree;
+//! the scratch render only reads back what ratatui itself would draw.
+//! `Wrap { trim: false }` keeps continuation-line indentation — fenced code
+//! must not lose leading whitespace; the prose cost (a leading space on
+//! continuation rows) is accepted until the textwrap trigger fires.
+
+use cadmus_ui::highlight::Highlighter;
+use cadmus_ui::ir;
+use cadmus_ui::markdown::{MarkdownStream, Render, render_document};
+use cadmus_ui::theme::{ColorDepth, Theme};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
+
+use crate::style::ir_style;
+
+/// The streaming transcript's live tail. See the module docs for the
+/// wrapping and flush contracts.
+pub struct Stream {
+    pipeline: MarkdownStream,
+}
+
+impl Stream {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pipeline: MarkdownStream::new(),
+        }
+    }
+
+    /// Append one output delta. Nothing renders until [`Stream::render`].
+    pub fn push_delta(&mut self, text: &str) {
+        self.pipeline.push_delta(text);
+    }
+
+    /// Replace the buffered source with the authoritative complete item
+    /// (item 4: a saturated transport cannot truncate the transcript).
+    pub fn finalize(&mut self, full_source: &str) {
+        self.pipeline.finalize(full_source);
+    }
+
+    /// The buffered source (the SSOT the resize replay re-renders from).
+    #[must_use]
+    pub fn source(&self) -> &str {
+        self.pipeline.source()
+    }
+
+    /// Advance the pipeline's incremental render at `width`.
+    pub fn render(&mut self, width: u16, highlighter: &Highlighter) -> &Render {
+        self.pipeline.render(width, highlighter)
+    }
+
+    /// The flushable prefix, wrapped: the count of *logical* lines covered
+    /// (for [`Stream::ack_flushed`]) plus the display rows to hand
+    /// [`crate::shell::InlineShell::flush`]. Empty when nothing may flush.
+    pub fn flushable_rows(
+        &mut self,
+        width: u16,
+        highlighter: &Highlighter,
+        theme: &Theme,
+        depth: ColorDepth,
+    ) -> (usize, Vec<Line<'static>>) {
+        let render = self.pipeline.render(width, highlighter);
+        let flushable = render.flushable_len();
+        if flushable == 0 {
+            return (0, Vec::new());
+        }
+        let rows = wrap_rows(&render.live_lines()[..flushable], width, theme, depth);
+        (flushable, rows)
+    }
+
+    /// Confirm `lines` logical lines left the band (a successful shell
+    /// flush). They never reappear in the live tail.
+    pub fn ack_flushed(&mut self, lines: usize) {
+        self.pipeline.ack_flushed(lines);
+    }
+
+    /// Every live (unflushed) row, wrapped — the band's stream-tail content.
+    pub fn live_rows(
+        &mut self,
+        width: u16,
+        highlighter: &Highlighter,
+        theme: &Theme,
+        depth: ColorDepth,
+    ) -> Vec<Line<'static>> {
+        let render = self.pipeline.render(width, highlighter);
+        wrap_rows(render.live_lines(), width, theme, depth)
+    }
+
+    /// The live tail's wrapped row count — the layout function's stream
+    /// input. Cheap: measured through the same wrapper, without a scratch
+    /// render, and styles never affect wrapping (they are zero-width), so
+    /// plain text is enough.
+    pub fn live_row_count(&mut self, width: u16, highlighter: &Highlighter) -> u16 {
+        let render = self.pipeline.render(width, highlighter);
+        if render.live_lines().is_empty() {
+            return 0;
+        }
+        let lines: Vec<Line<'static>> = render
+            .live_lines()
+            .iter()
+            .map(|line| Line::from(line.text()))
+            .collect();
+        let count = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .line_count(width.max(1));
+        u16::try_from(count).unwrap_or(u16::MAX)
+    }
+
+    /// The band's stream-tail slice: the live rows bottom-anchored into
+    /// `height` rows (newest content wins when the tail is taller).
+    #[must_use]
+    pub fn visible(rows: &[Line<'static>], height: u16) -> Vec<Line<'static>> {
+        let skip = rows.len().saturating_sub(usize::from(height));
+        rows.iter().skip(skip).cloned().collect()
+    }
+
+    /// Resize replay (the shell's `on_resize` closure): the still-visible
+    /// *flushed* history tail re-materialized from the source SSOT at the
+    /// new width — up to `max_rows` display rows, newest last. The live tail
+    /// is excluded: it comes back with the band's own repaint, and replaying
+    /// it here would duplicate it. Only the committed source replays (the
+    /// newline gate's partial trailing line has never been visible).
+    pub fn replay_tail(
+        &mut self,
+        max_rows: u16,
+        width: u16,
+        highlighter: &Highlighter,
+        theme: &Theme,
+        depth: ColorDepth,
+    ) -> Vec<Line<'static>> {
+        let live = self
+            .pipeline
+            .render(width, highlighter)
+            .live_lines()
+            .to_vec();
+        let committed = self.pipeline.committed_source().to_string();
+        let logical = render_document(&committed, width, highlighter);
+        // The document and the pipeline share one renderer, so the flushed
+        // prefix is the document minus the still-live logical lines.
+        let split = logical.len().saturating_sub(live.len());
+        debug_assert_eq!(
+            &logical[split..],
+            live.as_slice(),
+            "the document's tail must equal the pipeline's live lines"
+        );
+        let rows = wrap_rows(&logical[..split], width, theme, depth);
+        Self::visible(&rows, max_rows)
+    }
+}
+
+impl Default for Stream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Map logical IR lines onto ratatui lines under the theme and depth.
+fn map_lines(lines: &[ir::Line], theme: &Theme, depth: ColorDepth) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .map(|line| {
+            Line::from(
+                line.spans
+                    .iter()
+                    .map(|span| {
+                        Span::styled(span.text.clone(), ir_style(&span.style, theme, depth))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// Word-wrap logical lines into display rows through ratatui's own wrapper,
+/// reading the scratch render back into lines (module docs for the why).
+/// Trailing whitespace is trimmed from each row — invisible on screen, and
+/// keeping it would only pollute scrollback diffs.
+fn wrap_rows(
+    logical: &[ir::Line],
+    width: u16,
+    theme: &Theme,
+    depth: ColorDepth,
+) -> Vec<Line<'static>> {
+    if logical.is_empty() {
+        return Vec::new();
+    }
+    let width = width.max(1);
+    let paragraph = Paragraph::new(map_lines(logical, theme, depth)).wrap(Wrap { trim: false });
+    let height = paragraph.line_count(width);
+    let height = u16::try_from(height).unwrap_or(u16::MAX);
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    paragraph.render(area, &mut buf);
+    (0..height).map(|y| extract_row(&buf, y, width)).collect()
+}
+
+/// One row of the scratch buffer as a line: consecutive same-style cells
+/// merge, wide-grapheme continuation cells (which `Buffer` resets to a
+/// blank symbol) are skipped by width math, and trailing whitespace drops —
+/// invisible on screen, and keeping it would only pollute scrollback diffs.
+fn extract_row(buf: &Buffer, y: u16, width: u16) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut skip = 0u16;
+    let mut x = 0;
+    while x < width {
+        let Some(cell) = buf.cell((x, y)) else { break };
+        x += 1;
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        let symbol = cell.symbol();
+        skip = unicode_width::UnicodeWidthStr::width(symbol)
+            .saturating_sub(1)
+            .try_into()
+            .unwrap_or(u16::MAX);
+        let style = ratatui::style::Style::default()
+            .fg(cell.fg)
+            .bg(cell.bg)
+            .add_modifier(cell.modifier);
+        if symbol.is_empty() {
+            continue; // zero-width symbols carry no ink
+        }
+        if let Some(last) = spans.last_mut()
+            && last.style == style
+        {
+            last.content.to_mut().push_str(symbol);
+        } else {
+            spans.push(Span::styled(symbol.to_string(), style));
+        }
+    }
+    while spans
+        .last()
+        .is_some_and(|span| span.content.trim().is_empty())
+    {
+        spans.pop();
+    }
+    if let Some(last) = spans.last_mut() {
+        let trimmed = last.content.trim_end().to_string();
+        last.content = trimmed.into();
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+
+    use super::*;
+
+    fn highlighter() -> &'static Highlighter {
+        static HIGHLIGHTER: OnceLock<Highlighter> = OnceLock::new();
+        HIGHLIGHTER.get_or_init(Highlighter::new)
+    }
+
+    fn texts(rows: &[Line<'static>]) -> Vec<String> {
+        rows.iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_paragraph_flushes_once_it_completes() {
+        let mut stream = Stream::new();
+        stream.push_delta("hello world\n\nnext\n");
+        let (logical, rows) =
+            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        // The completed paragraph flushes with its separator (item 4).
+        assert_eq!(logical, 2);
+        assert_eq!(texts(&rows), vec!["hello world", ""]);
+        stream.ack_flushed(logical);
+        let live = stream.live_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(texts(&live), vec!["next"]);
+        let (logical, _) =
+            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(logical, 0);
+    }
+
+    #[test]
+    fn wrap_rows_and_live_row_count_agree() {
+        let mut stream = Stream::new();
+        stream.push_delta("alpha beta gamma delta epsilon zeta\n\n");
+        let rows = stream.live_rows(10, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        let count = stream.live_row_count(10, highlighter());
+        assert_eq!(usize::from(count), rows.len());
+        assert!(rows.len() > 1, "the long line wraps at width 10");
+    }
+
+    #[test]
+    fn wide_content_wraps_below_the_width() {
+        let logical = [ir::Line::plain("你好世界你好")]; // 12 columns of CJK
+        let rows = wrap_rows(&logical, 8, &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(texts(&rows), vec!["你好世界", "你好"]);
+    }
+
+    #[test]
+    fn continuation_whitespace_survives_the_wrap() {
+        // trim: false — whitespace past the wrap boundary carries to the
+        // continuation row, so indented code keeps its indent.
+        let logical = [ir::Line::plain("aaaa    bb")];
+        let rows = wrap_rows(&logical, 6, &Theme::ansi(), ColorDepth::Truecolor);
+        // With trim: true the continuation row would lose its leading space.
+        assert_eq!(texts(&rows), vec!["aaaa", " bb"]);
+    }
+
+    #[test]
+    fn the_replay_tail_renders_from_source_at_the_new_width() {
+        let mut stream = Stream::new();
+        stream.push_delta("alpha beta gamma delta\n\nsecond part here\n");
+        let (logical, _rows) =
+            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        stream.ack_flushed(logical);
+        // Only the flushed paragraph replays; the open one stays with the band.
+        let rows = stream.replay_tail(10, 8, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        let texts = texts(&rows);
+        assert!(texts.contains(&"alpha".to_string()), "{texts:?}");
+        assert!(!texts.iter().any(|row| row.contains("here")), "{texts:?}");
+    }
+
+    #[test]
+    fn visible_bottom_anchors_the_tail() {
+        let rows: Vec<Line<'static>> = (0..5).map(|i| Line::from(format!("row {i}"))).collect();
+        let window = Stream::visible(&rows, 2);
+        assert_eq!(texts(&window), vec!["row 3", "row 4"]);
+    }
+
+    #[test]
+    fn an_empty_stream_has_no_rows() {
+        let mut stream = Stream::new();
+        assert!(
+            stream
+                .live_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor)
+                .is_empty()
+        );
+        assert_eq!(stream.live_row_count(80, highlighter()), 0);
+        let (logical, rows) =
+            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!((logical, rows.len()), (0, 0));
+    }
+}

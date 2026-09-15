@@ -329,10 +329,11 @@ misbehaves under the portable path.
 - PR sequencing (2026-09-15): the inline shell landed first — the band
   mechanism (guarded ops, the recreation protocols, the resize replay)
   plus the spike harness's collapse into a thin driver over
-  `cadmus_tui::shell`. The content-driven height function and the
-  widget layout rules need the real composer/stream widgets and land
-  with them; the input broker (the CPR-race seam, amendment item 5),
-  the resize debounce and the frame scheduler land with the event
-  loop. Until the broker lands, the quiesced-stdin contract is
-  documented on the shell module and watched by the harness's
-  sentinel protocol.
+  `cadmus_tui::shell`. The input broker (the CPR-race seam, amendment
+  item 5), the resize debounce and the frame scheduler landed with the
+  event loop. The composer/stream widgets landed with the content-driven
+  height function and the widget layout rules (composer cap,
+  short-window corner — `cadmus_tui::layout`), together with
+  `cadmus-ui`'s streaming-markdown pipeline, syntect highlighting and
+  the semantic-style IR they render (items 2 and 4), all per this
+  ordering.

@@ -282,3 +282,16 @@ the shrink replay may flip from necessary to harmful (inserting rows
 nothing lost) — plus the dynamic-height probe suite
 (`tests/dynamic_height_spike.rs`), and re-check the ADR-0018
 amendment's evidence lines. MSRV holds at 1.88 through 0.30.2.
+
+## The stream widget re-renders and re-wraps per accessor call
+
+Consumer: the TUI app-wiring change (the event loop's draw pump).
+
+Self-review finding (2026-09-16): `Stream::flushable_rows`, `live_rows`
+and `live_row_count` each drive `MarkdownStream::render` and the
+ratatui wrap independently, and `render` deep-clones all live lines
+into `Render` per call — the widget test app pumps five pipeline
+renders per event batch. Same big-O as the sanctioned full reparse,
+but the constants are avoidable (render once per batch into a snapshot
+the three views read off). Fix when the real pump lands and can
+measure it.

@@ -56,7 +56,12 @@ time = { version = "0.3", default-features = false }
 # MSRV is exactly 1.88.0 — zero headroom: `just toolchain-bump` must check
 # ratatui's published MSRV before raising ours. crossterm_0_29 pins the
 # backend to the crossterm line we depend on directly.
-ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+# unstable-rendered-line-info exposes Paragraph::line_count/line_width: the
+# stream widget measures wrapped heights with ratatui's own WordWrapper, so
+# flush rows, band rendering and height math share one wrap implementation
+# (the same feature Codex enables; version-pinned, and the ratatui-bump open
+# item already re-verifies the inline-viewport area on upgrades).
+ratatui = { version = "0.30", features = ["crossterm_0_29", "unstable-rendered-line-info"] }
 # terminal IO + the async event stream; slow release line but an active repo —
 # maintainer-signed staleness exception in ADR-0018 item 1
 crossterm = { version = "0.29", features = ["event-stream"] }
