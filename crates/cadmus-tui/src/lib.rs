@@ -8,8 +8,19 @@
 //! the mode × key input layer (keymap as data) and the self-built composer.
 //! It sees the contract and the IR — never core internals.
 //!
-//! The inline shell ([`shell`]) owns the raw terminal and the band's
-//! lifecycle — anchor, dynamic height via `Terminal` recreation, resize
-//! reflow, guarded draws (ADR-0018's 2026-09-14 amendments).
+//! - [`shell`] — the inline shell: owns the raw terminal and the band's
+//!   lifecycle (anchor, dynamic height via `Terminal` recreation, resize
+//!   reflow, guarded draws — ADR-0018's 2026-09-14 amendments).
+//! - [`frame`] — the event loop's redraw half: the [`frame::FrameRequester`]/
+//!   [`frame::FrameScheduler`] actor pair coalescing and capping frames at
+//!   120 FPS, demand-driven (ADR-0018 item 5).
+//! - [`input`] — the input broker: owns the crossterm event stream; the
+//!   quiesce seam for shell (re)construction and `$EDITOR` handoff (ADR-0018
+//!   item 5).
+//! - [`debounce`] — resize-burst coalescing cadence (inline-spike
+//!   discipline 2).
 
+pub mod debounce;
+pub mod frame;
+pub mod input;
 pub mod shell;

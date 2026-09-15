@@ -22,9 +22,8 @@
 //! - **Quiesced stdin at (re)construction**: `Terminal::with_options` issues
 //!   a CPR query that races stdin readers (upstream ratatui #2640, open).
 //!   Callers must hold all stdin readers quiesced across [`InlineShell::new`]
-//!   and [`InlineShell::set_height`] — the input broker (event-loop PR) is
-//!   the designated seam; until it lands, the spike harness's sentinel
-//!   protocol watches for swallowed keys.
+//!   and [`InlineShell::set_height`] — the input broker's quiesce guard
+//!   ([`crate::input::InputBroker::quiesce`]) is the designated seam.
 
 use std::io::{self, Write};
 
