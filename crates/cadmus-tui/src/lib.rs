@@ -11,6 +11,10 @@
 //! - [`shell`] — the inline shell: owns the raw terminal and the band's
 //!   lifecycle (anchor, dynamic height via `Terminal` recreation, resize
 //!   reflow, guarded draws — ADR-0018's 2026-09-14 amendments).
+//! - [`composer`] — the self-built multiline prompt editor: grapheme-correct
+//!   cursor/word ops, selection, bounded snapshot undo, hard-wrap layout
+//!   with cursor placement, and the paste-burst heuristic (ADR-0018 item 6,
+//!   ADR-0012's editor-grade-input floor).
 //! - [`frame`] — the event loop's redraw half: the [`frame::FrameRequester`]/
 //!   [`frame::FrameScheduler`] actor pair coalescing and capping frames at
 //!   120 FPS, demand-driven (ADR-0018 item 5).
@@ -20,6 +24,7 @@
 //! - [`debounce`] — resize-burst coalescing cadence (inline-spike
 //!   discipline 2).
 
+pub mod composer;
 pub mod debounce;
 pub mod frame;
 pub mod input;
