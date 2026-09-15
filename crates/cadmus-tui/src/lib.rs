@@ -7,3 +7,9 @@
 //! owns the event loop (actor pair, capped frame rate, input never blocks),
 //! the mode × key input layer (keymap as data) and the self-built composer.
 //! It sees the contract and the IR — never core internals.
+//!
+//! The inline shell ([`shell`]) owns the raw terminal and the band's
+//! lifecycle — anchor, dynamic height via `Terminal` recreation, resize
+//! reflow, guarded draws (ADR-0018's 2026-09-14 amendments).
+
+pub mod shell;

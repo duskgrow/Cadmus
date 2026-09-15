@@ -1,11 +1,14 @@
-//! Spike probe: does recreating the `Terminal` deliver dynamic band height on
-//! stock ratatui — spike fact F1's untested escape hatch (ADR-0018)?
+//! The inline shell's deterministic suite: a vt100-emulated terminal locks
+//! the recreation protocol's row bookkeeping (ADR-0018, second 2026-09-14
+//! amendment) — zero history rows lost or duplicated, bounded residue only,
+//! the composer cursor stable across every height change, and exactly one
+//! 2026h wrapper per op.
 //!
-//! Verdict criteria (the UX guardrails the maintainer set): zero history rows
-//! lost or duplicated, bounded residue only, and the composer cursor stable
-//! across every height change. The probe emulates a terminal with vt100, so
-//! every assertion is deterministic; what it cannot judge is compositing
-//! (flicker) — that stays with the manual terminal matrix in
+//! Born as the dynamic-height spike probe; the verdict evidence and the
+//! real-terminal matrix live in
+//! `docs/research/2026-09-14-terminal-recreation-spike.md`. The suite now
+//! drives the production mechanism (`cadmus_tui::shell::InlineShell`) — what
+//! vt100 cannot judge (compositing, flicker) stays with the manual matrix in
 //! `examples/inline_spike.rs`.
 //!
 //! The rig: a `Backend` impl that feeds a `vt100::Parser` the same escape
@@ -14,31 +17,66 @@
 //! — scrolling, scrollback, deferred wrap — instead of us re-deriving them.
 //! Cursor-position queries are answered from the emulated screen, which is
 //! exactly what a real terminal does; styles are omitted because SGR bytes
-//! never move rows, and rows are what this probe judges.
+//! never move rows, and rows are what this suite judges. Guard bytes (2026h)
+//! go to a separate sink — vt100 ignores them, and the wrapper structure is
+//! asserted verbatim instead.
 
 use std::cell::RefCell;
-use std::convert::Infallible;
 use std::fmt::Write as _;
+use std::io::{self, Write};
 use std::rc::Rc;
 
+use cadmus_tui::shell::InlineShell;
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
-use ratatui::{Terminal, TerminalOptions, Viewport};
+use ratatui::widgets::Paragraph;
+use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
 const SCREEN_ROWS: u16 = 24;
 const SCREEN_COLS: u16 = 80;
 /// Deep enough that no assertion below ever hits the scrollback cap.
 const SCROLLBACK_LEN: usize = 500;
 
+const BSU: &[u8] = b"\x1b[?2026h";
+const ESU: &[u8] = b"\x1b[?2026l";
+
+/// Records the shell's guard bytes. Guards never reach the vt100 parser (the
+/// screen model ignores them), so the one-wrapper invariant is asserted on
+/// this verbatim recording instead.
+#[derive(Clone, Default)]
+struct GuardSink {
+    log: Rc<RefCell<Vec<u8>>>,
+}
+
+impl GuardSink {
+    /// Drain the recording: each op should leave exactly one begin/end pair.
+    fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut self.log.borrow_mut())
+    }
+}
+
+impl Write for GuardSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.log.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Shared handle to the emulated terminal; cloning gives a recreated
 /// `Terminal` the same screen state — which is the whole point of the
 /// recreation protocol (the OS terminal also outlives the `Terminal`).
+/// `fail_queries` injects cursor-query failure on demand: the tolerance
+/// contract (spike discipline 3) only exists to be tested.
 #[derive(Clone)]
 struct VtBackend {
     parser: Rc<RefCell<vt100::Parser>>,
+    fail_queries: Rc<std::cell::Cell<bool>>,
 }
 
 impl VtBackend {
@@ -49,6 +87,7 @@ impl VtBackend {
                 SCREEN_COLS,
                 SCROLLBACK_LEN,
             ))),
+            fail_queries: Rc::new(std::cell::Cell::new(false)),
         }
     }
 
@@ -58,7 +97,9 @@ impl VtBackend {
 }
 
 impl Backend for VtBackend {
-    type Error = Infallible;
+    // The shell unifies guard emission and backend errors on io::Error; the
+    // rig never fails, so any flavor would do.
+    type Error = io::Error;
 
     fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
     where
@@ -92,6 +133,9 @@ impl Backend for VtBackend {
     }
 
     fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        if self.fail_queries.get() {
+            return Err(io::Error::other("injected CPR failure"));
+        }
         let (row, col) = self.parser.borrow().screen().cursor_position();
         Ok(Position::new(col, row))
     }
@@ -156,6 +200,20 @@ impl World {
         }
     }
 
+    fn resize(&self, rows: u16, cols: u16) {
+        self.backend
+            .parser
+            .borrow_mut()
+            .screen_mut()
+            .set_size(rows, cols);
+    }
+
+    /// Make cursor-position queries fail until cleared — a real terminal's
+    /// CPR times out under resize storms and quirky stdio (spike fact F3).
+    fn fail_queries(&self, fail: bool) {
+        self.backend.fail_queries.set(fail);
+    }
+
     fn visible_rows(&self) -> Vec<String> {
         let parser = self.backend.parser.borrow();
         parser
@@ -191,7 +249,7 @@ impl World {
     }
 
     /// Every non-blank row the user can reach, oldest first: the strongest
-    /// invariant this probe has — any lost, duplicated or stale row breaks
+    /// invariant this suite has — any lost, duplicated or stale row breaks
     /// the expected sequence.
     fn nonblank_rows(&self) -> Vec<String> {
         self.scrollback_rows()
@@ -206,11 +264,47 @@ impl World {
     }
 }
 
-/// The TUI stand-in: a bottom-anchored band of status + stream tail +
-/// composer over a transcript of flushed history rows.
+/// The band's content, derived from the frame's live height so the repaint
+/// after a recreation already shows the new geometry.
+fn band_lines(band_height: u16, turn: u16, composer_rows: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(format!("STATUS·h{band_height}·t{turn}"))];
+    let tail_rows = band_height - 1 - composer_rows;
+    for i in 0..tail_rows {
+        lines.push(Line::from(format!("TAIL·t{turn}·r{i}")));
+    }
+    for i in 0..composer_rows {
+        lines.push(Line::from(format!("PROMPT·c{i}")));
+    }
+    lines
+}
+
+/// An owned renderer over the content model — the materialize-then-draw
+/// pattern: the closure captures data, never a borrow of the app, so it can
+/// run inside shell ops that hold the terminal mutably.
+fn band_render(
+    turn: u16,
+    composer_rows: u16,
+    cursor_offset: u16,
+) -> impl FnOnce(&mut Frame<'_>) + use<> {
+    move |frame: &mut Frame<'_>| {
+        let area = frame.area();
+        frame.render_widget(
+            Paragraph::new(band_lines(area.height, turn, composer_rows)),
+            area,
+        );
+        frame.set_cursor_position(Position::new(
+            2,
+            area.bottom().saturating_sub(1 + cursor_offset),
+        ));
+    }
+}
+
+/// The TUI stand-in: the shell owns the terminal; the app model is just a
+/// turn counter, the composer geometry and the cursor offset — the stand-in
+/// for view-model state the widgets will own.
 struct ProbeApp {
-    terminal: Terminal<VtBackend>,
-    band_height: u16,
+    shell: InlineShell<VtBackend, GuardSink>,
+    guard_sink: GuardSink,
     composer_rows: u16,
     turn: u16,
     /// Composer cursor row offset within the band (bottom row by default);
@@ -220,16 +314,12 @@ struct ProbeApp {
 
 impl ProbeApp {
     fn boot(world: &World, band_height: u16, composer_rows: u16) -> Self {
-        let terminal = Terminal::with_options(
-            world.backend.clone(),
-            TerminalOptions {
-                viewport: Viewport::Inline(band_height),
-            },
-        )
-        .expect("boot terminal");
+        let guard_sink = GuardSink::default();
+        let shell = InlineShell::new(world.backend.clone(), guard_sink.clone(), band_height)
+            .expect("boot shell");
         let mut app = Self {
-            terminal,
-            band_height,
+            shell,
+            guard_sink,
             composer_rows,
             turn: 0,
             composer_cursor_offset: 0,
@@ -238,115 +328,81 @@ impl ProbeApp {
         app
     }
 
-    fn band_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!(
-            "STATUS·h{}·t{}",
-            self.band_height, self.turn
-        ))];
-        let tail_rows = self.band_height - 1 - self.composer_rows;
-        for i in 0..tail_rows {
-            lines.push(Line::from(format!("TAIL·t{}·r{i}", self.turn)));
-        }
-        for i in 0..self.composer_rows {
-            lines.push(Line::from(format!("PROMPT·c{i}")));
-        }
-        lines
+    fn render(&self) -> impl FnOnce(&mut Frame<'_>) + use<> {
+        band_render(self.turn, self.composer_rows, self.composer_cursor_offset)
     }
 
     fn draw_band(&mut self) {
-        let cursor_offset = self.composer_cursor_offset;
-        let lines = self.band_lines();
-        self.terminal
-            .draw(|frame| {
-                let area = frame.area();
-                frame.render_widget(Paragraph::new(lines), area);
-                frame.set_cursor_position(Position::new(
-                    2,
-                    area.bottom().saturating_sub(1 + cursor_offset),
-                ));
-            })
-            .expect("draw band");
+        let render = self.render();
+        self.shell.draw(render);
     }
 
     /// The flush path: completed rows leave into scrollback above the band.
     fn flush_history(&mut self, rows: &[String]) {
         self.turn += 1;
-        let height = u16::try_from(rows.len()).expect("probe rows fit u16");
         let lines: Vec<Line<'static>> = rows.iter().cloned().map(Line::from).collect();
-        self.terminal
-            .insert_before(height, |buf| {
-                Paragraph::new(lines).render(buf.area, buf);
-            })
-            .expect("flush history");
-        self.draw_band();
+        let render = self.render();
+        self.shell.flush(&lines, render).expect("flush history");
     }
 
-    /// Grow protocol: push history up by delta with blank inserts (so the
-    /// rows the taller band will cover are blanks, never visible content),
-    /// park the cursor at the future band top, then recreate — the
-    /// re-anchor's `append_lines` then lands exactly at the bottom row and
-    /// scrolls nothing.
     fn grow(&mut self, new_height: u16) {
-        // Height policy works on effective (screen-clamped) heights: ratatui
-        // clamps the viewport too, but without an early no-op the anchor
-        // math below underflows when the band already fills the screen.
-        let new_height = new_height.min(SCREEN_ROWS);
-        if new_height == self.band_height {
-            return;
-        }
-        let delta = new_height - self.band_height;
-        self.terminal
-            .insert_before(delta, |_buf| {})
-            .expect("grow: blank insert");
-        let new_top = self.terminal.get_frame().area().y - delta;
-        self.terminal
-            .set_cursor_position(Position::new(0, new_top))
-            .expect("grow: park cursor");
-        self.recreate(new_height);
+        let render = self.render();
+        self.shell.set_height(new_height, render).expect("grow");
     }
 
-    /// Shrink protocol: clear the old band (its vacated rows become the
-    /// bounded blank residue the ADR accepts), park the cursor delta rows
-    /// lower, recreate. The blank gap is consumed by later flushes.
     fn shrink(&mut self, new_height: u16) {
-        let delta = self.band_height - new_height;
-        self.terminal.clear().expect("shrink: clear band");
-        let new_top = self.terminal.get_frame().area().y + delta;
-        self.terminal
-            .set_cursor_position(Position::new(0, new_top))
-            .expect("shrink: park cursor");
-        self.recreate(new_height);
+        let render = self.render();
+        self.shell.set_height(new_height, render).expect("shrink");
     }
 
-    /// The falsification baseline: recreate with no protocol, to document
-    /// the residue the protocol exists to prevent.
-    fn grow_naive(&mut self, new_height: u16) {
-        self.recreate(new_height);
-    }
-
-    fn recreate(&mut self, new_height: u16) {
-        self.terminal = Terminal::with_options(
-            self.terminal.backend().clone(),
-            TerminalOptions {
-                viewport: Viewport::Inline(new_height),
-            },
-        )
-        .expect("recreate terminal");
-        self.band_height = new_height;
-        self.draw_band();
+    fn on_resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        replay_tail: impl FnOnce(u16, u16) -> Vec<Line<'static>>,
+    ) {
+        let render = self.render();
+        self.shell
+            .on_resize(cols, rows, replay_tail, render)
+            .expect("resize");
     }
 
     fn expected_band(&self) -> Vec<String> {
-        self.band_lines()
+        band_lines(self.shell.band_height(), self.turn, self.composer_rows)
             .into_iter()
             .map(|line| line.to_string())
             .collect()
     }
 
     fn expected_cursor(&mut self) -> (u16, u16) {
-        let top = self.terminal.get_frame().area().y;
-        (top + self.band_height - 1 - self.composer_cursor_offset, 2)
+        let top = self.shell.band_area().y;
+        (
+            top + self.shell.band_height() - 1 - self.composer_cursor_offset,
+            2,
+        )
     }
+}
+
+/// The falsification baseline: a bare `Terminal` recreation with no protocol,
+/// bypassing the shell on purpose — proves the world readers can see the
+/// residue the shell's protocol exists to prevent (an assertion suite that
+/// never sees red proves nothing).
+fn grow_naive(world: &World, app: &ProbeApp, new_height: u16) {
+    let mut bare = Terminal::with_options(
+        world.backend.clone(),
+        TerminalOptions {
+            viewport: Viewport::Inline(new_height),
+        },
+    )
+    .expect("naive recreate");
+    bare.draw(|frame| {
+        let area = frame.area();
+        frame.render_widget(
+            Paragraph::new(band_lines(new_height, app.turn, app.composer_rows)),
+            area,
+        );
+    })
+    .expect("naive draw");
 }
 
 fn shell_lines(count: u16) -> Vec<String> {
@@ -400,8 +456,8 @@ fn rig_sanity_fixed_height_anchors_and_inserts() {
 #[test]
 fn naive_recreation_leaves_stale_band_rows() {
     let world = World::new();
-    let (mut app, _expected) = boot_anchored(&world, 8, 2);
-    app.grow_naive(12);
+    let (app, _expected) = boot_anchored(&world, 8, 2);
+    grow_naive(&world, &app, 12);
     // The old band's image is scrolled up by the re-anchor and its top rows
     // survive above the new viewport: two STATUS generations on screen.
     let statuses = world
@@ -496,6 +552,209 @@ fn grow_to_full_screen_height_clamps_and_stays_exact() {
     // max_height rule): the band fills the screen, history lives in
     // scrollback, and future flushes insert straight into it.
     app.grow(SCREEN_ROWS + 6);
-    assert_eq!(app.terminal.get_frame().area().height, SCREEN_ROWS);
+    assert_eq!(app.shell.band_area().height, SCREEN_ROWS);
     assert_world(&world, &mut app, &expected);
+}
+
+/// The one-wrapper invariant, asserted on the guard sink's verbatim bytes:
+/// each op — including resize-with-replay, the path the spike harness once
+/// nested — emits exactly one begin/end pair.
+#[test]
+fn one_wrapper_per_op_and_never_nested() {
+    let world = World::new();
+    let (mut app, _expected) = boot_anchored(&world, 8, 2);
+    let one_wrapper = [BSU, ESU].concat();
+
+    app.guard_sink.take(); // boot's draw + the first flush
+
+    app.draw_band();
+    assert_eq!(app.guard_sink.take(), one_wrapper, "draw");
+
+    app.flush_history(&history_rows(2, 3));
+    assert_eq!(app.guard_sink.take(), one_wrapper, "flush");
+
+    app.grow(12);
+    assert_eq!(app.guard_sink.take(), one_wrapper, "grow");
+
+    app.shrink(8);
+    assert_eq!(app.guard_sink.take(), one_wrapper, "shrink");
+
+    world.resize(SCREEN_ROWS, 60);
+    app.on_resize(60, SCREEN_ROWS, |_max_rows, _width| {
+        vec![Line::from("REPLAY")]
+    });
+    assert_eq!(app.guard_sink.take(), one_wrapper, "resize with replay");
+
+    world.resize(SCREEN_ROWS, 64);
+    app.on_resize(64, SCREEN_ROWS, |_max_rows, _width| vec![]);
+    assert_eq!(app.guard_sink.take(), one_wrapper, "plain resize");
+}
+
+/// Width-shrink: stock ratatui clears the screen (the visible history with
+/// it); the shell replays the still-visible tail from source. Scrollback is
+/// untouched, exactly the replayed rows return above the band, and the band
+/// repaints intact below them. The transcript is deliberately taller than
+/// the replay window so the cap itself is asserted; the growth leg pins the
+/// shrink trigger's direction (a stale width would fire a spurious replay).
+#[test]
+fn width_shrink_replays_the_visible_tail_from_source() {
+    let world = World::new();
+    let (mut app, _expected) = boot_anchored(&world, 8, 2);
+    // Two more turns: the transcript (18 rows) exceeds the replay window
+    // (screen − band = 16), so a wrong cap shows up as a row diff.
+    app.flush_history(&history_rows(2, 6));
+    app.flush_history(&history_rows(3, 6));
+    let transcript = history_rows(1, 6)
+        .into_iter()
+        .chain(history_rows(2, 6))
+        .chain(history_rows(3, 6))
+        .collect::<Vec<_>>();
+    let pre_scrollback = world.scrollback_rows();
+
+    let replay_rows = transcript.clone();
+    world.resize(SCREEN_ROWS, 60);
+    app.on_resize(60, SCREEN_ROWS, move |max_rows, _width| {
+        replay_rows
+            .iter()
+            .skip(replay_rows.len().saturating_sub(usize::from(max_rows)))
+            .cloned()
+            .map(Line::from)
+            .collect()
+    });
+    assert_eq!(app.shell.width(), 60, "the shrink trigger's width state");
+
+    // The clear took the still-visible rows with it; scrollback is untouched
+    // and exactly the windowed tail returns above the repainted band.
+    assert_eq!(
+        world.scrollback_rows(),
+        pre_scrollback,
+        "width shrink must not touch scrollback"
+    );
+    let expected_after_shrink = |app: &mut ProbeApp| {
+        let mut expected_now = pre_scrollback.clone();
+        // The window is screen minus band: exactly the last 16 of 18 rows.
+        expected_now.extend(transcript[2..].iter().cloned());
+        expected_now.extend(app.expected_band());
+        expected_now
+    };
+    assert_eq!(
+        world.nonblank_rows(),
+        expected_after_shrink(&mut app),
+        "visible: {:?}, scrollback: {:?}",
+        world.visible_rows(),
+        world.scrollback_rows()
+    );
+    assert_eq!(world.cursor(), app.expected_cursor(), "composer cursor");
+
+    // Growth: the shrink trigger must not fire (the replay closure would
+    // panic), and the width state follows.
+    world.resize(SCREEN_ROWS, 70);
+    app.on_resize(70, SCREEN_ROWS, |_max_rows, _width| {
+        unreachable!("replay must not fire on width growth")
+    });
+    assert_eq!(app.shell.width(), 70);
+    assert_eq!(
+        world.nonblank_rows(),
+        expected_after_shrink(&mut app),
+        "growth leg must leave the world untouched"
+    );
+
+    // A fresh shrink replays again from the same source.
+    world.resize(SCREEN_ROWS, 60);
+    let replay_rows = transcript.clone();
+    app.on_resize(60, SCREEN_ROWS, move |max_rows, _width| {
+        replay_rows
+            .iter()
+            .skip(replay_rows.len().saturating_sub(usize::from(max_rows)))
+            .cloned()
+            .map(Line::from)
+            .collect()
+    });
+    assert_eq!(
+        world.nonblank_rows(),
+        expected_after_shrink(&mut app),
+        "a second shrink re-materializes the same tail"
+    );
+}
+
+/// Spike discipline 3, locked: a CPR timeout inside `draw`'s autoresize is
+/// tolerated and counted, the wrapper stays balanced, and the next op
+/// re-anchors and repaints — drawing never kills a run.
+#[test]
+fn draw_tolerates_a_failed_reanchor_and_recovers() {
+    let world = World::new();
+    let (mut app, _expected) = boot_anchored(&world, 8, 2);
+    app.guard_sink.take();
+
+    // Backend size drifts from ratatui's last-known area, so the next draw's
+    // autoresize re-anchors — into an injected CPR failure.
+    world.resize(20, SCREEN_COLS);
+    world.fail_queries(true);
+    app.draw_band();
+    assert_eq!(app.shell.stats().tolerated_draw_errors, 1);
+    assert_eq!(
+        app.guard_sink.take(),
+        [BSU, ESU].concat(),
+        "a failed op still closes its wrapper"
+    );
+
+    world.fail_queries(false);
+    app.draw_band();
+    assert_eq!(app.shell.stats().tolerated_draw_errors, 1);
+    assert_eq!(app.shell.band_area().height, 8, "the next op re-anchored");
+}
+
+/// The explicit resize path tolerates the same failure: counted, replay
+/// skipped, wrapper balanced, band height untouched.
+#[test]
+fn resize_reanchor_failure_is_tolerated() {
+    let world = World::new();
+    let (mut app, _expected) = boot_anchored(&world, 8, 2);
+    app.guard_sink.take();
+
+    world.fail_queries(true);
+    app.on_resize(64, SCREEN_ROWS, |_max_rows, _width| {
+        unreachable!("replay must be skipped when the re-anchor fails")
+    });
+    assert_eq!(app.shell.stats().tolerated_resize_errors, 1);
+    assert_eq!(app.guard_sink.take(), [BSU, ESU].concat());
+    assert_eq!(app.shell.band_height(), 8);
+    assert_eq!(app.shell.width(), 64);
+}
+
+/// Screen shorter than the band: ratatui clamps the viewport on resize, the
+/// recorded (requested) height survives, and height requests inside the
+/// clamp are inert no-ops — no guard bytes, no emitted sequences.
+#[test]
+fn short_screen_clamps_and_regrows() {
+    let world = World::new();
+    let (mut app, _expected) = boot_anchored(&world, 8, 2);
+
+    world.resize(5, SCREEN_COLS);
+    app.on_resize(SCREEN_COLS, 5, |_max_rows, _width| vec![]);
+    assert_eq!(app.shell.band_height(), 8, "requested height survives");
+    assert_eq!(
+        app.shell.band_area().height,
+        5,
+        "viewport clamped on-screen"
+    );
+
+    app.guard_sink.take();
+    app.grow(7); // inside the clamp on both sides: inert
+    assert_eq!(
+        app.guard_sink.take(),
+        Vec::<u8>::new(),
+        "no-op emits nothing"
+    );
+    assert_eq!(app.shell.band_area().height, 5);
+
+    world.resize(SCREEN_ROWS, SCREEN_COLS);
+    app.on_resize(SCREEN_COLS, SCREEN_ROWS, |_max_rows, _width| vec![]);
+    assert_eq!(
+        app.shell.band_area().height,
+        8,
+        "viewport re-expands with the screen"
+    );
+    app.grow(12);
+    assert_eq!(app.shell.band_area().height, 12);
 }
