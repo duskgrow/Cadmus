@@ -346,7 +346,7 @@ dependencies = [
  "insta",
  "miette",
  "serde_json",
- "similar",
+ "similar 3.2.0",
  "thiserror 2.0.20",
  "time",
  "tokio",
@@ -443,7 +443,7 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "pulldown-cmark",
- "similar",
+ "similar 3.2.0",
  "syntect",
  "toml",
  "two-face",
@@ -1678,7 +1678,7 @@ dependencies = [
  "console",
  "once_cell",
  "serde",
- "similar",
+ "similar 2.7.0",
  "tempfile",
 ]
 
@@ -3139,6 +3139,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+
+[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3331,7 +3337,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
