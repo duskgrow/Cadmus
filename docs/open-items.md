@@ -282,20 +282,3 @@ the shrink replay may flip from necessary to harmful (inserting rows
 nothing lost) — plus the dynamic-height probe suite
 (`tests/dynamic_height_spike.rs`), and re-check the ADR-0018
 amendment's evidence lines. MSRV holds at 1.88 through 0.30.2.
-
-## The spike harness and the inline shell share one mechanism
-
-Consumer: the PR 1 inline shell.
-
-`inline_spike.rs` carries its own copy of the band mechanism
-(2026h-guarded insert+draw, cursor-query tolerance, shrink replay,
-the one-wrapper invariant) because no shell existed when it was
-written — scaffolding, not a second home. When PR 1 lands the shell,
-the shell owns the mechanism as cadmus-tui library code and the
-harness is refactored into a thin driver over it (fake stream, key
-bindings, diagnostics counters), so the terminal-quirk regression
-tool exercises the production path. Two independent implementations
-would drift, and the quirk matrix would then regress against
-something the TUI does not run. Harness-only fixtures stay in the
-example; the disciplines' knowledge home stays the ADR-0018
-amendment.

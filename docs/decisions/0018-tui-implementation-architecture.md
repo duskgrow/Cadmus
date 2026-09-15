@@ -273,7 +273,10 @@ Mechanism (evidence: `docs/research/2026-09-14-terminal-recreation-spike.md`):
    band height over content, capped at the screen — Codex's
    `desired_height` precedent) and the layout rules already scoped in
    amendment item 1 (composer cap, short-window corner) land in PR 1's
-   shell.
+   shell — the inline shell, the cadmus-tui library layer that owns the
+   raw terminal and the band's lifecycle (anchor, height, `Terminal`
+   recreation, resize reflow, guarded draws) and frames the band the
+   widgets live in; a chrome shell, not a command interpreter.
 2. Grow: `insert_before(Δ blank rows)`, park the cursor at the future
    band top, recreate — the re-anchor's append lands exactly at the
    bottom row (zero scroll), and the taller band's first repaint
@@ -323,3 +326,13 @@ misbehaves under the portable path.
 - Band height is dynamic via Terminal recreation (second 2026-09-14
   amendment); PR 1 owns the height function, the layout rules and the
   recreation seam inside the shell.
+- PR sequencing (2026-09-15): the inline shell landed first — the band
+  mechanism (guarded ops, the recreation protocols, the resize replay)
+  plus the spike harness's collapse into a thin driver over
+  `cadmus_tui::shell`. The content-driven height function and the
+  widget layout rules need the real composer/stream widgets and land
+  with them; the input broker (the CPR-race seam, amendment item 5),
+  the resize debounce and the frame scheduler land with the event
+  loop. Until the broker lands, the quiesced-stdin contract is
+  documented on the shell module and watched by the harness's
+  sentinel protocol.

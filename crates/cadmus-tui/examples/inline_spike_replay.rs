@@ -12,18 +12,22 @@
 //! 1. Replay the byte stream through vt100 (applying resize events at their
 //!    logged offsets) and diff the final scrollback+screen against the
 //!    sidecar's expected rows — any lost/duplicated/garbage row shows up as
-//!    a missing/extra entry, attributable via the sidecar stats (naive
-//!    grows, shrink replays).
+//!    a missing/extra entry, attributable via the sidecar stats (shrink
+//!    replays).
 //! 2. Count the 2026h synchronized-update guards: balanced begin/end pairs.
-//! 3. Sentinel check: every height key (`g`/`G`/`s`/`f`/`F`) must be
-//!    bracketed by `x` presses — a missing sentinel means the CPR race
-//!    (upstream #2640) swallowed input around a Terminal recreation.
+//! 3. Sentinel check: every height key (`g`/`s`) must be bracketed by `x`
+//!    presses — a missing sentinel means the CPR race (upstream #2640)
+//!    swallowed input around a Terminal recreation.
 //!
 //! Usage: `cargo run -p cadmus-tui --example inline_spike_replay -- <stem>`
 //!
 //! What this cannot judge is compositing (flicker lives in the terminal,
-//! not in the byte stream) — that residual glance keeps the `f`/`F`
-//! failure-reference pair in `inline_spike`.
+//! not in the byte stream): on a terminal that ignores 2026h, a height
+//! change flashes one frame — a bounded, accepted residual identical for
+//! every implementation including a fork (ADR-0018, second 2026-09-14
+//! amendment). The `G`/`f`/`F` failure-reference keys retired with the
+//! verdict; their evidence is frozen in
+//! `docs/research/2026-09-14-terminal-recreation-spike.md` §7.5.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -179,13 +183,7 @@ fn multiset_diff(expected: &[String], actual: &[String]) -> (Vec<String>, Vec<St
 }
 
 const SENTINEL: &str = "Char('x')";
-const HEIGHT_KEYS: &[&str] = &[
-    "Char('g')",
-    "Char('G')",
-    "Char('s')",
-    "Char('f')",
-    "Char('F')",
-];
+const HEIGHT_KEYS: &[&str] = &["Char('g')", "Char('s')"];
 
 /// Every height key must be bracketed by sentinels; a missing one means the
 /// CPR race may have swallowed a keypress around a Terminal recreation.
@@ -244,8 +242,9 @@ fn run(stem: &str) -> io::Result<()> {
     }
     println!("attribution (sidecar stats): {}", sidecar.stats);
     println!(
-        "note: extra rows are expected only from G presses (residue reference) or shrink replays;\n\
-         missing rows are never expected. Compositing (flicker) stays with the f/F reference keys."
+        "note: extra rows are expected only from shrink replays; missing rows are never\n\
+         expected. Compositing (flicker) is judged live: a flash on g/s means the\n\
+         terminal ignores 2026h — the bounded accepted residual (ADR-0018 amendment)."
     );
     Ok(())
 }
@@ -265,7 +264,7 @@ mod tests {
     const SIDECAR: &str = "cadmus-inline-spike-capture v1\n\
         identity: TERM=fixture\n\
         size: 24 80\n\
-        stats: turns 0 inserts 0 naive_grows 0 shrink_replays 0\n\
+        stats: turns 0 inserts 0 rows 0 resizes 0 shrink_replays 0 grows 0 shrinks 0 resize_errors 0 draw_errors 0\n\
         keys: Char('x') Char('g') Char('x')\n\
         expected:\n\
         alpha\n\
