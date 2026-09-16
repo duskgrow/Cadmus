@@ -422,7 +422,7 @@ impl Transcript {
                 self.seal_open();
                 self.calls.insert(call.id.clone(), call.name.clone());
                 self.blocks
-                    .push(Block::Static(vec![subtle_line(format!("→ {}", call.name))]));
+                    .push(Block::Static(vec![subtle_line(tool_marker(call))]));
                 Light::Tool(call.name.clone())
             }
             EventKind::ToolResult { call_id, .. } if event.status == Status::Error => {
@@ -499,7 +499,7 @@ impl Transcript {
                 for call in message.tool_calls() {
                     self.calls.insert(call.id.clone(), call.name.clone());
                     self.blocks
-                        .push(Block::Static(vec![subtle_line(format!("→ {}", call.name))]));
+                        .push(Block::Static(vec![subtle_line(tool_marker(call))]));
                 }
             }
             Role::Tool => {
@@ -527,6 +527,52 @@ impl Default for Transcript {
 /// A quiet activity/marker line.
 fn subtle_line(text: impl Into<String>) -> ir::Line {
     ir::Line::from_spans(vec![ir::Span::slotted(text, Slot::TextSubtle)])
+}
+
+/// The tool-activity marker: the name plus the call's primary target, so a
+/// run of same-name calls stays distinguishable (field report 2026-09-16:
+/// 23 bare `→ list_dir` rows read as duplicates). The marker is one quiet
+/// line, never a table — the expandable transcript view is the approval/diff
+/// slice's.
+fn tool_marker(call: &cadmus_contract::ToolCall) -> String {
+    match tool_target(call) {
+        Some(target) => format!("→ {} {target}", call.name),
+        None => format!("→ {}", call.name),
+    }
+}
+
+/// The marker's target: the first non-empty string among the keys the coding
+/// tools use for their subject (`pattern` before `path` — grep's subject is
+/// the pattern, its path the scope), first line only, width-capped.
+fn tool_target(call: &cadmus_contract::ToolCall) -> Option<String> {
+    let object = call.arguments.as_object()?;
+    for key in ["pattern", "command", "path", "query", "file_path"] {
+        if let Some(value) = object.get(key).and_then(|value| value.as_str()) {
+            let first_line = value.lines().next().unwrap_or_default();
+            if !first_line.is_empty() {
+                return Some(truncate_cells(first_line, 48));
+            }
+        }
+    }
+    None
+}
+
+/// Grapheme-wise truncation to a display-cell budget, ellipsis on cut — the
+/// marker never wraps a target across rows.
+fn truncate_cells(text: &str, max: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let mut kept = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if width + grapheme_width > max {
+            return format!("{kept}…");
+        }
+        kept.push_str(grapheme);
+        width += grapheme_width;
+    }
+    kept
 }
 
 /// A failure marker line.
@@ -682,6 +728,61 @@ mod tests {
         let (flushed, live) = pump(&mut transcript);
         assert_eq!(flushed, vec!["reading", "→ read_file"]);
         assert_eq!(live, vec!["found it"]);
+    }
+
+    #[test]
+    fn the_tool_marker_names_its_target() {
+        let mut transcript = Transcript::new();
+        for (seq, call) in [
+            ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "src/cursor.rs", "offset": 10}),
+            },
+            // grep's subject is the pattern; the path is its scope.
+            ToolCall {
+                id: "c2".into(),
+                name: "grep".into(),
+                arguments: serde_json::json!({"path": "crates", "pattern": "max_tokens"}),
+            },
+            ToolCall {
+                id: "c3".into(),
+                name: "list_dir".into(),
+                arguments: serde_json::json!({}),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, call)| (index as u64 + 1, call))
+        {
+            transcript.apply_item(&recorded(seq, 1, EventKind::ToolCall { call }));
+        }
+        let (flushed, live) = pump(&mut transcript);
+        assert_eq!(
+            flushed,
+            vec![
+                "→ read_file src/cursor.rs",
+                "→ grep max_tokens",
+                "→ list_dir",
+            ]
+        );
+        assert_eq!(live, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_marker_truncates_a_long_target() {
+        let target = format!("crates/{}", "very-long-directory-name/".repeat(8));
+        let marker = tool_marker(&ToolCall {
+            id: "c1".into(),
+            name: "list_dir".into(),
+            arguments: serde_json::json!({"path": target}),
+        });
+        assert!(marker.ends_with('…'), "truncated marker: {marker}");
+        // The prefix plus the 48-cell cap plus the ellipsis, in cells.
+        assert!(
+            unicode_width::UnicodeWidthStr::width(marker.as_str()) <= 11 + 48 + 1,
+            "bounded marker: {marker}"
+        );
     }
 
     #[test]
