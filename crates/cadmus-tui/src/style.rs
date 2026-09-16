@@ -9,6 +9,26 @@ use cadmus_ui::ir;
 use cadmus_ui::theme::{AnsiTone, ColorDepth, Theme, Tone};
 use ratatui::style::{Color, Modifier, Style};
 
+/// The color-depth detection chain (ADR-0017 item 5), app-boundary IO:
+/// `NO_COLOR` set to anything drops color (no-color.org: presence is the
+/// signal); `COLORTERM` truecolor/24bit grants the full palette; a
+/// `256color` `TERM` the xterm cube; anything else the 16 named colors.
+#[must_use]
+pub fn detect_depth() -> ColorDepth {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return ColorDepth::None;
+    }
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+    if matches!(colorterm.as_str(), "truecolor" | "24bit") {
+        return ColorDepth::Truecolor;
+    }
+    let term = std::env::var("TERM").unwrap_or_default();
+    if term.contains("256color") {
+        return ColorDepth::Ansi256;
+    }
+    ColorDepth::Ansi16
+}
+
 /// Resolve an IR style to a ratatui style under the theme and color depth.
 #[must_use]
 pub fn ir_style(style: &ir::Style, theme: &Theme, depth: ColorDepth) -> Style {

@@ -7,6 +7,8 @@
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use std::io::IsTerminal;
+
 use cadmus::{ChatConfig, Error, EvalConfig};
 
 #[derive(Parser)]
@@ -51,7 +53,9 @@ enum Commands {
         /// Emit the full message sequence as JSON on stdout
         #[arg(long)]
         json: bool,
-        /// The prompt; read from stdin when omitted
+        /// The prompt; read from stdin when omitted. With no prompt and a
+        /// terminal on both stdin and stdout, the interactive TUI launches
+        /// instead
         prompt: Vec<String>,
     },
     /// Run the eval set (evals/cases) against the fixture workspaces and
@@ -94,7 +98,6 @@ enum Commands {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> miette::Result<()> {
-    init_tracing();
     let cli = Cli::parse();
     match cli.command {
         Commands::Chat {
@@ -118,36 +121,7 @@ async fn main() -> miette::Result<()> {
                 approve_writes: yes,
                 trace_root,
             };
-            let prompt = resolve_prompt(&prompt)?;
-            let result = cadmus::run_chat(&prompt, &config).await?;
-
-            for warning in &result.warnings {
-                tracing::warn!(%warning, "turn warning");
-            }
-            if let Some(usage) = &result.usage {
-                tracing::info!(
-                    input = usage.input,
-                    output = usage.output,
-                    reasoning = usage.reasoning,
-                    turns = result.turns,
-                    "run finished"
-                );
-            }
-
-            if json {
-                let out = serde_json::json!({
-                    "messages": result.messages,
-                    "turns": result.turns,
-                    "usage": result.usage,
-                    "warnings": result.warnings,
-                    "trace_id": result.trace_id,
-                    "trace_path": result.trace_path,
-                });
-                println!("{out}");
-            } else {
-                println!("{}", result.final_text);
-            }
-            Ok(())
+            run_chat_command(config, prompt, json).await
         }
         Commands::Eval {
             provider,
@@ -160,6 +134,7 @@ async fn main() -> miette::Result<()> {
             fixtures,
             out,
         } => {
+            init_tracing();
             ensure_known_provider(&provider)?;
             // Validate the corpus before any provider work: a corpus error is
             // local and fixable without an API key, so it wins over
@@ -196,6 +171,55 @@ async fn main() -> miette::Result<()> {
             Ok(())
         }
     }
+}
+
+/// The `chat` subcommand's body: the interactive TUI when there is no
+/// prompt and a terminal sits on both ends (ADR-0011; it owns its logging
+/// discipline, so tracing init happens inside `run_tui`), one-shot
+/// otherwise.
+async fn run_chat_command(
+    config: ChatConfig,
+    prompt: Vec<String>,
+    json: bool,
+) -> miette::Result<()> {
+    if prompt.is_empty()
+        && !json
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+    {
+        return Ok(cadmus::run_tui(&config).await?);
+    }
+    init_tracing();
+    let prompt = resolve_prompt(&prompt)?;
+    let result = cadmus::run_chat(&prompt, &config).await?;
+
+    for warning in &result.warnings {
+        tracing::warn!(%warning, "turn warning");
+    }
+    if let Some(usage) = &result.usage {
+        tracing::info!(
+            input = usage.input,
+            output = usage.output,
+            reasoning = usage.reasoning,
+            turns = result.turns,
+            "run finished"
+        );
+    }
+
+    if json {
+        let out = serde_json::json!({
+            "messages": result.messages,
+            "turns": result.turns,
+            "usage": result.usage,
+            "warnings": result.warnings,
+            "trace_id": result.trace_id,
+            "trace_path": result.trace_path,
+        });
+        println!("{out}");
+    } else {
+        println!("{}", result.final_text);
+    }
+    Ok(())
 }
 
 /// Validates the provider name before any other work — a bare

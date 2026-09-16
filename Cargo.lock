@@ -339,6 +339,8 @@ dependencies = [
  "cadmus-llm-openai",
  "cadmus-memory",
  "cadmus-transport",
+ "cadmus-tui",
+ "cadmus-ui",
  "clap",
  "grep-regex",
  "grep-searcher",

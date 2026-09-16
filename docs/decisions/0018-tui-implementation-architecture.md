@@ -336,4 +336,18 @@ misbehaves under the portable path.
   short-window corner — `cadmus_tui::layout`), together with
   `cadmus-ui`'s streaming-markdown pipeline, syntect highlighting and
   the semantic-style IR they render (items 2 and 4), all per this
-  ordering.
+  ordering. The app wiring landed last (2026-09-16): the view-model
+  materialization (`cadmus_tui::transcript`, item 10 — one snapshot per
+  pump batch drives flush, band render and layout, closing the
+  per-accessor re-render open item), the draw pump, the `EventSource`
+  input seam and the real-terminal boot (`cadmus_tui::app`, item 5), and
+  the binary's session driver — bare `cadmus chat` on a terminal now
+  launches the interactive session (one run per prompt, history carried
+  client-side), Esc interrupts, approvals auto-resolve by the
+  unattended policy until the item-8 slice, and tracing redirects to
+  `{trace_root}/cadmus.log` (consuming the never-render-logs item). The
+  mouse-capture decision landed with it: capture stays off (native
+  scroll/select/copy is why item 2 of ADR-0012 chose inline). Remaining,
+  each with its named consumer: item 6's keymap-as-data layer (the
+  binding-design task), item 8's approval/diff UX, item 7's TOML
+  loaders.

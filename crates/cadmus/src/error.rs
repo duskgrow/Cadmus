@@ -163,6 +163,17 @@ pub enum Error {
         help("check the --out path is writable (default: target/eval/latest.json)")
     )]
     EvalScoreFile(std::io::Error),
+
+    /// The terminal UI hit a structural failure (the guard stream or an
+    /// insert/clear/recreate op — draw failures are tolerated, never fatal).
+    #[error("terminal UI failed: {0}")]
+    #[diagnostic(
+        code(cadmus::tui),
+        help(
+            "the band mechanism hit a structural terminal error; the trajectory up to the failure is intact in the trace log"
+        )
+    )]
+    Tui(std::io::Error),
 }
 
 /// Convenience alias for library results.

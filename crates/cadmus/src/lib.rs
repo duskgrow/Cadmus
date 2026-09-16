@@ -15,11 +15,13 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod tools;
+mod tui;
 
 pub use chat::{ChatConfig, ChatResult, run_chat};
 pub use error::{Error, Result};
 pub use eval::{EvalConfig, corpus_digest, load_cases, run_eval};
 pub use tools::coding_tools;
+pub use tui::run_tui;
 
 /// A non-empty environment variable as a path — an empty value counts as
 /// unset (an empty XDG variable means "use the default", not the root).

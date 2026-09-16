@@ -1,5 +1,6 @@
 ---
 source: crates/cadmus/tests/cli.rs
+assertion_line: 36
 expression: stdout
 ---
 Chat with the agent (one shot: prompt in, final answer out), with coding tools confined to the current directory; workspace writes are denied unless approved (see --yes)
@@ -7,7 +8,7 @@ Chat with the agent (one shot: prompt in, final answer out), with coding tools c
 Usage: cadmus chat [OPTIONS] [PROMPT]...
 
 Arguments:
-  [PROMPT]...  The prompt; read from stdin when omitted
+  [PROMPT]...  The prompt; read from stdin when omitted. With no prompt and a terminal on both stdin and stdout, the interactive TUI launches instead
 
 Options:
       --provider <PROVIDER>      Provider to use (registry dialect, or `custom` for an explicit OpenAI-compatible endpoint) [default: kimi]

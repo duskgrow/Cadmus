@@ -101,6 +101,23 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         self.width
     }
 
+    /// The screen's current row count — the layout function's input.
+    pub fn screen_rows(&mut self) -> u16 {
+        self.terminal
+            .size()
+            .map_or(self.band_height, |size| size.height)
+    }
+
+    /// Whether `set_height(desired)` would do anything (its equality no-op,
+    /// exposed so the app can skip the quiesce window when nothing would
+    /// change — the recreation seam is for real height changes only).
+    pub fn needs_height_change(&mut self, desired: u16) -> bool {
+        let Ok(screen_rows) = self.terminal.size().map(|size| size.height) else {
+            return false;
+        };
+        clamp_height(desired, screen_rows) != clamp_height(self.band_height, screen_rows)
+    }
+
     #[must_use]
     pub fn stats(&self) -> ShellStats {
         self.stats
@@ -271,7 +288,10 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
 
     /// The recreation seam (spike fact F1's escape hatch, adopted by the
     /// second 2026-09-14 amendment). Construction issues a CPR query — the
-    /// module docs' quiesced-stdin contract applies.
+    /// module docs' quiesced-stdin contract applies. Width re-syncs here:
+    /// a resize landing inside a quiesce window is missed by the input
+    /// contract, and recreation is the one place that always re-reads the
+    /// terminal (the next debounced resize still owns the replay path).
     fn recreate(&mut self, new_height: u16) -> io::Result<()> {
         self.terminal = Terminal::with_options(
             self.terminal.backend().clone(),
@@ -280,6 +300,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
             },
         )?;
         self.band_height = new_height;
+        self.width = self.terminal.size()?.width;
         Ok(())
     }
 

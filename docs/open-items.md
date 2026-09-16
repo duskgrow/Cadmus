@@ -5,24 +5,6 @@ backlog. Every item names its consumer; when the consuming change lands,
 delete the item (its rationale then lives in that change's ADR). An item
 with no consumer does not belong here.
 
-## Interaction surfaces never render logs
-
-Consumer: the ADR-0011 TUI implementation, over the ADR-0013 live stream.
-
-First live `chat` run (2026-09-07): at the default `warn` filter the user
-saw only genai's `EMPTY CHOICE CONTENT` spam and no run progress, and the
-bare final answer did not read as addressed to them. Requirement from the
-field: the interaction surface renders structured progress (turn blocks,
-tool activity); logs go to a file or an opt-in verbose channel, never into
-the interaction view.
-
-Interim landed (2026-09-09, the client-protocol change): headless `chat`
-renders structured progress to stderr from the live stream (turns, tool
-calls, approval requests, denials), so "no run progress" is fixed for the
-print-mode surface. What remains for the TUI: the full interaction floor,
-and the log-channel discipline — at the default filter, tracing warns still
-share stderr with the progress view.
-
 ## The agent loop has no tracing instrumentation
 
 Consumer: same as above, or a standalone interim change.
@@ -245,23 +227,21 @@ ADR-0002) stands either way.
 
 ## Scroll-while-streaming interaction policy
 
-Consumer: the first TUI PR (mouse-capture and transcript-fallback
-decisions) and the inline-spike harness as quirk matrix (scroll-anchor
-probes).
+Consumer: the in-app transcript fallback slice (mouse-less contexts) —
+and, evidence-gated, the pause/batch behaviors below.
 
-Maintainer-raised surface (2026-09-14). Terminal-owned behaviors to
-probe per terminal in the matrix: the scroll anchor when rows insert
-while the user is scrolled up (content-anchored vs bottom-anchored);
-scroll-to-bottom-on-keypress while composing; selection/copy drift
-under a moving stream. App decisions for the first TUI PR: mouse
-capture on (widget clicks) vs off (native scroll/select/copy — the
-benefits ADR-0012 item 2 chose inline for); an in-app transcript
-fallback for mouse-less contexts (Codex's verified answer is a
-temporary alt-screen transcript view, already permitted by ADR-0012's
-modal-sub-app exception); resize reflow resetting the reading position
-(debounce-bounded, accepted). Evidence-gated, not built ahead: pause
-or batch inserts while the user is scrolled up, only if the matrix
-shows bottom-anchored terminals in the support set.
+Maintainer-raised surface (2026-09-14). Decided 2026-09-16 (the app-wiring
+change): **mouse capture stays off** — no widget clicks exist yet, and
+native scroll/select/copy is the benefit ADR-0012 item 2 chose inline
+rendering for. Resize reflow resetting the reading position is accepted
+(debounce-bounded). Still open: an in-app transcript fallback for
+mouse-less contexts (Codex's verified answer is a temporary alt-screen
+transcript view, already permitted by ADR-0012's modal-sub-app exception);
+the per-terminal quirk-matrix probes (the scroll anchor when rows insert
+while scrolled up, scroll-to-bottom-on-keypress while composing,
+selection/copy drift under a moving stream); and the evidence-gated
+behaviors — pause or batch inserts while the user is scrolled up, only if
+the matrix shows bottom-anchored terminals in the support set.
 
 ## The next ratatui bump moves the inline spike's accepted costs
 
@@ -282,16 +262,3 @@ the shrink replay may flip from necessary to harmful (inserting rows
 nothing lost) — plus the dynamic-height probe suite
 (`tests/dynamic_height_spike.rs`), and re-check the ADR-0018
 amendment's evidence lines. MSRV holds at 1.88 through 0.30.2.
-
-## The stream widget re-renders and re-wraps per accessor call
-
-Consumer: the TUI app-wiring change (the event loop's draw pump).
-
-Self-review finding (2026-09-16): `Stream::flushable_rows`, `live_rows`
-and `live_row_count` each drive `MarkdownStream::render` and the
-ratatui wrap independently, and `render` deep-clones all live lines
-into `Render` per call — the widget test app pumps five pipeline
-renders per event batch. Same big-O as the sanctioned full reparse,
-but the constants are avoidable (render once per batch into a snapshot
-the three views read off). Fix when the real pump lands and can
-measure it.

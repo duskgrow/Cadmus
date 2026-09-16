@@ -18,9 +18,11 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::rc::Rc;
 
+use crossterm::event::Event;
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell as BufCell;
 use ratatui::layout::{Position, Size};
+use tokio::sync::mpsc;
 
 pub const SCREEN_ROWS: u16 = 24;
 pub const SCREEN_COLS: u16 = 80;
@@ -250,4 +252,29 @@ impl World {
     pub fn cursor(&self) -> (u16, u16) {
         self.backend.parser.borrow().screen().cursor_position()
     }
+}
+
+/// The scripted input source (the app loop's [`cadmus_tui::input::EventSource`]
+/// seam): the suite feeds crossterm events through the channel; an empty
+/// channel pends, exactly like a quiet terminal. Quiescing is a no-op —
+/// there is no stdin reader to race here.
+pub struct ScriptedInput {
+    rx: mpsc::UnboundedReceiver<Event>,
+}
+
+impl ScriptedInput {
+    pub fn channel() -> (mpsc::UnboundedSender<Event>, Self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (tx, Self { rx })
+    }
+}
+
+impl cadmus_tui::input::EventSource for ScriptedInput {
+    type Quiesced<'a> = ();
+
+    async fn next_event(&mut self) -> Option<io::Result<Event>> {
+        self.rx.recv().await.map(Ok)
+    }
+
+    fn quiesce(&mut self) -> Self::Quiesced<'_> {}
 }

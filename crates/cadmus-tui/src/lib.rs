@@ -35,7 +35,11 @@
 //!   drives flush, band render and layout.
 //! - [`wrap`] — the one wrap implementation (ratatui's own word wrapper):
 //!   flush rows, band rows and height math can never disagree.
+//! - [`app`] — the event loop driving it all: one `select!` over input,
+//!   live feed, run outcome, resize debounce and draw ticks; the draw pump
+//!   and the real-terminal boot.
 
+pub mod app;
 pub mod composer;
 pub mod debounce;
 pub mod frame;

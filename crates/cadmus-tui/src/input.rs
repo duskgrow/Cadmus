@@ -91,3 +91,32 @@ impl Drop for Quiesced<'_> {
         self.broker.stream = Some(EventStream::new());
     }
 }
+
+/// The input seam the app loop drives (ADR-0018 item 5): the real broker
+/// reads crossterm's event stream; test rigs script events. The quiesce
+/// guard's lifetime IS the quiesced-stdin window — the type encoding of the
+/// shell's (re)construction contract carries over.
+pub trait EventSource {
+    /// The quiesced-stdin guard ([`InputBroker::quiesce`]).
+    type Quiesced<'a>
+    where
+        Self: 'a;
+
+    /// The next terminal event; pends forever while quiesced.
+    fn next_event(&mut self) -> impl Future<Output = Option<io::Result<Event>>>;
+
+    /// Take the event stream down until the guard drops.
+    fn quiesce(&mut self) -> Self::Quiesced<'_>;
+}
+
+impl EventSource for InputBroker {
+    type Quiesced<'a> = Quiesced<'a>;
+
+    fn next_event(&mut self) -> impl Future<Output = Option<io::Result<Event>>> {
+        InputBroker::next_event(self)
+    }
+
+    fn quiesce(&mut self) -> Quiesced<'_> {
+        InputBroker::quiesce(self)
+    }
+}
