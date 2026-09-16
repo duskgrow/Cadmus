@@ -14,9 +14,10 @@ pub struct CustomDialect {
 }
 
 impl CustomDialect {
-    /// The capability declaration describes a GPT-5-class model; override it
-    /// when the endpoint fronts something else (the config level of the
-    /// capability resolution stack).
+    /// The capability declaration describes a GPT-5-class model (the config
+    /// level of the capability resolution stack overrides it when the
+    /// endpoint fronts something else — that level has no consumer yet, so
+    /// there is deliberately no builder override).
     #[must_use]
     pub fn new(model: impl Into<String>, base_url: impl Into<String>) -> Self {
         // Normalize to a trailing slash: genai URL-joins `chat/completions`
@@ -45,12 +46,6 @@ impl CustomDialect {
                 opaque_echo: vec![],
             },
         }
-    }
-
-    #[must_use]
-    pub fn with_capabilities(mut self, capabilities: Capabilities) -> Self {
-        self.capabilities = capabilities;
-        self
     }
 }
 

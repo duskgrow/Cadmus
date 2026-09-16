@@ -26,7 +26,6 @@ use cadmus_memory::JsonlLog;
 use cadmus_transport::{Blackhole, command_channel};
 
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
-use crate::tools::coding_tools;
 use crate::{Error, approval, provider};
 
 /// Everything an eval run needs, resolved from CLI arguments.
@@ -348,28 +347,16 @@ async fn run_case(
     let max_tokens = config
         .max_tokens
         .unwrap_or(provider.capabilities().max_output);
-    let skills = crate::skills::discover(&root, &crate::context::Scope::WorkspaceOnly);
-    let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
-    let tools = coding_tools(root.clone(), skills);
-    let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
-    let instructions =
-        crate::context::instruction_chain(&root, &crate::context::Scope::WorkspaceOnly);
-    let pipeline = cadmus_core::ContextBundle {
-        prefix: cadmus_core::FrozenPrefix::assemble(
-            cadmus_core::context::SYSTEM_PROMPT,
-            &instructions,
-            &catalog,
-            &specs,
-        ),
-        probe: std::sync::Arc::new(cadmus_core::context::NoProbe),
-        tracker: std::sync::Arc::new(cadmus_core::context::NoInstructions),
-        cwd: root.display().to_string(),
-        artifacts: std::sync::Arc::new(
+    let (tools, pipeline) = crate::context::pipeline(
+        &root,
+        &crate::context::Scope::WorkspaceOnly,
+        Arc::new(cadmus_core::context::NoProbe),
+        Arc::new(cadmus_core::context::NoInstructions),
+        Arc::new(
             log.artifacts(&trace_id)
                 .expect("a minted trace id resolves its artifact dir"),
         ),
-        fold_policy: cadmus_core::context::FoldPolicy::default(),
-    };
+    );
     let agent = AgentLoop::new(
         provider.clone(),
         tools,

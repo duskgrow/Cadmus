@@ -53,3 +53,6 @@ pub mod stream;
 pub mod style;
 pub mod transcript;
 pub mod wrap;
+
+#[cfg(test)]
+mod test_util;

@@ -6,10 +6,11 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use cadmus_contract::{InstructionFile, ToolCall};
+use cadmus_contract::{ArtifactSink, InstructionFile, ToolCall};
 use cadmus_core::context::{GitStatus, InstructionTracker, StatusProbe};
+use cadmus_core::{AgentTool, ContextBundle};
 
 /// Which files a run may load (ADR-0007 item 1(a) instruction chains,
 /// ADR-0006 skill discovery).
@@ -46,6 +47,43 @@ pub fn instruction_chain(root: &Path, scope: &Scope) -> Vec<InstructionFile> {
         load(&mut files, &root.join("AGENTS.md"));
     }
     files
+}
+
+/// The run's context pipeline (ADR-0007), shared by every run flavor
+/// (one-shot chat, TUI session runs, eval cases): skill discovery under
+/// `scope`, the coding toolset, the `AGENTS.md` instruction chain, the
+/// frozen prefix (system prompt + chain + skill catalog + tool specs in the
+/// hash), and the bundle the loop renders prefix + history + fresh trailer
+/// from. The flavor's posture arrives as arguments: `scope` gates which
+/// files load, `probe`/`tracker` are the world-reading halves (eval injects
+/// the no-op pair so scores never depend on the operator's machine).
+#[must_use]
+pub fn pipeline(
+    root: &Path,
+    scope: &Scope,
+    probe: Arc<dyn StatusProbe>,
+    tracker: Arc<dyn InstructionTracker>,
+    artifacts: Arc<dyn ArtifactSink>,
+) -> (Vec<Arc<dyn AgentTool>>, ContextBundle) {
+    let skills = crate::skills::discover(root, scope);
+    let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
+    let tools = crate::tools::coding_tools(root.to_path_buf(), skills);
+    let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
+    let instructions = instruction_chain(root, scope);
+    let bundle = ContextBundle {
+        prefix: cadmus_core::FrozenPrefix::assemble(
+            cadmus_core::context::SYSTEM_PROMPT,
+            &instructions,
+            &catalog,
+            &specs,
+        ),
+        probe,
+        tracker,
+        cwd: root.display().to_string(),
+        artifacts,
+        fold_policy: cadmus_core::context::FoldPolicy::default(),
+    };
+    (tools, bundle)
 }
 
 /// One loaded context file's size ceiling: these bytes ride every request's

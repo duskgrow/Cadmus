@@ -297,16 +297,16 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
         let width = shell.width();
         let snapshot = transcript.snapshot(width, highlighter, theme, *depth);
         let layout = band_layout(shell, composer, snapshot.live_rows.len());
+        let mut band = BandCtx {
+            composer,
+            label,
+            status,
+            layout,
+            theme,
+            depth: *depth,
+        };
         if !snapshot.flush_rows.is_empty() {
-            let render = band_render(
-                snapshot.live_rows.clone(),
-                composer,
-                label,
-                status,
-                layout,
-                theme,
-                *depth,
-            );
+            let render = band_render(snapshot.live_rows.clone(), &mut band);
             // Flush first, then confirm: the ack contract is a *successful*
             // shell flush, so a structural failure must die un-acked.
             shell.flush(&snapshot.flush_rows, render)?;
@@ -316,26 +316,10 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             // The recreation seam: the cursor tracker answers the anchor
             // query without a CPR round-trip (cursor.rs), so no quiesce
             // window — the event stream stays live across recreation.
-            let render = band_render(
-                snapshot.live_rows.clone(),
-                composer,
-                label,
-                status,
-                layout,
-                theme,
-                *depth,
-            );
+            let render = band_render(snapshot.live_rows.clone(), &mut band);
             shell.set_height(layout.band_height, render)?;
         }
-        let render = band_render(
-            snapshot.live_rows,
-            composer,
-            label,
-            status,
-            layout,
-            theme,
-            *depth,
-        );
+        let render = band_render(snapshot.live_rows, &mut band);
         shell.draw(render);
         Ok(())
     }
@@ -462,15 +446,15 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                         );
                         let layout =
                             band_layout(&mut self.shell, &self.composer, snapshot.live_rows.len());
-                        let render = band_render(
-                            snapshot.live_rows,
-                            &mut self.composer,
-                            &self.label,
-                            &self.status,
+                        let mut band = BandCtx {
+                            composer: &mut self.composer,
+                            label: &self.label,
+                            status: &self.status,
                             layout,
-                            &self.theme,
-                            self.depth,
-                        );
+                            theme: &self.theme,
+                            depth: self.depth,
+                        };
+                        let render = band_render(snapshot.live_rows, &mut band);
                         self.shell.flush(&marker, render)?;
                     }
                 }
@@ -530,7 +514,15 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             ..
         } = &mut *self;
         let layout = band_layout(shell, composer, band_rows.len());
-        let render = band_render(band_rows, composer, label, status, layout, theme, *depth);
+        let mut band = BandCtx {
+            composer,
+            label,
+            status,
+            layout,
+            theme,
+            depth: *depth,
+        };
+        let render = band_render(band_rows, &mut band);
         shell.on_resize(
             cols,
             rows,
@@ -580,39 +572,48 @@ fn band_layout<B: Backend<Error = io::Error> + Clone, W: Write>(
     })
 }
 
+/// The invariant half of a band render across one pump: every call differs
+/// only in which rows it draws, so the context packs once and each call
+/// site names just its rows. `composer` is a `&mut`: the render closure
+/// scrolls it.
+struct BandCtx<'a> {
+    composer: &'a mut Composer,
+    label: &'a str,
+    status: &'a Status,
+    layout: BandLayout,
+    theme: &'a Theme,
+    depth: ColorDepth,
+}
+
 /// The band render closure: owned rows in, widgets drawn top to bottom —
 /// stream tail (bottom-anchored in its slice), composer, status line. Every
 /// slice is intersected with the frame area: during the stale-frame window
 /// around a resize, the split math may exceed the band, and clipping beats
 /// panicking.
-#[allow(clippy::too_many_arguments)]
 fn band_render<'a>(
     rows: Vec<Line<'static>>,
-    composer: &'a mut Composer,
-    label: &str,
-    status: &Status,
-    layout: BandLayout,
-    theme: &Theme,
-    depth: ColorDepth,
+    ctx: &'a mut BandCtx<'_>,
 ) -> impl FnOnce(&mut Frame<'_>) + 'a {
     let subtle = ir_style(
         &ir::Style {
             fg: Some(ir::Color::Slot(Slot::TextSubtle)),
             ..ir::Style::default()
         },
-        theme,
-        depth,
+        ctx.theme,
+        ctx.depth,
     );
     let selection = ir_style(
         &ir::Style {
             bg: Some(ir::Color::Slot(Slot::Selection)),
             ..ir::Style::default()
         },
-        theme,
-        depth,
+        ctx.theme,
+        ctx.depth,
     );
-    let status_left = label.to_string();
-    let status_right = status.text();
+    let status_left = ctx.label.to_string();
+    let status_right = ctx.status.text();
+    let layout = ctx.layout;
+    let composer = &mut *ctx.composer;
     move |frame: &mut Frame<'_>| {
         let area = frame.area();
         let clip = |rect: Rect| rect.intersection(area);

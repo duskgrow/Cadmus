@@ -590,18 +590,12 @@ fn turn_of(event: &Event) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
-
     use cadmus_contract::{
         EventError, InFlight, LiveKind, OpenTurn, RunState, StreamChunk, ToolCall, TurnSnapshot,
     };
 
     use super::*;
-
-    fn highlighter() -> &'static Highlighter {
-        static HIGHLIGHTER: OnceLock<Highlighter> = OnceLock::new();
-        HIGHLIGHTER.get_or_init(Highlighter::new)
-    }
+    use crate::test_util::{highlighter, texts};
 
     fn delta(seq: u64, turn: u32, text: &str) -> LiveItem {
         LiveItem {
@@ -647,17 +641,6 @@ mod tests {
                 warnings: Vec::new(),
             },
         )
-    }
-
-    fn texts(rows: &[Line<'static>]) -> Vec<String> {
-        rows.iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect()
     }
 
     fn snapshot(transcript: &mut Transcript) -> Snapshot {

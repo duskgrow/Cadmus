@@ -5,6 +5,19 @@ backlog. Every item names its consumer; when the consuming change lands,
 delete the item (its rationale then lives in that change's ADR). An item
 with no consumer does not belong here.
 
+## The quiesce/paste seams are built ahead of their consumers
+
+Consumer: the `$EDITOR` handoff (Ctrl-G) and the input broker's
+paste-burst classification — the ADR-0018 items 1/5/6 wiring change.
+
+Found by the 2026-09 simplification sweep: `InputBroker::quiesce` (incl.
+the `EventSource::Quiesced` GAT), `Quiesced::discard_buffered_input`, and
+the composer's `PasteBurst` classifier have no production call sites —
+their docs name the consumers, which do not exist yet. Kept because
+ADR-0018 designates them and Phase 1's interaction row owns the wiring,
+but ADR-0018's own rule is "none are built ahead of evidence": when the
+handoff lands, wire them; if the handoff's shape changes, cut them there.
+
 ## The agent loop has no tracing instrumentation
 
 Consumer: same as above, or a standalone interim change.

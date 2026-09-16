@@ -16,12 +16,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cadmus_contract::{ChatRequest, Message, Provider, Usage};
-use cadmus_core::{AgentLoop, ClientProtocol, ContextBundle, RunOutcome, Telemetry};
+use cadmus_core::{AgentLoop, ClientProtocol, RunOutcome, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
 
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
-use crate::tools::coding_tools;
 use crate::{Error, approval, context, provider, render};
 
 /// Everything a chat run needs, resolved from CLI arguments. The provider
@@ -97,31 +96,17 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
     tracing::info!(trace_id, path = %trace_path.display(), "recording trajectory");
     let root = std::env::current_dir().map_err(Error::Workdir)?;
     let root = root.canonicalize().unwrap_or(root);
-    // The context pipeline (ADR-0007): frozen prefix (system prompt +
-    // AGENTS.md chain + skill catalog + tool specs in the hash), git probe
-    // and nested-file tracker — the loop renders prefix + history + fresh
-    // trailer per turn.
-    let skills = crate::skills::discover(&root, &context::Scope::UserAndWorkspace);
-    let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
-    let tools = coding_tools(root.clone(), skills);
-    let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
-    let instructions = context::instruction_chain(&root, &context::Scope::UserAndWorkspace);
-    let pipeline = ContextBundle {
-        prefix: cadmus_core::FrozenPrefix::assemble(
-            cadmus_core::context::SYSTEM_PROMPT,
-            &instructions,
-            &catalog,
-            &specs,
-        ),
-        probe: Arc::new(context::GitProbe::new(root.clone())),
-        tracker: Arc::new(context::NestedInstructions::new(root.clone())),
-        cwd: root.display().to_string(),
-        artifacts: log
-            .artifacts(&trace_id)
-            .map(|sink| Arc::new(sink) as Arc<dyn cadmus_contract::ArtifactSink>)
-            .expect("a minted trace id resolves its artifact dir"),
-        fold_policy: cadmus_core::context::FoldPolicy::default(),
-    };
+    let artifacts = log
+        .artifacts(&trace_id)
+        .map(|sink| Arc::new(sink) as Arc<dyn cadmus_contract::ArtifactSink>)
+        .expect("a minted trace id resolves its artifact dir");
+    let (tools, pipeline) = context::pipeline(
+        &root,
+        &context::Scope::UserAndWorkspace,
+        Arc::new(context::GitProbe::new(root.clone())),
+        Arc::new(context::NestedInstructions::new(root.clone())),
+        artifacts,
+    );
     // The client protocol (ADR-0013): the renderer subscribes to the live
     // stream; approvals auto-resolve through the command channel per the
     // `--yes` policy — the same two ports the TUI will drive. The attach

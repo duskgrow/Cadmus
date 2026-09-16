@@ -10,13 +10,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cadmus_contract::{ChatRequest, Command, Message, Provider};
-use cadmus_core::{AgentLoop, ClientProtocol, ContextBundle, Telemetry};
+use cadmus_core::{AgentLoop, ClientProtocol, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
 use cadmus_tui::app::{AppConfig, RunDriver, RunHandle};
 
 use crate::telemetry::{SeqIds, SystemClock, default_trace_root, mint_trace_id};
-use crate::tools::coding_tools;
 use crate::{ChatConfig, Error, approval, context, provider};
 
 /// Runs the interactive session until the user quits.
@@ -82,32 +81,21 @@ impl RunDriver for TuiDriver {
             trace_id: trace_id.clone(),
             run_attributes: self.run_attributes.clone(),
         };
-        // The context pipeline (ADR-0007), rebuilt per run like one-shot
+        // The context pipeline (ADR-0007) is rebuilt per run like one-shot
         // chat's: skills and instructions are cheap rediscovery, and the
         // nested-file tracker's state is per-run by design.
-        let skills = crate::skills::discover(&self.root, &context::Scope::UserAndWorkspace);
-        let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
-        let tools = coding_tools(self.root.clone(), skills);
-        let specs: Vec<_> = tools.iter().map(|tool| tool.spec()).collect();
-        let instructions =
-            context::instruction_chain(&self.root, &context::Scope::UserAndWorkspace);
-        let pipeline = ContextBundle {
-            prefix: cadmus_core::FrozenPrefix::assemble(
-                cadmus_core::context::SYSTEM_PROMPT,
-                &instructions,
-                &catalog,
-                &specs,
-            ),
-            probe: Arc::new(context::GitProbe::new(self.root.clone())),
-            tracker: Arc::new(context::NestedInstructions::new(self.root.clone())),
-            cwd: self.root.display().to_string(),
-            artifacts: self
-                .log
-                .artifacts(&trace_id)
-                .map(|sink| Arc::new(sink) as Arc<dyn cadmus_contract::ArtifactSink>)
-                .expect("a minted trace id resolves its artifact dir"),
-            fold_policy: cadmus_core::context::FoldPolicy::default(),
-        };
+        let artifacts = self
+            .log
+            .artifacts(&trace_id)
+            .map(|sink| Arc::new(sink) as Arc<dyn cadmus_contract::ArtifactSink>)
+            .expect("a minted trace id resolves its artifact dir");
+        let (tools, pipeline) = context::pipeline(
+            &self.root,
+            &context::Scope::UserAndWorkspace,
+            Arc::new(context::GitProbe::new(self.root.clone())),
+            Arc::new(context::NestedInstructions::new(self.root.clone())),
+            artifacts,
+        );
         // The attach happens before the loop exists, so position 0 holds by
         // construction (one-shot chat's own lesson, chat.rs).
         let broadcaster = Arc::new(Broadcaster::new());

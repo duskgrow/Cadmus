@@ -159,27 +159,10 @@ impl Default for Stream {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
-
     use cadmus_ui::ir;
 
     use super::*;
-
-    fn highlighter() -> &'static Highlighter {
-        static HIGHLIGHTER: OnceLock<Highlighter> = OnceLock::new();
-        HIGHLIGHTER.get_or_init(Highlighter::new)
-    }
-
-    fn texts(rows: &[Line<'static>]) -> Vec<String> {
-        rows.iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect()
-    }
+    use crate::test_util::{highlighter, texts};
 
     #[test]
     fn a_paragraph_flushes_once_it_completes() {
