@@ -30,6 +30,8 @@
 //!   item 5).
 //! - [`debounce`] — resize-burst coalescing cadence (inline-spike
 //!   discipline 2).
+//! - [`wrap`] — the one wrap implementation (ratatui's own word wrapper):
+//!   flush rows, band rows and height math can never disagree.
 
 pub mod composer;
 pub mod debounce;
@@ -39,3 +41,4 @@ pub mod layout;
 pub mod shell;
 pub mod stream;
 pub mod style;
+pub mod wrap;
