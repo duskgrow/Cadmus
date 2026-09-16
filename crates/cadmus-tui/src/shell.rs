@@ -14,16 +14,20 @@
 //! - **Guard-stream integrity**: guard bytes go through the same stream the
 //!   backend writes to — the spike's tee lesson: routing them to a parallel
 //!   raw-stdout handle once punched a hole in the capture.
-//! - **Cursor-query tolerance**: the CPR round-trips inside `draw`/`resize`
-//!   time out under resize storms and quirky stdio (spike fact F3); those
-//!   failures are tolerated and counted in [`ShellStats`], never fatal — the
-//!   next op re-anchors and repaints. Insert/clear/recreate failures are
+//! - **Cursor-query-free after boot**: ratatui's inline viewport queries
+//!   the cursor position inside `Terminal::with_options`
+//!   (construction/recreation), `Terminal::clear` (which the portable
+//!   `insert_before` calls on its way out — so an ordinary flush queries)
+//!   and `Terminal::resize`. Any real CPR round-trip issued once the input
+//!   broker's reader thread is parked stalls for the full two-second reader
+//!   lock timeout and then fails (verified on a real pty, 2026-09-16 — the
+//!   mechanism behind upstream ratatui #2640). The shell's real-terminal
+//!   backend is therefore the cursor tracker ([`crate::cursor`]), whose one
+//!   real query is the seed at boot, before the broker exists.
+//! - **Query/IO tolerance**: draw and resize failures are tolerated and
+//!   counted in [`ShellStats`], never fatal — the next op re-anchors and
+//!   repaints (spike fact F3). Insert/clear/recreate failures are
 //!   structural and propagate.
-//! - **Quiesced stdin at (re)construction**: `Terminal::with_options` issues
-//!   a CPR query that races stdin readers (upstream ratatui #2640, open).
-//!   Callers must hold all stdin readers quiesced across [`InlineShell::new`]
-//!   and [`InlineShell::set_height`] — the input broker's quiesce guard
-//!   ([`crate::input::InputBroker::quiesce`]) is the designated seam.
 
 use std::io::{self, Write};
 
@@ -65,8 +69,9 @@ pub struct InlineShell<B: Backend<Error = io::Error> + Clone, W: Write> {
 
 impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
     /// Claim an inline band of `band_height` rows (clamped to the screen) at
-    /// the cursor and clear it. Two CPR round-trips (construction + clear) —
-    /// the quiesced-stdin contract applies.
+    /// the cursor and clear it. The anchor reads go through the backend's
+    /// cursor answer — tracked state for the real terminal, never a live
+    /// query (module docs).
     pub fn new(backend: B, guard: W, band_height: u16) -> io::Result<Self> {
         let screen = backend.size()?;
         let band_height = clamp_height(band_height, screen.height);
@@ -109,8 +114,8 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
     }
 
     /// Whether `set_height(desired)` would do anything (its equality no-op,
-    /// exposed so the app can skip the quiesce window when nothing would
-    /// change — the recreation seam is for real height changes only).
+    /// exposed so the app can skip the recreation seam when nothing would
+    /// change — recreation is for real height changes only).
     pub fn needs_height_change(&mut self, desired: u16) -> bool {
         let Ok(screen_rows) = self.terminal.size().map(|size| size.height) else {
             return false;
@@ -287,11 +292,13 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
     }
 
     /// The recreation seam (spike fact F1's escape hatch, adopted by the
-    /// second 2026-09-14 amendment). Construction issues a CPR query — the
-    /// module docs' quiesced-stdin contract applies. Width re-syncs here:
-    /// a resize landing inside a quiesce window is missed by the input
-    /// contract, and recreation is the one place that always re-reads the
-    /// terminal (the next debounced resize still owns the replay path).
+    /// second 2026-09-14 amendment). The anchor query is answered from
+    /// tracked cursor state — the shell parked the cursor at the future
+    /// band top one step earlier, so the answer is exact (module docs).
+    /// Width re-syncs here: a resize landing between debounce ticks is
+    /// missed by the input contract, and recreation is the one place that
+    /// always re-reads the terminal (the next debounced resize still owns
+    /// the replay path).
     fn recreate(&mut self, new_height: u16) -> io::Result<()> {
         self.terminal = Terminal::with_options(
             self.terminal.backend().clone(),

@@ -255,7 +255,16 @@ inline viewport shrinks horizontally) and #2731 (skip the redundant
 shrink clear), #2666 closed (the live viewport duplicating into
 scrollback on resize under continuous draw + insert_before), #2527
 in progress (wide-grapheme continuation cells in insert_before,
-tagged v0.31.0). Two of the spike verdict's accepted costs live
+tagged v0.31.0). Field confirmation (2026-09-16): every flushed CJK
+prompt row lands in scrollback with a spurious space per continuation
+cell (`你好` becomes `你 好`, the tail shifting right) — the bug bites
+on the ordinary path, no exotic setup needed, which raises the bump's
+priority. Separately, same day: the first interactive session died on
+`insert_before`'s closing `Terminal::clear` — its cursor-position query
+stalled behind crossterm's parked event-reader thread (ratatui #2640's
+mechanism, reproduced on a pty). cadmus-tui now answers all post-boot
+cursor queries from tracked state (`src/cursor.rs`), so #2640 no longer
+reaches the shell; the tracker's seed query is the session's only CPR. Two of the spike verdict's accepted costs live
 exactly here: resize residue and the shrink clear+replay. On the
 next bump, before merging: re-run the inline-spike harness matrix —
 the shrink replay may flip from necessary to harmful (inserting rows

@@ -11,6 +11,9 @@
 //! - [`shell`] — the inline shell: owns the raw terminal and the band's
 //!   lifecycle (anchor, dynamic height via `Terminal` recreation, resize
 //!   reflow, guarded draws — ADR-0018's 2026-09-14 amendments).
+//! - [`cursor`] — the cursor tracker: answers ratatui's cursor-position
+//!   queries from protocol state, so no CPR round-trip ever races the input
+//!   broker's parked reader thread.
 //! - [`composer`] — the self-built multiline prompt editor: grapheme-correct
 //!   cursor/word ops, selection, bounded snapshot undo, hard-wrap layout
 //!   with cursor placement, and the paste-burst heuristic (ADR-0018 item 6,
@@ -26,8 +29,7 @@
 //!   [`frame::FrameScheduler`] actor pair coalescing and capping frames at
 //!   120 FPS, demand-driven (ADR-0018 item 5).
 //! - [`input`] — the input broker: owns the crossterm event stream; the
-//!   quiesce seam for shell (re)construction and `$EDITOR` handoff (ADR-0018
-//!   item 5).
+//!   quiesce seam for the `$EDITOR` handoff (ADR-0018 item 5).
 //! - [`debounce`] — resize-burst coalescing cadence (inline-spike
 //!   discipline 2).
 //! - [`transcript`] — the view-model materialization (item 10): protocol
@@ -41,6 +43,7 @@
 
 pub mod app;
 pub mod composer;
+pub mod cursor;
 pub mod debounce;
 pub mod frame;
 pub mod input;

@@ -1,24 +1,24 @@
 //! The input broker owns the crossterm event stream and can drop/recreate it
-//! (ADR-0018 item 5). Two consumers need that:
+//! (ADR-0018 item 5). The consumer is the **`$EDITOR` handoff (Ctrl-G)**: a
+//! live [`EventStream`] parks a reader thread on stdin, which both holds
+//! crossterm's process-global event-reader lock — starving any
+//! cursor-position query for the full two-second lock timeout (verified on a
+//! real pty, 2026-09-16; the mechanism behind upstream ratatui #2640) — and
+//! steals the external editor's input (the Codex broker's file-header
+//! lesson, the 2026-09-13 exhibit). [`InputBroker::quiesce`] is the
+//! designated seam — the guard's lifetime *is* the quiesced-stdin window.
 //!
-//! - **`$EDITOR` handoff (Ctrl-G)**: a live [`EventStream`] keeps a reader
-//!   thread on stdin, which steals the external editor's input and the
-//!   terminal's query replies (the Codex broker's file-header lesson,
-//!   2026-09-13 exhibit).
-//! - **The shell's quiesced-stdin contract**: [`crate::shell::InlineShell`]'s
-//!   construction and `set_height` recreation issue CPR queries that race the
-//!   reader thread (upstream ratatui #2640, open).
-//!   [`InputBroker::quiesce`] is the designated seam — the guard's lifetime
-//!   *is* the quiesced-stdin window.
+//! The shell no longer needs quiescing: its cursor-position queries are
+//! answered by the cursor tracker ([`crate::cursor`]), so the event stream
+//! is never dropped in the app loop.
 //!
 //! Keyboard handling itself is synchronous in-memory work on every path
 //! (ADR-0018 item 5); nothing here blocks the loop on input.
 //!
 //! Untestable surface note: an [`EventStream`] reads the process's real
-//! stdin, so this module carries no unit tests — the mechanism is borrow
-//! encoding (shell recreation is impossible without holding the guard), and
-//! the terminal-facing glue is exercised by the inline-spike harness, the
-//! same split as [`crate::shell`].
+//! stdin, so this module carries no unit tests — the terminal-facing glue is
+//! exercised by the inline-spike harness, the same split as
+//! [`crate::shell`].
 
 use std::io;
 
@@ -104,7 +104,7 @@ impl Drop for Quiesced<'_> {
 /// The input seam the app loop drives (ADR-0018 item 5): the real broker
 /// reads crossterm's event stream; test rigs script events. The quiesce
 /// guard's lifetime IS the quiesced-stdin window — the type encoding of the
-/// shell's (re)construction contract carries over.
+/// `$EDITOR`-handoff contract.
 pub trait EventSource {
     /// The quiesced-stdin guard ([`InputBroker::quiesce`]).
     type Quiesced<'a>

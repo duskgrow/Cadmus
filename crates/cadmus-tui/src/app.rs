@@ -38,6 +38,7 @@ use tokio::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 use crate::composer::Composer;
+use crate::cursor::CursorTracker;
 use crate::debounce::ResizeDebounce;
 use crate::frame::{Draw, FrameRequester, frame_scheduler};
 use crate::input::{EventSource, InputBroker};
@@ -286,7 +287,6 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             shell,
             transcript,
             composer,
-            input,
             highlighter,
             theme,
             depth,
@@ -313,7 +313,9 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
         }
         transcript.apply_flush(&snapshot.acks);
         if shell.needs_height_change(layout.band_height) {
-            // The recreation seam: the quiesced-stdin window (shell docs).
+            // The recreation seam: the cursor tracker answers the anchor
+            // query without a CPR round-trip (cursor.rs), so no quiesce
+            // window — the event stream stays live across recreation.
             let render = band_render(
                 snapshot.live_rows.clone(),
                 composer,
@@ -323,7 +325,6 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                 theme,
                 *depth,
             );
-            let _quiesced = input.quiesce();
             shell.set_height(layout.band_height, render)?;
         }
         let render = band_render(
@@ -714,6 +715,12 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
     let _restore = Restore;
 
     let backend = CrosstermBackend::new(Stdout);
+    // The session's one cursor-position query: the tracker's seed must
+    // precede the input broker — its parked reader thread holds crossterm's
+    // global event lock, and any later query stalls out behind it (the
+    // cursor.rs module docs). Every post-boot anchor query is answered from
+    // tracked state instead.
+    let backend = CursorTracker::new(backend)?;
     let screen_rows = backend.size()?.height;
     let band = layout::layout(&LayoutInput {
         screen_rows,
@@ -721,10 +728,10 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
         composer_rows: 1,
     })
     .band_height;
-    // The shell is built BEFORE the input broker exists: construction's CPR
-    // round-trips need the global event reader uncontended, and an
-    // EventStream's create-drop cycle would leave a stale wake byte in its
-    // waker pipe that the query reads as an instant timeout (input.rs).
+    // The shell is built BEFORE the input broker exists: the tracker's
+    // seed query above needs crossterm's global event reader uncontended,
+    // and an EventStream's create-drop cycle would leave a stale wake edge
+    // that a query could read as an instant timeout (input.rs).
     let shell = InlineShell::new(backend, Stdout, band)?;
     let input = InputBroker::new();
     let mut app = App::new(shell, input, driver, config);
