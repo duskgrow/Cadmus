@@ -30,6 +30,9 @@
 //!   item 5).
 //! - [`debounce`] — resize-burst coalescing cadence (inline-spike
 //!   discipline 2).
+//! - [`transcript`] — the view-model materialization (item 10): protocol
+//!   events in, widget-readable rows out; one snapshot per pump batch
+//!   drives flush, band render and layout.
 //! - [`wrap`] — the one wrap implementation (ratatui's own word wrapper):
 //!   flush rows, band rows and height math can never disagree.
 
@@ -41,4 +44,5 @@ pub mod layout;
 pub mod shell;
 pub mod stream;
 pub mod style;
+pub mod transcript;
 pub mod wrap;

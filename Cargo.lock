@@ -429,6 +429,7 @@ dependencies = [
  "fuzzy-matcher",
  "insta",
  "ratatui",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "toml",
