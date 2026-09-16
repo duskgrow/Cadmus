@@ -35,7 +35,9 @@ pub struct EvalConfig {
     pub set: PathBuf,
     /// Fixture workspaces root; `case.fixture` names a directory under it.
     pub fixtures: PathBuf,
-    pub max_tokens: u32,
+    /// Per-turn output cap override; `None` resolves to the model's registry
+    /// value (`Capabilities::max_output`) — the same rule as chat.
+    pub max_tokens: Option<u32>,
     pub max_turns: usize,
     /// Trajectory root; `None` resolves the env/default chain at run time.
     pub trace_root: Option<PathBuf>,
@@ -341,6 +343,11 @@ async fn run_case(
         .0
         .canonicalize()
         .unwrap_or_else(|_| scratch.0.clone());
+    // The per-turn output cap: the model's registry value unless overridden
+    // (same rule as chat.rs).
+    let max_tokens = config
+        .max_tokens
+        .unwrap_or(provider.capabilities().max_output);
     let skills = crate::skills::discover(&root, &crate::context::Scope::WorkspaceOnly);
     let catalog: Vec<_> = skills.iter().map(|skill| skill.summary.clone()).collect();
     let tools = coding_tools(root.clone(), skills);
@@ -374,7 +381,7 @@ async fn run_case(
     // A failed run is scored, not propagated: its partial trajectory is the
     // evidence (and run_completed = 0).
     if let Err(error) = agent
-        .run(&ChatRequest::user_text(&case.prompt, config.max_tokens))
+        .run(&ChatRequest::user_text(&case.prompt, max_tokens))
         .await
     {
         tracing::warn!(case_id = %case.id, %error, "case run failed; scoring the partial trace");

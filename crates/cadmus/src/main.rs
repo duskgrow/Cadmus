@@ -36,9 +36,10 @@ enum Commands {
         /// `CADMUS_CUSTOM_API_KEY`)
         #[arg(long)]
         base_url: Option<String>,
-        /// Maximum output tokens per assistant turn
-        #[arg(long, default_value_t = 4_096)]
-        max_tokens: u32,
+        /// Maximum output tokens per assistant turn (default: the model's
+        /// registry value — reasoning models need headroom for thinking)
+        #[arg(long)]
+        max_tokens: Option<u32>,
         /// Maximum assistant turns before the run fails
         #[arg(long, default_value_t = 100)]
         max_turns: usize,
@@ -74,9 +75,10 @@ enum Commands {
         /// `CADMUS_CUSTOM_API_KEY`)
         #[arg(long)]
         base_url: Option<String>,
-        /// Maximum output tokens per assistant turn
-        #[arg(long, default_value_t = 4_096)]
-        max_tokens: u32,
+        /// Maximum output tokens per assistant turn (default: the model's
+        /// registry value — reasoning models need headroom for thinking)
+        #[arg(long)]
+        max_tokens: Option<u32>,
         /// Maximum assistant turns before a case's run fails
         #[arg(long, default_value_t = 100)]
         max_turns: usize,

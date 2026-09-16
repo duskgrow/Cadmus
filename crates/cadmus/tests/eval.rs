@@ -140,7 +140,7 @@ async fn eval_run_scores_and_records_events() {
     let config = EvalConfig {
         set: scratch.0.join("cases"),
         fixtures: scratch.0.join("fixtures"),
-        max_tokens: 1_024,
+        max_tokens: Some(1_024),
         max_turns: 8,
         trace_root: Some(scratch.0.join("traces")),
         out: scratch.0.join("report/scores.json"),

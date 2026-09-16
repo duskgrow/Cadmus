@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cadmus_contract::{ChatRequest, Message, Usage};
+use cadmus_contract::{ChatRequest, Message, Provider, Usage};
 use cadmus_core::{AgentLoop, ClientProtocol, ContextBundle, RunOutcome, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
@@ -34,7 +34,9 @@ pub struct ChatConfig {
     pub model: Option<String>,
     /// Required for `--provider custom`.
     pub base_url: Option<String>,
-    pub max_tokens: u32,
+    /// Per-turn output cap override; `None` resolves to the model's registry
+    /// value (`Capabilities::max_output`) once the provider is built.
+    pub max_tokens: Option<u32>,
     pub max_turns: usize,
     /// Approve workspace-mutation tool calls without a prompt (the CLI's
     /// `-y/--yes`): headless chat cannot ask, so unattended runs deny them
@@ -64,6 +66,12 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         config.model.as_deref(),
         config.base_url.as_deref(),
     )?;
+    // The per-turn output cap: the model's registry value unless the
+    // operator overrides it (field report 2026-09-16: a global 4096 default
+    // let a reasoning model spend its whole budget on hidden thinking).
+    let max_tokens = config
+        .max_tokens
+        .unwrap_or(provider.capabilities().max_output);
 
     let root = match &config.trace_root {
         Some(root) => root.clone(),
@@ -140,9 +148,7 @@ pub async fn run_chat(prompt: &str, config: &ChatConfig) -> Result<ChatResult, E
         config.max_turns,
         telemetry,
     );
-    let result = agent
-        .run(&ChatRequest::user_text(prompt, config.max_tokens))
-        .await;
+    let result = agent.run(&ChatRequest::user_text(prompt, max_tokens)).await;
     // The tail must end even on the paths without a terminal record (a
     // failed trajectory log aborts mid-run): close, then join the renderer.
     broadcaster.close();

@@ -26,6 +26,11 @@ pub async fn run_tui(config: &ChatConfig) -> Result<(), Error> {
         config.model.as_deref(),
         config.base_url.as_deref(),
     )?;
+    // Same resolution as one-shot chat (chat.rs): the model's registry value
+    // unless the operator overrode it.
+    let max_tokens = config
+        .max_tokens
+        .unwrap_or(provider.capabilities().max_output);
     let root = match &config.trace_root {
         Some(root) => root.clone(),
         None => default_trace_root().ok_or(Error::TraceRoot)?,
@@ -38,7 +43,7 @@ pub async fn run_tui(config: &ChatConfig) -> Result<(), Error> {
     let driver = TuiDriver {
         provider: Arc::new(provider),
         run_attributes: provider::run_attributes(&config.provider, &wire_model),
-        max_tokens: config.max_tokens,
+        max_tokens,
         max_turns: config.max_turns,
         approve_writes: config.approve_writes,
         log,
