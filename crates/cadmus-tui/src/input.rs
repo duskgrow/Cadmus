@@ -50,15 +50,24 @@ impl InputBroker {
         }
     }
 
-    /// Take the event stream down — dropping it signals the stdin reader
-    /// thread to wake and exit (no join, but it never reads stdin again) —
-    /// and hand back a guard that recreates the stream on drop. Hold it
-    /// across shell (re)construction and `$EDITOR` handoff. Resize
-    /// notifications during the window are missed: re-query the terminal
-    /// size after the guard drops.
+    /// Take the event stream down — dropping it wakes the stdin reader thread
+    /// out of its parked poll (it holds the global event-reader lock while
+    /// parked, which would starve any cursor-position query), and hands back a
+    /// guard that recreates the stream on drop. Hold it across shell
+    /// (re)construction and `$EDITOR` handoff. Resize notifications during the
+    /// window are missed: re-query the terminal size after the guard drops.
+    ///
+    /// The drop's wake byte is consumed by the thread it wakes — unless that
+    /// thread was between tasks, in which case the byte lingers in the reader's
+    /// waker pipe and the NEXT poll returns instantly (mio wakes persist). That
+    /// lingering byte poisons a cursor-position query (its poll reads the wake
+    /// as an instant timeout), so quiesce ends with a best-effort zero-timeout
+    /// poll to drain it; pending key events are buffered by the reader, never
+    /// consumed here.
     #[must_use]
     pub fn quiesce(&mut self) -> Quiesced<'_> {
         self.stream = None;
+        let _ = crossterm::event::poll(std::time::Duration::ZERO);
         Quiesced { broker: self }
     }
 }

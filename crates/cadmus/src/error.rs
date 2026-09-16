@@ -170,7 +170,8 @@ pub enum Error {
     #[diagnostic(
         code(cadmus::tui),
         help(
-            "the band mechanism hit a structural terminal error; the trajectory up to the failure is intact in the trace log"
+            "the inline band needs a terminal that answers cursor-position queries (ESC[6n); \
+             if yours does (xterm, Windows Terminal, tmux, Zed all do), this is a bug — report it"
         )
     )]
     Tui(std::io::Error),

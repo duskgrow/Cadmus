@@ -713,7 +713,6 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
     execute!(Stdout, EnableBracketedPaste)?;
     let _restore = Restore;
 
-    let mut input = InputBroker::new();
     let backend = CrosstermBackend::new(Stdout);
     let screen_rows = backend.size()?.height;
     let band = layout::layout(&LayoutInput {
@@ -722,12 +721,12 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
         composer_rows: 1,
     })
     .band_height;
-    let shell = {
-        // The construction-time CPR race: the quiesced-stdin contract
-        // (shell module docs).
-        let _quiesced = input.quiesce();
-        InlineShell::new(backend, Stdout, band)?
-    };
+    // The shell is built BEFORE the input broker exists: construction's CPR
+    // round-trips need the global event reader uncontended, and an
+    // EventStream's create-drop cycle would leave a stale wake byte in its
+    // waker pipe that the query reads as an instant timeout (input.rs).
+    let shell = InlineShell::new(backend, Stdout, band)?;
+    let input = InputBroker::new();
     let mut app = App::new(shell, input, driver, config);
     app.run_loop().await
 }
