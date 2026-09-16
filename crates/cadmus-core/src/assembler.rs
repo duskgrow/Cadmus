@@ -172,13 +172,27 @@ impl MessageAssembler {
         );
 
         let had_open_calls = self.warnings.iter().any(|w| w.contains("open tool call"));
-        let outcome = if content.is_empty() {
-            TurnOutcome::Empty
-        } else if had_open_calls || self.finish.is_none() {
-            TurnOutcome::Truncated
-        } else {
-            TurnOutcome::Content
-        };
+        // A reasoning-only turn at the length cap produced no answer: the
+        // whole output budget went to thinking the client never sees — the
+        // empty-turn guard's designed case (the binary's help text maps it
+        // to "raise --max-tokens"), reachable for reasoning models whose
+        // thinking surfaces as reasoning content. finish=Stop keeps the
+        // reasoning-only carve-out: the turn stands as recorded content.
+        // (Branching on `finish` here is safe despite pitfall #4: a gateway
+        // lying about Length on an answerless turn costs an informative
+        // error instead of silence — no real answer is ever hidden, and the
+        // trajectory carries the reasoning either way.)
+        let answerless = !content
+            .iter()
+            .any(|part| !matches!(part, ContentPart::Reasoning { .. }));
+        let outcome =
+            if content.is_empty() || (answerless && self.finish == Some(FinishReason::Length)) {
+                TurnOutcome::Empty
+            } else if had_open_calls || self.finish.is_none() {
+                TurnOutcome::Truncated
+            } else {
+                TurnOutcome::Content
+            };
 
         AssembledTurn {
             message: Message {
@@ -420,7 +434,8 @@ mod tests {
     }
 
     // Pitfall #5: reasoning-only content is NOT an empty turn — hidden
-    // reasoning that surfaces as ReasoningDelta must be preserved.
+    // reasoning that surfaces as ReasoningDelta must be preserved. At the
+    // length cap it produced no answer, so the carve-out ends there.
     #[test]
     fn reasoning_only_turn_is_content() {
         let turn = assemble(vec![
@@ -434,6 +449,42 @@ mod tests {
             turn.message.content.first(),
             Some(ContentPart::Reasoning { text }) if text == "thinking…"
         ));
+    }
+
+    // Pitfall #5's designed case as reasoning models reach it: the whole
+    // output budget went to thinking that surfaces as reasoning content —
+    // no text, finish=length, no answer. Field report 2026-09-16: a deepseek
+    // run ended `ok` after 14 turns having printed nothing.
+    #[test]
+    fn reasoning_only_turn_at_the_length_cap_is_empty() {
+        let turn = assemble(vec![
+            StreamChunk::ReasoningDelta("thinking…".into()),
+            StreamChunk::Done {
+                finish: FinishReason::Length,
+            },
+        ]);
+        assert_eq!(turn.outcome, TurnOutcome::Empty);
+        assert_eq!(turn.finish, FinishReason::Length);
+        // The reasoning itself is preserved in the recorded message.
+        assert!(matches!(
+            turn.message.content.first(),
+            Some(ContentPart::Reasoning { text }) if text == "thinking…"
+        ));
+    }
+
+    // Text at the length cap is a (truncated) answer, never empty; a turn
+    // with tool calls at the cap keeps executing (its open calls quarantine
+    // as truncated).
+    #[test]
+    fn text_or_calls_at_the_length_cap_are_not_empty() {
+        let turn = assemble(vec![
+            StreamChunk::ReasoningDelta("thinking…".into()),
+            StreamChunk::TextDelta("partial answer".into()),
+            StreamChunk::Done {
+                finish: FinishReason::Length,
+            },
+        ]);
+        assert_eq!(turn.outcome, TurnOutcome::Content);
     }
 
     // Pitfall #8: a stream ending without a terminal record (no Done) is

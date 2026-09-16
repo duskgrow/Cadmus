@@ -96,8 +96,10 @@ pub enum AgentError {
     Log(#[from] cadmus_contract::LogError),
     #[error("assistant turn limit ({0}) exceeded")]
     TurnLimit(usize),
-    /// No content at all; the finish reason distinguishes "spent everything
-    /// on hidden thinking" (Length — retry/escalate) from a protocol anomaly
+    /// No answer: no text and no tool calls — either no content at all, or
+    /// a reasoning-only turn cut off at the length cap. The finish reason
+    /// distinguishes "spent everything on hidden thinking" (Length —
+    /// retry/escalate) from a protocol anomaly
     /// (pitfall #5). Cascade routing is phase 3; for now it surfaces.
     #[error("empty assistant turn (finish: {finish:?})")]
     EmptyTurn { finish: FinishReason },
@@ -523,6 +525,45 @@ mod tests {
             events[3].kind,
             EventKind::RunFinished { turns: 0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_turn_at_the_length_cap_fails_the_run() {
+        // Field report 2026-09-16: deepseek spent the whole 4096-token output
+        // budget on reasoning (finish=length, zero text) and the run ended
+        // `ok` with nothing visible. The reasoning survives in the errored
+        // response event; the run must fail as the empty turn it is.
+        let provider = ReplayProvider::new([ReplayProvider::script(vec![
+            StreamChunk::ReasoningDelta("thinking…".into()),
+            StreamChunk::Done {
+                finish: FinishReason::Length,
+            },
+        ])]);
+        let (agent, sink) = test_loop(provider, vec![], 8);
+        let err = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect_err("an answerless turn at the length cap must fail");
+        assert!(matches!(
+            err,
+            AgentError::EmptyTurn {
+                finish: FinishReason::Length
+            }
+        ));
+        let events = sink.events();
+        let EventKind::LlmResponse {
+            message, outcome, ..
+        } = &events[2].kind
+        else {
+            panic!("expected llm_response");
+        };
+        assert_eq!(*outcome, TurnOutcome::Empty);
+        assert!(matches!(
+            message.content.first(),
+            Some(cadmus_contract::ContentPart::Reasoning { .. })
+        ));
+        assert_eq!(events[2].status, Status::Error);
+        assert_eq!(events[3].status, Status::Error);
     }
 
     #[tokio::test]
