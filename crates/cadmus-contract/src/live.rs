@@ -181,6 +181,19 @@ pub trait LiveSink: Send + ::std::marker::Sync {
     fn publish(&self, item: &LiveItem);
 }
 
+/// The outcome of a deadline-bounded wait on a [`CommandSource`]
+/// ([`CommandSource::recv_timeout`]).
+#[derive(Debug)]
+pub enum TimedRecv {
+    /// A command arrived within the deadline.
+    Command(Command),
+    /// Every client is gone before the deadline — the unbounded
+    /// [`CommandSource::recv`]'s `None`.
+    Closed,
+    /// The deadline passed with no command.
+    TimedOut,
+}
+
 /// The upstream port (ADR-0013 item 6): commands are the only upstream a
 /// client has. The run-owning process — the server side, where the loop
 /// lives; clients only produce — receives at defined points: turn
@@ -193,6 +206,19 @@ pub trait CommandSource: Send + ::std::marker::Sync {
     /// that learns this mid-wait treats the request as unanswered — deny
     /// (ADR-0008 item 4's conservative default).
     async fn recv(&self) -> Option<Command>;
+    /// Awaits the next command up to `duration`, then gives up. The default
+    /// never times out: sources whose clients answer synchronously (scripts,
+    /// auto-answerers) need no timer. The deadline is the interactive
+    /// client's pairing rule (ADR-0008 item 4: a wait on a human always
+    /// carries a deny timeout), so sources that wait on humans override
+    /// this with their runtime's timer — core stays runtime-agnostic
+    /// (ADR-0002).
+    async fn recv_timeout(&self, _duration: std::time::Duration) -> TimedRecv {
+        match self.recv().await {
+            Some(command) => TimedRecv::Command(command),
+            None => TimedRecv::Closed,
+        }
+    }
     /// Non-blocking drain for the mid-stream and boundary seams. The default
     /// suits sources with nothing to poll (scripts, closed channels).
     fn poll(&self) -> Option<Command> {

@@ -4,11 +4,21 @@
 //! itself entering the trajectory. Unanswered is deny.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
-use cadmus_contract::{Approval, Command, LiveKind, ToolCall};
+use cadmus_contract::{Approval, Command, LiveKind, TimedRecv, ToolCall};
 
 use super::events::interrupted_detail;
 use super::{AgentError, AgentLoop, Effect};
+
+/// How long the gate waits on a client's resolve before the conservative
+/// default settles the batch (ADR-0008 item 4's pairing rule: a
+/// human-in-the-loop wait always carries a deny timeout). The maintainer
+/// set the duration at five minutes (2026-09-17) — long enough to read a
+/// diff, short enough that a forgotten prompt cannot park the run. The
+/// recorded reason derives from this value, so the audit text cannot drift
+/// from the duration.
+const HUMAN_WAIT: Duration = Duration::from_secs(300);
 
 impl AgentLoop {
     /// Presents the batch's gated calls as one approval request on the live
@@ -31,11 +41,17 @@ impl AgentLoop {
     /// received during the wait classify into the inbox and apply at the
     /// next boundary.
     ///
-    /// Timeout: a client that waits on a human pairs its wait with its own
-    /// deny timeout (ADR-0008 item 4: human-in-the-loop always pairs a
-    /// timeout with the conservative default). The in-process policies
-    /// answer synchronously, so no core-side timeout mechanism exists yet
-    /// — it lands with the first waiting client (the TUI).
+    /// Timeout: the wait carries a deny timeout (ADR-0008 item 4: a
+    /// human-in-the-loop wait always pairs with the conservative default).
+    /// Five minutes unanswered settles the whole batch as a recorded
+    /// rejection — the gate is its own client at that point, so the
+    /// resolution enters the trajectory like any other, clients clear their
+    /// dialogs, and the model sees the timeout reason. The in-process
+    /// auto-answering policies resolve synchronously, long before the
+    /// timeout can fire. A resolve that lands after the deadline is void:
+    /// the recorded timeout is the durable settlement, and the late answer
+    /// drops with its request gone — the trajectory's record is the
+    /// deadline's truth.
     pub(super) async fn gate(
         &self,
         calls: &[ToolCall],
@@ -71,9 +87,36 @@ impl AgentLoop {
                 self.finish_with(root_span, turn, Some(interrupted_detail()))?;
                 return Err(AgentError::Interrupted);
             }
-            match self.protocol.commands.recv().await {
-                Some(command) => self.note(command),
-                None => return Ok(deny_all(&positions)),
+            match self.protocol.commands.recv_timeout(HUMAN_WAIT).await {
+                TimedRecv::Command(command) => self.note(command),
+                // The channel closed mid-wait: no client left to answer.
+                TimedRecv::Closed => return Ok(deny_all(&positions)),
+                // The human-wait timeout settled the batch: the denial is
+                // recorded like any resolution — the approval is recorded,
+                // not just its effects — so clients clear their dialogs and
+                // the trajectory shows why the batch never ran.
+                TimedRecv::TimedOut => {
+                    let comment = format!(
+                        "approval request timed out unanswered ({} minutes) — denied by the \
+                         conservative default",
+                        HUMAN_WAIT.as_secs() / 60
+                    );
+                    let command = Command::ResolveApproval {
+                        command_id: format!("ap-timeout-{}", self.telemetry.ids.next()),
+                        request_id: request_id.clone(),
+                        decisions: vec![
+                            Approval::Rejected {
+                                comment: Some(comment.clone()),
+                            };
+                            positions.len()
+                        ],
+                    };
+                    self.record_command(command, root_span, turn)?;
+                    return Ok(positions
+                        .iter()
+                        .map(|position| (*position, Some(comment.clone())))
+                        .collect());
+                }
             }
         };
         let Command::ResolveApproval { decisions, .. } = command.clone() else {
@@ -114,6 +157,7 @@ fn deny_all(positions: &[usize]) -> HashMap<usize, Option<String>> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use cadmus_contract::{
@@ -129,6 +173,24 @@ mod tests {
     };
     use crate::agent::{AgentTool, ClientProtocol, ToolError};
     use crate::testing::test_telemetry;
+
+    /// A client that never answers and whose deadline has always passed:
+    /// the gate's deny-timeout path with the timer mechanics factored out
+    /// (they belong to the source — the transport's `recv_timeout`).
+    struct SilentSource;
+
+    #[async_trait::async_trait]
+    impl cadmus_contract::CommandSource for SilentSource {
+        async fn recv(&self) -> Option<Command> {
+            // Only the gate awaits `recv`, and its deadline settles first;
+            // pending keeps the honest never-answers contract.
+            std::future::pending().await
+        }
+
+        async fn recv_timeout(&self, _duration: Duration) -> TimedRecv {
+            TimedRecv::TimedOut
+        }
+    }
 
     /// A gate harness whose client resolves every request through the
     /// command channel with `policy`'s fixed decisions — shorter or longer
@@ -629,6 +691,69 @@ mod tests {
         assert_eq!(
             result.error.as_ref().map(|error| error.kind.as_str()),
             Some(error_kinds::APPROVAL_REJECTED)
+        );
+    }
+
+    /// A human wait that outlives the deny timeout settles as a recorded
+    /// rejection (ADR-0008 item 4): the whole batch denies with the timeout
+    /// reason, and the trajectory records the resolution — the gate is its
+    /// own client at that point — so clients clear their dialogs. The
+    /// deadline's mechanics belong to the source (the transport's timer);
+    /// this client never answers and reports the deadline passed, pinning
+    /// core's policy with the timer factored out.
+    #[tokio::test]
+    async fn a_human_wait_times_out_to_a_recorded_deny() {
+        let provider = ReplayProvider::new([
+            tool_call_script("c1", "{\"text\":\"x\"}"),
+            text_script("skipped"),
+        ])
+        .with_capabilities(test_capabilities());
+        let (telemetry, sink) = test_telemetry("tr-test");
+        let protocol = ClientProtocol {
+            live: std::sync::Arc::new(crate::testing::RecordingLive::default()),
+            commands: std::sync::Arc::new(SilentSource),
+        };
+        let agent = AgentLoop::new(
+            Arc::new(provider),
+            vec![Arc::new(EchoTool)],
+            crate::testing::test_context(),
+            protocol,
+            8,
+            telemetry,
+        );
+
+        let outcome = agent
+            .run(&ChatRequest::user_text("hi", 1_024))
+            .await
+            .expect("the run adapts to the denial");
+        assert!(outcome.messages[2].is_error);
+        assert!(matches!(
+            &outcome.messages[2].content[0],
+            cadmus_contract::ContentPart::Text { text }
+                if text.contains("timed out unanswered")
+        ));
+        // The resolution is recorded like any client's: the request id
+        // round-trips and every decision carries the timeout reason.
+        let resolve = sink
+            .events()
+            .into_iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Command(Command::ResolveApproval {
+                    request_id,
+                    decisions,
+                    ..
+                }) => Some((request_id.clone(), decisions.clone())),
+                _ => None,
+            })
+            .expect("the timeout records a resolution");
+        assert!(resolve.0.starts_with("ap"));
+        assert!(
+            resolve.1.iter().all(|decision| matches!(
+                decision,
+                Approval::Rejected { comment: Some(comment) } if comment.contains("timed out")
+            )),
+            "decisions: {:?}",
+            resolve.1
         );
     }
 }

@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use cadmus_contract::testing::ProtocolSubject;
 use cadmus_contract::{
     Attachment, Command, CommandSource, Event, EventKind, InFlight, LiveItem, LiveKind, LiveSink,
-    LiveUpdate, OpenTurn, PendingApproval, Sync, attrs,
+    LiveUpdate, OpenTurn, PendingApproval, Sync, TimedRecv, attrs,
 };
 use cadmus_core::{MessageAssembler, replay_trace};
 
@@ -308,6 +308,17 @@ impl CommandSource for CommandReceiver {
         self.receiver.lock().await.recv().await
     }
 
+    async fn recv_timeout(&self, duration: std::time::Duration) -> TimedRecv {
+        // The interactive client's pairing rule (ADR-0008 item 4): the wait
+        // on a human carries a deny deadline — core's gate races against
+        // this without core touching a runtime.
+        match tokio::time::timeout(duration, self.recv()).await {
+            Ok(Some(command)) => TimedRecv::Command(command),
+            Ok(None) => TimedRecv::Closed,
+            Err(_) => TimedRecv::TimedOut,
+        }
+    }
+
     fn poll(&self) -> Option<Command> {
         // A contended lock means the loop itself is parked in `recv` — in
         // which case no poll is running (single loop task), so `None` here
@@ -322,4 +333,50 @@ pub struct Blackhole;
 
 impl LiveSink for Blackhole {
     fn publish(&self, _item: &LiveItem) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use cadmus_contract::Command;
+
+    use super::*;
+
+    /// The deadline mechanics the gate's human-wait timeout rides on: a
+    /// command inside the deadline arrives, silence past it reports
+    /// `TimedOut`, and a closed channel reports `Closed` either way.
+    #[tokio::test]
+    async fn recv_timeout_reports_silence_commands_and_closure() {
+        let (sender, receiver) = command_channel();
+
+        // Silence past the deadline: real time, the outcome is the point.
+        assert!(
+            matches!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_millis(20))
+                    .await,
+                TimedRecv::TimedOut
+            ),
+            "silence past the deadline gives up"
+        );
+
+        sender
+            .send(Command::Interrupt {
+                command_id: "cmd-1".into(),
+            })
+            .expect("send");
+        assert!(matches!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .await,
+            TimedRecv::Command(Command::Interrupt { .. })
+        ));
+
+        drop(sender);
+        assert!(matches!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .await,
+            TimedRecv::Closed
+        ));
+    }
 }

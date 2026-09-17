@@ -17,7 +17,7 @@ workspace = true
 cadmus-contract.workspace = true
 cadmus-core.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 insta = { workspace = true, features = ["json"] }
