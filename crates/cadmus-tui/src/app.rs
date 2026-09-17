@@ -539,12 +539,14 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                         request_id,
                         turn,
                         calls,
+                        wait_timeout,
                     } = &item.kind
                 {
                     self.queue_approval(PendingApproval {
                         request_id: request_id.clone(),
                         turn: *turn,
                         calls: calls.clone(),
+                        wait_timeout: *wait_timeout,
                     });
                 }
                 // A resolution that settled elsewhere — the gate's deny

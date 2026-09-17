@@ -15,6 +15,8 @@
 //! then drops every live item with `seq ≤ Sync.as_of_seq` and applies the
 //! rest — idempotent and retry-safe over lossy transports.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Command, Event, RunState, StreamChunk, ToolCall, Usage};
@@ -55,10 +57,14 @@ pub enum LiveKind {
     /// `Recorded` `resolve_approval` command — the request itself is never
     /// logged (the decision is the durable fact), so an attach during the
     /// wait reconstructs the dialog from [`InFlight::pending_approvals`].
+    /// `wait_timeout` is the budget after which the gate settles the batch
+    /// as a recorded denial (item 4's pairing rule), so the dialog can name
+    /// its deadline; a live countdown rides a later stream slice.
     ApprovalRequested {
         request_id: String,
         turn: u32,
         calls: Vec<ToolCall>,
+        wait_timeout: Duration,
     },
 }
 
@@ -152,6 +158,10 @@ pub struct PendingApproval {
     pub request_id: String,
     pub turn: u32,
     pub calls: Vec<ToolCall>,
+    /// The wait budget the request was published with — an attach
+    /// mid-wait reconstructs the same dialog, deadline naming included
+    /// (`ApprovalRequested`'s field, aggregated unchanged).
+    pub wait_timeout: Duration,
 }
 
 /// One attach's yield: the handshake plus the live tail. `tail` ends when

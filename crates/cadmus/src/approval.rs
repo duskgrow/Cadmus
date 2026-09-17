@@ -154,6 +154,7 @@ mod tests {
                 request_id: "ap7".into(),
                 turn: 1,
                 calls: calls(),
+                wait_timeout: std::time::Duration::from_secs(300),
             },
         });
 

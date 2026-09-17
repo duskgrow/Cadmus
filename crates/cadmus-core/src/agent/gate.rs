@@ -16,8 +16,9 @@ use super::{AgentError, AgentLoop, Effect};
 /// human-in-the-loop wait always carries a deny timeout). The maintainer
 /// set the duration at five minutes (2026-09-17) — long enough to read a
 /// diff, short enough that a forgotten prompt cannot park the run. The
-/// recorded reason derives from this value, so the audit text cannot drift
-/// from the duration.
+/// recorded reason and the published request's `wait_timeout` both derive
+/// from this value, so the audit text and the dialog's deadline naming
+/// cannot drift from the duration.
 const HUMAN_WAIT: Duration = Duration::from_secs(300);
 
 impl AgentLoop {
@@ -76,6 +77,10 @@ impl AgentLoop {
             request_id: request_id.clone(),
             turn: u32::try_from(turn).unwrap_or(u32::MAX),
             calls: batch,
+            // The dialog names its deadline from the same value the wait
+            // races against — the audit text and the header cannot drift
+            // apart.
+            wait_timeout: HUMAN_WAIT,
         });
 
         let command = loop {
@@ -291,6 +296,13 @@ mod tests {
         // not just its effect (ADR-0008 item 4 / ADR-0013 item 6).
         let (request, call) = request_and_call_positions(&live);
         assert!(request < call, "the gate opens before any execution");
+        // The published request carries the very budget the wait races
+        // against — the dialog's deadline naming cannot drift from the
+        // timeout the gate enforces.
+        let LiveKind::ApprovalRequested { wait_timeout, .. } = &live.items()[request].kind else {
+            unreachable!("the position came from an ApprovalRequested match")
+        };
+        assert_eq!(*wait_timeout, HUMAN_WAIT);
         let events = sink.events();
         let resolve = events.iter().find_map(|event| match &event.kind {
             EventKind::Command(Command::ResolveApproval {

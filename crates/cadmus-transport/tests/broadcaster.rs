@@ -40,6 +40,7 @@ fn only_the_matching_resolve_clears_a_pending_approval() {
                 request_id: "ap9".into(),
                 turn: 1,
                 calls: vec![],
+                wait_timeout: std::time::Duration::from_secs(300),
             },
         },
     );

@@ -970,6 +970,7 @@ mod tests {
                 request_id: request_id.into(),
                 turn: 1,
                 calls,
+                wait_timeout: std::time::Duration::from_secs(300),
             },
         }
     }
@@ -1087,6 +1088,7 @@ mod tests {
                     request_id: "ap9".into(),
                     turn: 1,
                     calls: gated_calls(),
+                    wait_timeout: std::time::Duration::from_secs(300),
                 }],
             },
             as_of_seq: 0,

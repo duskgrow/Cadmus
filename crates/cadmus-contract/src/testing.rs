@@ -486,6 +486,7 @@ pub fn attach_during_approval_wait_shows_the_pending_request(subject: &impl Prot
                 name: "write_file".into(),
                 arguments: serde_json::json!({"path": "src/main.rs"}),
             }],
+            wait_timeout: std::time::Duration::from_secs(300),
         },
     });
 
@@ -494,6 +495,9 @@ pub fn attach_during_approval_wait_shows_the_pending_request(subject: &impl Prot
     assert_eq!(pending.len(), 1, "the open request reconstructs");
     assert_eq!(pending[0].request_id, "ap9");
     assert_eq!(pending[0].calls[0].name, "write_file");
+    // The dialog's deadline rides the request: an attach mid-wait
+    // reconstructs the same header the live path renders.
+    assert_eq!(pending[0].wait_timeout, std::time::Duration::from_secs(300));
 
     subject.publish(&recorded(
         4,

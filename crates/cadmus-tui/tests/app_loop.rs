@@ -457,16 +457,17 @@ fn approval_request(seq: u64, request_id: &str, calls: Vec<ToolCall>) -> LiveUpd
                 request_id: request_id.into(),
                 turn: 1,
                 calls,
+                wait_timeout: std::time::Duration::from_secs(300),
             },
         }),
     }
 }
 
-/// The band's approval section while the request waits: header, one marker
-/// line per call, then each call's proposed change (write all-added, edit
-/// as an old/new pair).
+/// The band's approval section while the request waits: header (request,
+/// answer keys, deadline), one marker line per call, then each call's
+/// proposed change (write all-added, edit as an old/new pair).
 const APPROVAL_SECTION: [&str; 6] = [
-    "approve 2 call(s)  y: approve · n: reject",
+    "approve 2 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min",
     "→ write_file src/main.rs",
     "+ fn main() {}",
     "→ edit_file src/main.rs",
@@ -763,6 +764,7 @@ async fn an_attach_mid_wait_seeds_the_dialog_from_the_sync() {
                     request_id: "ap-sync".into(),
                     turn: 3,
                     calls: gated_batch(),
+                    wait_timeout: std::time::Duration::from_secs(300),
                 }],
             );
             let driver = rig.driver.clone_handles();

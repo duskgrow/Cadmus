@@ -297,20 +297,6 @@ folding command events into the attach payload's bounded window or
 projecting resolutions into the history — the slice's own design
 direction decides.
 
-## The approval dialog cannot name its deadline
-
-Consumer: the session-attach payload slice (it already extends the
-pending-approval payloads).
-
-The gate's human-wait timeout (five minutes, ADR-0008 item 4, decided
-2026-09-17) exists only core-side: `ApprovalRequested` carries no
-deadline, so the TUI's dialog cannot tell the waiting human their prompt
-self-denies — no countdown, no hint; a timed-out request just vanishes
-(cleared by its recorded resolution). Carry the deadline in
-`ApprovalRequested` — attach clients reconstruct the same dialog — and
-the header can name it statically; a live countdown rides the stream
-later.
-
 ## The next ratatui bump moves the inline spike's accepted costs
 
 Consumer: the first ratatui version bump (0.30.3 or later).

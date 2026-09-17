@@ -181,10 +181,12 @@ impl Broadcaster {
                 request_id,
                 turn,
                 calls,
+                wait_timeout,
             } => state.pending_approvals.push(PendingApproval {
                 request_id: request_id.clone(),
                 turn: *turn,
                 calls: calls.clone(),
+                wait_timeout: *wait_timeout,
             }),
         }
     }

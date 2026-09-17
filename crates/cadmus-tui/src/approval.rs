@@ -1,8 +1,9 @@
 //! The interactive approval surface (ADR-0018 item 8 / ADR-0011 item 3):
 //! while the run's gate awaits a decision, the band hosts the pending
 //! request between the stream tail and the composer — a header naming it,
-//! one marker line per gated call, and each call's proposed change as diff
-//! lines (the `diff-*` slots, ADR-0017).
+//! the wait's deadline, and the keys that answer it, one marker line per
+//! gated call, and each call's proposed change as diff lines (the `diff-*`
+//! slots, ADR-0017).
 //!
 //! The call → diff-lines mapping is pure: it reads [`ToolCall::arguments`]
 //! only and never the workspace. A cumulative, file-backed diff (the
@@ -17,6 +18,8 @@
 //! the app materializes [`section_lines`] once per request — the render
 //! re-wraps the cached lines at frame rate, where work proportional to a
 //! huge `write_file` would otherwise burn per pump.
+
+use std::time::Duration;
 
 use cadmus_contract::{PendingApproval, ToolCall};
 use cadmus_ui::diff::diff_lines;
@@ -64,7 +67,7 @@ pub fn section_rows(
 /// new request) recompute. The per-call budget bounds the re-wrap work.
 #[must_use]
 pub fn section_lines(pending: &PendingApproval) -> Vec<ir::Line> {
-    let mut lines = vec![header(pending.calls.len())];
+    let mut lines = vec![header(pending)];
     for call in &pending.calls {
         lines.push(subtle_line(tool_marker(call)));
         lines.extend(change_lines(call));
@@ -72,14 +75,37 @@ pub fn section_lines(pending: &PendingApproval) -> Vec<ir::Line> {
     lines
 }
 
-/// The header names the request and the keys that answer it; the name rides
-/// the accent slot, the key hint stays subtle (accent restraint, ADR-0017 —
-/// the accent marks the request, nothing else).
-fn header(call_count: usize) -> ir::Line {
+/// The header names the request, the keys that answer it, and the wait's
+/// deadline — the name rides the accent slot, the key hint and the deadline
+/// stay subtle (accent restraint, ADR-0017 — the accent marks the request,
+/// nothing else).
+fn header(pending: &PendingApproval) -> ir::Line {
     ir::Line::from_spans(vec![
-        ir::Span::slotted(format!("approve {call_count} call(s)"), Slot::Accent),
+        ir::Span::slotted(
+            format!("approve {} call(s)", pending.calls.len()),
+            Slot::Accent,
+        ),
         ir::Span::slotted("  y: approve · n: reject", Slot::TextSubtle),
+        ir::Span::slotted(
+            format!(
+                "  ·  unanswered denies after {}",
+                wait_name(pending.wait_timeout)
+            ),
+            Slot::TextSubtle,
+        ),
     ])
+}
+
+/// The deadline's static name: whole minutes read as minutes, anything else
+/// as seconds. The carried value is the budget the request opened with, not
+/// a live countdown — that rides a later stream slice.
+fn wait_name(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{secs} s")
+    }
 }
 
 /// The call's proposed change as diff lines (module docs for the purity
@@ -148,6 +174,8 @@ mod tests {
             request_id: "ap1".into(),
             turn: 1,
             calls,
+            // The gate's real budget (HUMAN_WAIT) — the header names it.
+            wait_timeout: Duration::from_secs(300),
         }
     }
 
@@ -166,13 +194,27 @@ mod tests {
     }
 
     #[test]
-    fn the_header_names_the_request_and_the_answer_keys() {
+    fn the_header_names_the_request_the_answer_keys_and_the_deadline() {
         let rows = section(&pending(vec![ToolCall {
             id: "c1".into(),
             name: "write_file".into(),
             arguments: json!({}),
         }]));
-        assert_eq!(rows[0], "approve 1 call(s)  y: approve · n: reject");
+        assert_eq!(
+            rows[0],
+            "approve 1 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min"
+        );
+    }
+
+    #[test]
+    fn the_deadline_names_seconds_when_the_budget_is_not_whole_minutes() {
+        let mut pending = pending(vec![]);
+        pending.wait_timeout = Duration::from_secs(90);
+        let rows = section(&pending);
+        assert_eq!(
+            rows[0],
+            "approve 0 call(s)  y: approve · n: reject  ·  unanswered denies after 90 s"
+        );
     }
 
     #[test]
@@ -186,7 +228,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "approve 1 call(s)  y: approve · n: reject",
+                "approve 1 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min",
                 "→ write_file src/main.rs",
                 "+ fn main() {",
                 "+     run();",
@@ -225,7 +267,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "approve 1 call(s)  y: approve · n: reject",
+                "approve 1 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min",
                 "→ edit_file src/main.rs",
                 "- let a = 1;",
                 "+ let a = 2;",
@@ -268,7 +310,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "approve 1 call(s)  y: approve · n: reject",
+                "approve 1 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min",
                 "→ bash cargo test"
             ]
         );
@@ -281,7 +323,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "approve 1 call(s)  y: approve · n: reject",
+                "approve 1 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min",
                 "→ write_file src/main.rs"
             ]
         );
