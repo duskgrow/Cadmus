@@ -10,6 +10,7 @@ mod error;
 mod eval;
 pub mod provider;
 mod render;
+pub mod rules;
 mod skills;
 mod telemetry;
 #[cfg(test)]
