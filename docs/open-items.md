@@ -256,6 +256,31 @@ selection/copy drift under a moving stream); and the evidence-gated
 behaviors — pause or batch inserts while the user is scrolled up, only if
 the matrix shows bottom-anchored terminals in the support set.
 
+## The turn-end band collapse leaves the residue mid-page
+
+Consumer: the layout-hardening slice (or the ratatui-bump decision below,
+whichever lands first).
+
+Forensics 2026-09-17 (vt100 rig, two-turn scripted session): the residue
+mechanism is confirmed and bounded — at turn end the band shrinks from its
+streaming height to composer+status, and the Δ vacated rows are the band's
+own blank stream-viewport rows relocating into the page above it. On a full
+screen that is one screen-height blank run per completed turn, sitting
+between the flushed history and the band; the existing tests plus the
+session verified the healthy parts (no phantom band rows, no missed shrink,
+flush ordering intact), so the blank runs in field captures come from this
+plus the CJK artifact, not from a pump defect.
+
+Eliminating the residue is structural to the portable insert path (the
+amendment's accepted cost): the shrink must move the band's top edge down
+across rows that only ever held viewport blanks. The recorded options:
+scroll-relocation (scroll_up(Δ) at the collapse so the blanks land at the
+old page top instead of next to the band — auto-scroll at idle makes this a
+quirk-matrix item, coupled to the scroll-while-streaming probes), holding
+the settled tail in-band across the collapse (a flush-contract change), or
+DEC row deletion (already rejected). Field severity decides; until then the
+residue stays the accepted cost the amendment records.
+
 ## The next ratatui bump moves the inline spike's accepted costs
 
 Consumer: the first ratatui version bump (0.30.3 or later).
