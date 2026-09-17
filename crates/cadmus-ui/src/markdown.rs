@@ -651,9 +651,9 @@ fn render_content(
     highlighter: &Highlighter,
 ) -> Content {
     match kind {
-        Kind::Paragraph => Content::plain(render_inlines(events, Modifiers::default()), 0),
+        Kind::Paragraph => Content::plain(render_inlines(events, Style::default()), 0),
         Kind::Heading => {
-            let lines = render_inlines(events, bold_mods());
+            let lines = render_inlines(events, heading_base());
             // Shape-identical to the paragraph form and unreclassifiable
             // once parsed: flushable even as the open tail.
             let open_flushable = lines.len();
@@ -835,8 +835,8 @@ fn render_group(group: &Group, base: usize, width: u16, highlighter: &Highlighte
         Kind::List { start } => {
             return render_list(group.events, *start, base, width, highlighter).0;
         }
-        Kind::Paragraph => render_inlines(group.events, Modifiers::default()),
-        Kind::Heading => render_inlines(group.events, bold_mods()),
+        Kind::Paragraph => render_inlines(group.events, Style::default()),
+        Kind::Heading => render_inlines(group.events, heading_base()),
         Kind::Quote => render_quote(group.events, width, highlighter),
         // Nested fences re-render whole via the one-shot path: the fast
         // path is reserved for top-level fences (the streaming case).
@@ -1101,9 +1101,12 @@ fn read_cells<'a>(
 /// A cell renders with its inline styling preserved; the header is bold.
 fn render_cell(events: &[Event<'static>], bold: bool) -> Line {
     let base = if bold {
-        bold_mods()
+        Style {
+            mods: bold_mods(),
+            ..Style::default()
+        }
     } else {
-        Modifiers::default()
+        Style::default()
     };
     let mut lines = render_inlines(events, base);
     if lines.len() <= 1 {
@@ -1155,6 +1158,17 @@ fn bold_mods() -> Modifiers {
     }
 }
 
+/// Headings render bold in the accent slot — the one chromatic hierarchy
+/// cue in prose; body text stays default per ADR-0017's grayscale-led
+/// discipline.
+fn heading_base() -> Style {
+    Style {
+        fg: Some(Color::Slot(Slot::Accent)),
+        mods: bold_mods(),
+        ..Style::default()
+    }
+}
+
 // ============================================================================
 // Inline rendering
 // ============================================================================
@@ -1166,13 +1180,14 @@ enum Mark {
     Image,
 }
 
-/// The style under the mark stack: modifiers combine through nesting; an
+/// The style under the mark stack: the base's foreground carries through
+/// (headings seed the accent slot); modifiers combine through nesting; an
 /// enclosing image resets to plain.
-fn current_style(stack: &[Mark], base: Modifiers) -> Style {
+fn current_style(stack: &[Mark], base: Style) -> Style {
     if stack.iter().any(|mark| matches!(mark, Mark::Image)) {
         return Style::default();
     }
-    let mut mods = base;
+    let mut mods = base.mods;
     for mark in stack {
         if let Mark::Mods(_, mark_mods) = mark {
             mods.bold |= mark_mods.bold;
@@ -1182,8 +1197,8 @@ fn current_style(stack: &[Mark], base: Modifiers) -> Style {
         }
     }
     Style {
-        fg: None,
-        bg: None,
+        fg: base.fg,
+        bg: base.bg,
         mods,
     }
 }
@@ -1206,9 +1221,9 @@ fn push_span(spans: &mut Vec<Span>, text: &str, style: Style) {
 }
 
 /// Render inline events to logical lines (one per hard-break-separated
-/// row). `base` seeds the modifiers (headings and table headers render
-/// bold).
-fn render_inlines(events: &[Event<'static>], base: Modifiers) -> Vec<Line> {
+/// row). `base` seeds the style: headings carry the accent slot bold,
+/// table headers render bold, paragraphs render default.
+fn render_inlines(events: &[Event<'static>], base: Style) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut stack: Vec<Mark> = Vec::new();
@@ -1597,6 +1612,14 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "Title");
         assert!(lines[0].spans.iter().all(|span| span.style.mods.bold));
+    }
+
+    #[test]
+    fn headings_render_in_the_accent_slot() {
+        let lines = render_document("# Title\n\n", 80, highlighter());
+        assert!(lines[0].spans.iter().all(|span| {
+            span.style.mods.bold && span.style.fg == Some(Color::Slot(Slot::Accent))
+        }));
     }
 
     #[test]

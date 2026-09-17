@@ -119,9 +119,11 @@ impl Transcript {
         if !self.blocks.is_empty() {
             lines.push(ir::Line::default()); // separator from the prior run
         }
+        // The accent "> " marker is the user-voice cue; the prompt body
+        // stays default (ADR-0017 slot wiring).
         lines.extend(text.lines().map(|line| {
             ir::Line::from_spans(vec![
-                ir::Span::slotted("> ", Slot::TextSubtle),
+                ir::Span::slotted("> ", Slot::Accent),
                 ir::Span::plain(line),
             ])
         }));
@@ -652,6 +654,20 @@ mod tests {
         let snapshot = snapshot(transcript);
         transcript.apply_flush(&snapshot.acks);
         (texts(&snapshot.flush_rows), texts(&snapshot.live_rows))
+    }
+
+    #[test]
+    fn the_user_prompt_marker_uses_the_accent_slot() {
+        let mut transcript = Transcript::new();
+        transcript.push_user("hi");
+        let snapshot = snapshot(&mut transcript);
+        let row = &snapshot.flush_rows[0];
+        assert_eq!(row.spans[0].content, "> ");
+        assert_eq!(
+            row.spans[0].style.fg,
+            Some(ratatui::style::Color::Blue),
+            "the accent slot resolves to the named blue at any depth"
+        );
     }
 
     #[test]

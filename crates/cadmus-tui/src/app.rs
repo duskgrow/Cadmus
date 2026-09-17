@@ -610,6 +610,18 @@ fn band_render<'a>(
         ctx.theme,
         ctx.depth,
     );
+    // The input zone reads as a surface (BgSubtle) — the one break in the
+    // transcript's flatness, double-coded with the accent prompt marker
+    // (ADR-0017 slot wiring).
+    let composer_base = ir_style(
+        &ir::Style {
+            bg: Some(ir::Color::Slot(Slot::BgSubtle)),
+            ..ir::Style::default()
+        },
+        ctx.theme,
+        ctx.depth,
+    );
+    let state_style = status_style(ctx.status, ctx.theme, ctx.depth);
     let status_left = ctx.label.to_string();
     let status_right = ctx.status.text();
     let layout = ctx.layout;
@@ -634,13 +646,13 @@ fn band_render<'a>(
                     layout.composer_rows,
                 )),
                 frame,
-                Style::default(),
+                composer_base,
                 selection,
             );
         }
         if layout.status_rows > 0 {
             let status_y = area.bottom().saturating_sub(1);
-            let status = status_line(&status_left, &status_right, area.width, subtle);
+            let status = status_line(&status_left, &status_right, area.width, subtle, state_style);
             frame.render_widget(
                 Paragraph::new(status),
                 clip(Rect::new(area.x, status_y, area.width, 1)),
@@ -651,8 +663,16 @@ fn band_render<'a>(
 
 /// The one-row status line: label left, run state right (ADR-0011 floor;
 /// the composable status surface of the 2026-09-11 amendment item 5 is its
-/// own slice). The state wins a narrow row: the label takes what is left.
-fn status_line(label: &str, state: &str, width: u16, style: Style) -> Line<'static> {
+/// own slice). The label and padding stay subtle; the state carries its
+/// status color (Info while active, Error on failure) — double-coded with
+/// the text per ADR-0017.
+fn status_line(
+    label: &str,
+    state: &str,
+    width: u16,
+    style: Style,
+    state_style: Style,
+) -> Line<'static> {
     let width = usize::from(width);
     let state_width = UnicodeWidthStr::width(state);
     let budget = width.saturating_sub(state_width + 2);
@@ -670,8 +690,27 @@ fn status_line(label: &str, state: &str, width: u16, style: Style) -> Line<'stat
     Line::from(vec![
         Span::styled(kept, style),
         Span::styled(" ".repeat(pad), style),
-        Span::styled(state.to_string(), style),
+        Span::styled(state.to_string(), state_style),
     ])
+}
+
+/// The status state's color, derived from the event-driven state itself
+/// (the state-truthfulness rule): active states read in `Info`, a failure
+/// in `Error`, idle stays subtle.
+fn status_style(status: &Status, theme: &Theme, depth: ColorDepth) -> Style {
+    let slot = match status {
+        Status::Idle => Slot::TextSubtle,
+        Status::Streaming | Status::Tool(_) => Slot::Info,
+        Status::Failed => Slot::Error,
+    };
+    ir_style(
+        &ir::Style {
+            fg: Some(ir::Color::Slot(slot)),
+            ..ir::Style::default()
+        },
+        theme,
+        depth,
+    )
 }
 
 /// A cloneable handle onto the process's stdout: handles are cheap

@@ -10,7 +10,11 @@ expression: "(render.flushable_len(), render.live_lines())"
                 Span {
                     text: "Notes",
                     style: Style {
-                        fg: None,
+                        fg: Some(
+                            Slot(
+                                Accent,
+                            ),
+                        ),
                         bg: None,
                         mods: Modifiers {
                             bold: true,

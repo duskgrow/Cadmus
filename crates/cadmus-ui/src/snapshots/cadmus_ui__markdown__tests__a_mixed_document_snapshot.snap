@@ -8,7 +8,11 @@ expression: "render_document(source, 60, highlighter())"
             Span {
                 text: "Release notes",
                 style: Style {
-                    fg: None,
+                    fg: Some(
+                        Slot(
+                            Accent,
+                        ),
+                    ),
                     bg: None,
                     mods: Modifiers {
                         bold: true,
