@@ -16,7 +16,10 @@
 //! - [`markdown`] — the streaming-markdown pipeline: newline-gated source
 //!   SSOT, incremental block rendering, shape-stable continuous flush
 //!   (ADR-0018 item 4).
+//! - [`diff`] — line diffs with inline word-level spans in the `diff-*`
+//!   slots (ADR-0018 item 8), shared by the approval prompt and `/diff`.
 
+pub mod diff;
 pub mod highlight;
 pub mod ir;
 pub mod markdown;
