@@ -571,7 +571,8 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                 // already being in scrollback (transcript docs).
                 self.pump()?;
                 let width = self.shell.width();
-                self.transcript.apply_sync(&sync, width, &self.highlighter);
+                self.transcript
+                    .apply_sync(&sync, width, &self.highlighter, resync);
                 // The attach baseline is authoritative for the dialog queue
                 // as well: an attach mid-wait replays the pending request(s)
                 // (ADR-0013 item 3), a lag re-attach drops what settled in

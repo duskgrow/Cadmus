@@ -281,22 +281,6 @@ the settled tail in-band across the collapse (a flush-contract change), or
 DEC row deletion (already rejected). Field severity decides; until then the
 residue stays the accepted cost the amendment records.
 
-## Settled approvals render no explicit record on attach
-
-Consumer: the session-attach payload slice (which already owns the
-fold/render seam this rides on).
-
-The transcript rebuilds from `RunState.messages`, and command events —
-including the recorded `ResolveApproval` — are not in that fold, so an
-approval that settled before an attach shows its consequence (the tool
-call, or the error result carrying the rejection) but no explicit
-approve/reject line in the rebuilt transcript, unlike the live path's
-`push_resolution`. The pending half is covered (an attach mid-wait
-re-seeds the dialog queue and the names map). Closing it means either
-folding command events into the attach payload's bounded window or
-projecting resolutions into the history — the slice's own design
-direction decides.
-
 ## The next ratatui bump moves the inline spike's accepted costs
 
 Consumer: the first ratatui version bump (0.30.3 or later).

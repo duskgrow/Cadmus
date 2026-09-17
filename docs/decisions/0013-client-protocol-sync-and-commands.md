@@ -127,8 +127,8 @@ sequenceDiagram
     C->>B: Attach(trace_id)
     B->>L: fold history
     B->>B: snapshot live aggregator
-    B-->>C: Sync: history, in_flight, as_of_seq
-    Note over C: baseline = history + in_flight; drop seq ≤ as_of_seq
+    B-->>C: Sync: history, in_flight, settled_approvals, as_of_seq
+    Note over C: baseline = history + in_flight + settled_approvals; drop seq ≤ as_of_seq
     B-->>C: Delta as_of_seq + 1
     B-->>C: Delta as_of_seq + 2
     alt client falls behind
@@ -176,6 +176,38 @@ SSOT without overpromising the wiring:
   `select!` against the command channel), so a stalled stream still ends
   on the provider's own error path. Turn boundaries, the approval wait and
   chunk gaps all honor it.
+
+## Amendment — 2026-09-17: settled approvals ride the attach baseline
+
+Item 3's baseline widens: `Sync { history, in_flight, settled_approvals,
+as_of_seq }`. A bounded window of approval batches that settled before
+the attach joins the handshake, so the rebuilt transcript renders their
+explicit approve/reject lines — the fold replays only their consequences
+(the executed calls, the error results carrying rejections), and the
+recorded `resolve_approval` command is not in `RunState.messages`.
+
+Why the aggregator pairs them: the request is live-only (item 2's
+durability split — the decision is the durable fact), so a bare resolve
+carries no call names. The broadcaster is the one component that saw both
+halves; on a recorded resolve it pairs the decisions with the pending
+request's calls into one `SettledApproval`. The window is render support,
+never the record — the trajectory log stays the SSOT — so a small
+in-process cap (32, oldest evicted) suffices.
+
+Wire discipline: additive field, serde-defaulted and omitted when empty,
+so serialized `Sync` payloads over approval-free runs are byte-identical
+to the locked shape (the insta gate stays green). The client rule is
+unchanged — the window's entries all predate `as_of_seq`, delivered once
+in the baseline.
+
+The TUI places a settled batch next to its consequence (the resolution
+lines precede the tool markers of the history message that proposed the
+batch), mirroring the live path's order; a batch whose message never
+folded (the crash window) renders at the history's end. On a lag re-sync
+the rebuild stays pre-flushed (item: a transcript that already rendered
+the run's content must not re-enter scrollback), so settlements inside
+the hole stay unrendered like the rest of the episode — the accepted,
+marker-flagged hole-loss policy.
 
 ## Consequences
 

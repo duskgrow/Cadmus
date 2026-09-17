@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use cadmus_contract::{
     Approval, Attachment, Command, Event as TraceEvent, EventKind, InFlight, LiveItem, LiveKind,
-    LiveUpdate, Message, PendingApproval, RunState, StreamChunk, Sync, ToolCall,
+    LiveUpdate, Message, PendingApproval, RunState, SettledApproval, StreamChunk, Sync, ToolCall,
 };
 use cadmus_tui::app::{App, AppConfig, RunDriver, RunHandle};
 use cadmus_tui::shell::InlineShell;
@@ -42,6 +42,10 @@ struct ScriptDriver {
     /// The attach baseline's pending approvals: every started run's sync
     /// carries them, scripting an attach mid-wait (ADR-0013 item 3).
     pending: Arc<Mutex<Vec<PendingApproval>>>,
+    /// The attach baseline's settled approvals: every started run's sync
+    /// carries them, scripting an attach after the settle (the rebuilt
+    /// transcript's explicit record).
+    settled: Arc<Mutex<Vec<SettledApproval>>>,
 }
 
 impl ScriptDriver {
@@ -51,6 +55,7 @@ impl ScriptDriver {
             commands: Arc::new(Mutex::new(Vec::new())),
             runs: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
+            settled: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -82,9 +87,10 @@ impl RunDriver for ScriptDriver {
         });
         let commands = Arc::clone(&self.commands);
         let pending = self.pending.lock().expect("pending").clone();
+        let settled = self.settled.lock().expect("settled").clone();
         RunHandle {
             attachment: Attachment {
-                sync: sync_with_pending(pending),
+                sync: sync_with_pending(pending, settled),
                 tail: Box::new(live_rx.into_iter()),
             },
             reattach: Box::new(|| panic!("no re-attach scripted")),
@@ -96,7 +102,7 @@ impl RunDriver for ScriptDriver {
     }
 }
 
-fn sync_with_pending(pending: Vec<PendingApproval>) -> Sync {
+fn sync_with_pending(pending: Vec<PendingApproval>, settled: Vec<SettledApproval>) -> Sync {
     Sync {
         history: RunState {
             trace_id: "tr-test".into(),
@@ -113,6 +119,7 @@ fn sync_with_pending(pending: Vec<PendingApproval>) -> Sync {
             open_turn: None,
             pending_approvals: pending,
         },
+        settled_approvals: settled,
         as_of_seq: 0,
     }
 }
@@ -130,11 +137,20 @@ fn boot_with_pending(
     world: &World,
     pending: Vec<PendingApproval>,
 ) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
+    boot_with_baseline(world, pending, Vec::new())
+}
+
+fn boot_with_baseline(
+    world: &World,
+    pending: Vec<PendingApproval>,
+    settled: Vec<SettledApproval>,
+) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
     let (input_tx, input) = ScriptedInput::channel();
     let guard = GuardSink::default();
     let shell = InlineShell::new(world.backend.clone(), guard, 2).expect("boot shell");
     let driver = ScriptDriver::new();
     *driver.pending.lock().expect("pending") = pending;
+    *driver.settled.lock().expect("settled") = settled;
     let app = App::new(
         shell,
         input,
@@ -163,6 +179,7 @@ impl ScriptDriver {
             commands: Arc::clone(&self.commands),
             runs: Arc::clone(&self.runs),
             pending: Arc::clone(&self.pending),
+            settled: Arc::clone(&self.settled),
         }
     }
 }
@@ -798,6 +815,61 @@ async fn an_attach_mid_wait_seeds_the_dialog_from_the_sync() {
             );
 
             // The run settles and the loop quits cleanly.
+            let run = driver.take_run();
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("change main"),
+                    Message::text(cadmus_contract::Role::Assistant, "done\n\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| status_row(&world) == "kimi·k2").await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// An attach after the settle: the baseline sync carries the settled
+/// batch, so the rebuilt transcript shows the explicit approve/reject
+/// record — not only the consequence the fold replays.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn an_attach_after_a_settle_renders_the_resolution_record() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot_with_baseline(
+                &world,
+                Vec::new(),
+                vec![SettledApproval {
+                    request_id: "ap-settled".into(),
+                    calls: gated_batch(),
+                    decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
+                }],
+            );
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            // No live item is ever published: the record renders from the
+            // sync's settled list alone.
+            settle_until(|| {
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .any(|row| row.contains("✓ approved write_file"))
+            })
+            .await;
+            assert!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .any(|row| row.contains("✗ rejected edit_file")),
+                "rows: {:?}",
+                world.nonblank_rows()
+            );
+
             let run = driver.take_run();
             drop(run.live);
             run.outcome

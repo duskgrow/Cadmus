@@ -16,13 +16,14 @@
 //! stamps every position). The stdio/NDJSON and phase-5 socket transports
 //! run the same contract-test suite.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cadmus_contract::testing::ProtocolSubject;
 use cadmus_contract::{
     Attachment, Command, CommandSource, Event, EventKind, InFlight, LiveItem, LiveKind, LiveSink,
-    LiveUpdate, OpenTurn, PendingApproval, Sync, TimedRecv, attrs,
+    LiveUpdate, OpenTurn, PendingApproval, SettledApproval, Sync, TimedRecv, attrs,
 };
 use cadmus_core::{MessageAssembler, replay_trace};
 
@@ -30,6 +31,13 @@ use cadmus_core::{MessageAssembler, replay_trace};
 /// a stalled renderer eventually lags — and is told to re-sync (item 5),
 /// never awaited.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4_096;
+
+/// How many settled approval batches the attach baseline remembers. An
+/// interactive session's settled batches are few; the window is render
+/// support for the rebuild (the trajectory log owns the record), so a
+/// small bound suffices — older settlements keep rendering through their
+/// consequences in the fold.
+pub const SETTLED_APPROVAL_WINDOW: usize = 32;
 
 /// One run's live-stream hub. See the crate docs.
 pub struct Broadcaster {
@@ -47,6 +55,10 @@ struct State {
     open_turn: Option<(u32, MessageAssembler)>,
     /// Approval requests not yet settled by a recorded resolve.
     pending_approvals: Vec<PendingApproval>,
+    /// Settled batches awaiting an attach, oldest first, capped at
+    /// [`SETTLED_APPROVAL_WINDOW`]: the sync baseline's explicit record of
+    /// decisions the log holds but the fold does not replay.
+    settled_approvals: VecDeque<SettledApproval>,
     /// The highest position published — the handshake's `as_of_seq`.
     last_seq: u64,
     subscribers: Vec<Subscription>,
@@ -108,6 +120,7 @@ impl Broadcaster {
         let sync = Sync {
             history: replay_trace(&state.events),
             in_flight,
+            settled_approvals: state.settled_approvals.iter().cloned().collect(),
             as_of_seq: state.last_seq,
         };
         let (sender, receiver) = mpsc::sync_channel(self.queue_capacity);
@@ -155,10 +168,30 @@ impl Broadcaster {
                             state.open_turn = None;
                         }
                     }
-                    EventKind::Command(Command::ResolveApproval { request_id, .. }) => {
-                        state
+                    EventKind::Command(Command::ResolveApproval {
+                        request_id,
+                        decisions,
+                        ..
+                    }) => {
+                        if let Some(position) = state
                             .pending_approvals
-                            .retain(|pending| pending.request_id != *request_id);
+                            .iter()
+                            .position(|pending| pending.request_id == *request_id)
+                        {
+                            // The pending entry carries the presented calls;
+                            // the recorded resolve carries the decisions.
+                            // Pairing them here is the aggregator's one
+                            // chance — the request itself is live-only.
+                            let pending = state.pending_approvals.remove(position);
+                            state.settled_approvals.push_back(SettledApproval {
+                                request_id: pending.request_id,
+                                calls: pending.calls,
+                                decisions: decisions.clone(),
+                            });
+                            while state.settled_approvals.len() > SETTLED_APPROVAL_WINDOW {
+                                state.settled_approvals.pop_front();
+                            }
+                        }
                     }
                     EventKind::RunFinished { .. } => {
                         state.open_turn = None;

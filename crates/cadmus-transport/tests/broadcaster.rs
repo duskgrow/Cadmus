@@ -72,6 +72,176 @@ fn only_the_matching_resolve_clears_a_pending_approval() {
     );
 }
 
+/// The settled window is bounded: past the cap the oldest settlements
+/// evict — the window is render support, the trajectory log owns the
+/// record.
+#[test]
+fn the_settled_window_evicts_the_oldest() {
+    let broadcaster = Broadcaster::new();
+    for item in fixed_sync_script() {
+        LiveSink::publish(&broadcaster, &item);
+    }
+    let total = cadmus_transport::SETTLED_APPROVAL_WINDOW + 1;
+    for index in 0..total {
+        let seq = 6 + u64::try_from(index).expect("index") * 2;
+        LiveSink::publish(
+            &broadcaster,
+            &cadmus_contract::LiveItem {
+                seq,
+                trace_id: "tr-suite".into(),
+                kind: cadmus_contract::LiveKind::ApprovalRequested {
+                    request_id: format!("ap{index}"),
+                    turn: 1,
+                    calls: vec![],
+                    wait_timeout: std::time::Duration::from_secs(300),
+                },
+            },
+        );
+        LiveSink::publish(
+            &broadcaster,
+            &cadmus_contract::LiveItem {
+                seq: seq + 1,
+                trace_id: "tr-suite".into(),
+                kind: cadmus_contract::LiveKind::Recorded {
+                    event: Box::new(cadmus_contract::Event::new(
+                        seq + 1,
+                        format!("e{}", seq + 1),
+                        "tr-suite".into(),
+                        format!("s{}", seq + 1),
+                        Some("s0".into()),
+                        1_757_200_000_007,
+                        cadmus_contract::EventKind::Command(Command::ResolveApproval {
+                            command_id: format!("cmd-{index}"),
+                            request_id: format!("ap{index}"),
+                            decisions: vec![cadmus_contract::Approval::Approved],
+                        }),
+                    )),
+                },
+            },
+        );
+    }
+    let attachment = broadcaster.attach();
+    let settled = &attachment.sync.settled_approvals;
+    assert_eq!(
+        settled.len(),
+        cadmus_transport::SETTLED_APPROVAL_WINDOW,
+        "the window holds the newest settlements"
+    );
+    assert_eq!(
+        settled[0].request_id, "ap1",
+        "the oldest settlement evicted (window starts at the second)"
+    );
+    assert_eq!(
+        settled[settled.len() - 1].request_id,
+        format!("ap{}", total - 1)
+    );
+}
+
+/// A resolve the aggregator never saw a request for (a lossy gap's answer)
+/// settles nothing: no settled record, and the pending queue untouched by
+/// a foreign id.
+#[test]
+fn a_resolve_for_an_unseen_request_settles_nothing() {
+    let broadcaster = Broadcaster::new();
+    for item in fixed_sync_script() {
+        LiveSink::publish(&broadcaster, &item);
+    }
+    LiveSink::publish(
+        &broadcaster,
+        &cadmus_contract::LiveItem {
+            seq: 6,
+            trace_id: "tr-suite".into(),
+            kind: cadmus_contract::LiveKind::Recorded {
+                event: Box::new(cadmus_contract::Event::new(
+                    6,
+                    "e6".into(),
+                    "tr-suite".into(),
+                    "s6".into(),
+                    Some("s0".into()),
+                    1_757_200_000_007,
+                    cadmus_contract::EventKind::Command(Command::ResolveApproval {
+                        command_id: "cmd-1".into(),
+                        request_id: "ap-never-published".into(),
+                        decisions: vec![cadmus_contract::Approval::Approved],
+                    }),
+                )),
+            },
+        },
+    );
+    let attachment = broadcaster.attach();
+    assert!(attachment.sync.settled_approvals.is_empty());
+    assert!(attachment.sync.in_flight.pending_approvals.is_empty());
+}
+
+/// Settled batches survive the run's terminal record: an attach after the
+/// finish replays the full history's decisions, not only the fold's
+/// consequences.
+#[test]
+fn settled_approvals_survive_run_finished() {
+    let broadcaster = Broadcaster::new();
+    for item in fixed_sync_script() {
+        LiveSink::publish(&broadcaster, &item);
+    }
+    LiveSink::publish(
+        &broadcaster,
+        &cadmus_contract::LiveItem {
+            seq: 6,
+            trace_id: "tr-suite".into(),
+            kind: cadmus_contract::LiveKind::ApprovalRequested {
+                request_id: "ap9".into(),
+                turn: 1,
+                calls: vec![],
+                wait_timeout: std::time::Duration::from_secs(300),
+            },
+        },
+    );
+    LiveSink::publish(
+        &broadcaster,
+        &cadmus_contract::LiveItem {
+            seq: 7,
+            trace_id: "tr-suite".into(),
+            kind: cadmus_contract::LiveKind::Recorded {
+                event: Box::new(cadmus_contract::Event::new(
+                    7,
+                    "e7".into(),
+                    "tr-suite".into(),
+                    "s7".into(),
+                    Some("s0".into()),
+                    1_757_200_000_007,
+                    cadmus_contract::EventKind::Command(Command::ResolveApproval {
+                        command_id: "cmd-1".into(),
+                        request_id: "ap9".into(),
+                        decisions: vec![cadmus_contract::Approval::Rejected {
+                            comment: Some("not today".into()),
+                        }],
+                    }),
+                )),
+            },
+        },
+    );
+    LiveSink::publish(
+        &broadcaster,
+        &cadmus_contract::LiveItem {
+            seq: 8,
+            trace_id: "tr-suite".into(),
+            kind: cadmus_contract::LiveKind::Recorded {
+                event: Box::new(cadmus_contract::Event::new(
+                    8,
+                    "e8".into(),
+                    "tr-suite".into(),
+                    "s8".into(),
+                    Some("s0".into()),
+                    1_757_200_000_008,
+                    cadmus_contract::EventKind::RunFinished { turns: 1 },
+                )),
+            },
+        },
+    );
+    let attachment = broadcaster.attach();
+    assert_eq!(attachment.sync.settled_approvals.len(), 1);
+    assert_eq!(attachment.sync.settled_approvals[0].request_id, "ap9");
+}
+
 /// The command channel: order, poll non-blocking, close semantics.
 #[tokio::test]
 async fn command_channel_is_fifo_and_close_aware() {

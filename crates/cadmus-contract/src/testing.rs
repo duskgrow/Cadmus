@@ -519,6 +519,54 @@ pub fn attach_during_approval_wait_shows_the_pending_request(subject: &impl Prot
     );
 }
 
+/// A batch that settled before the attach replays in the sync baseline
+/// (item 3): the request was live-only, so the aggregator pairs the
+/// recorded resolve with the calls it saw presented — the rebuilt
+/// transcript renders the explicit approve/reject lines, not only their
+/// consequences.
+pub fn attach_after_a_settled_approval_replays_it(subject: &impl ProtocolSubject) {
+    subject.publish(&start_run(1));
+    subject.publish(&recorded(
+        2,
+        EventKind::LlmRequest { trailer: None },
+        Some(1),
+    ));
+    subject.publish(&LiveItem {
+        seq: 3,
+        trace_id: SUITE_TRACE.into(),
+        kind: LiveKind::ApprovalRequested {
+            request_id: "ap9".into(),
+            turn: 1,
+            calls: vec![crate::ToolCall {
+                id: "call_1".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            }],
+            wait_timeout: std::time::Duration::from_secs(300),
+        },
+    });
+    subject.publish(&recorded(
+        4,
+        EventKind::Command(Command::ResolveApproval {
+            command_id: "cmd-1".into(),
+            request_id: "ap9".into(),
+            decisions: vec![crate::Approval::Approved],
+        }),
+        Some(1),
+    ));
+
+    let attached = subject.attach();
+    assert!(
+        attached.sync.in_flight.pending_approvals.is_empty(),
+        "the settle clears the pending queue"
+    );
+    let settled = &attached.sync.settled_approvals;
+    assert_eq!(settled.len(), 1, "the settled batch rides the baseline");
+    assert_eq!(settled[0].request_id, "ap9");
+    assert_eq!(settled[0].calls[0].name, "write_file");
+    assert_eq!(settled[0].decisions, vec![crate::Approval::Approved]);
+}
+
 /// Lag recovery (item 5): a subscriber that falls behind learns it via the
 /// lag marker and re-attaches for a complete fresh baseline — the in-flight
 /// replica folds deltas the lagging client never saw.
@@ -636,6 +684,12 @@ macro_rules! client_protocol_tests {
             fn attach_during_approval_wait_shows_the_pending_request() {
                 let subject = ($factory)();
                 $crate::testing::attach_during_approval_wait_shows_the_pending_request(&subject);
+            }
+
+            #[test]
+            fn attach_after_a_settled_approval_replays_it() {
+                let subject = ($factory)();
+                $crate::testing::attach_after_a_settled_approval_replays_it(&subject);
             }
 
             #[test]

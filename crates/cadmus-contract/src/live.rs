@@ -11,7 +11,8 @@
 //!
 //! The one client rule (item 4): positions are a per-run total order
 //! ([`Event::seq`] and [`LiveItem::seq`] draw from the same sequence); an
-//! attaching client's baseline is `Sync.history + Sync.in_flight`, and it
+//! attaching client's baseline is `Sync.history + Sync.in_flight +
+//! Sync.settled_approvals` (ADR-0013's 2026-09-17 amendment), and it
 //! then drops every live item with `seq ≤ Sync.as_of_seq` and applies the
 //! rest — idempotent and retry-safe over lossy transports.
 
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Command, Event, RunState, StreamChunk, ToolCall, Usage};
+use crate::{Approval, Command, Event, RunState, StreamChunk, ToolCall, Usage};
 
 /// One item on a run's live stream: a monotonic `seq` (the same sequence
 /// durable events draw from) plus the payload.
@@ -90,6 +91,12 @@ pub struct Sync {
     pub history: RunState,
     /// The live aggregator's current state.
     pub in_flight: InFlight,
+    /// Approval batches settled before this attach, a bounded window in
+    /// log order: the rebuilt transcript's explicit approve/reject lines
+    /// (the fold carries only their consequences). Omitted when empty, so
+    /// the payload is unchanged for runs without approvals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled_approvals: Vec<SettledApproval>,
     /// The position `history + in_flight` is current as of: apply only live
     /// items with `seq` greater than this.
     pub as_of_seq: u64,
@@ -162,6 +169,25 @@ pub struct PendingApproval {
     /// mid-wait reconstructs the same dialog, deadline naming included
     /// (`ApprovalRequested`'s field, aggregated unchanged).
     pub wait_timeout: Duration,
+}
+
+/// One approval batch settled by a recorded `resolve_approval` — the attach
+/// baseline's explicit record of the decision (the live path renders it
+/// when the resolve arrives; an attach after the settle would otherwise
+/// show only the consequence). The request itself was live-only, so the
+/// aggregator pairs the recorded resolve with the calls it saw presented.
+/// A bounded window, oldest first: render support for the rebuild, never
+/// the record — the trajectory log owns the durable fact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettledApproval {
+    pub request_id: String,
+    /// The presented batch's calls, as the request carried them — the
+    /// rebuild names the decision per call, like the live path.
+    pub calls: Vec<ToolCall>,
+    /// The recorded decisions, one per presented call; a short reply
+    /// denies the remainder (the gate's rule), so the rebuild renders
+    /// the missing tail as rejections too.
+    pub decisions: Vec<Approval>,
 }
 
 /// One attach's yield: the handshake plus the live tail. `tail` ends when

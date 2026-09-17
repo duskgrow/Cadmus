@@ -34,7 +34,7 @@ pub use event::{
 };
 pub use live::{
     Attachment, CallSnapshot, CommandSource, InFlight, LiveItem, LiveKind, LiveSink, LiveUpdate,
-    OpenTurn, PendingApproval, Sync, TimedRecv, TurnSnapshot,
+    OpenTurn, PendingApproval, SettledApproval, Sync, TimedRecv, TurnSnapshot,
 };
 pub use log::{ArtifactSink, EventSink, LogError};
 pub use message::{ContentPart, Message, Role, ToolCall};

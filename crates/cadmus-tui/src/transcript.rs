@@ -20,7 +20,8 @@
 use std::collections::HashMap;
 
 use cadmus_contract::{
-    Approval, Command, Event, EventKind, LiveItem, LiveKind, Message, Role, Status, Sync, attrs,
+    Approval, Command, Event, EventKind, LiveItem, LiveKind, Message, Role, SettledApproval,
+    Status, Sync, attrs,
 };
 use cadmus_ui::highlight::Highlighter;
 use cadmus_ui::ir::{self, Slot};
@@ -184,15 +185,17 @@ impl Transcript {
     }
 
     /// Apply the attach/re-attach baseline (ADR-0013 items 3–5). The app
-    /// pumps first, so everything flushable is already in scrollback; the
-    /// rebuilt history then lands pre-flushed (the old scrollback rendering
-    /// is the same fold, deterministic) — content that fell into the lag
-    /// hole stays unrendered there (headless parity: the trajectory log is
-    /// the intact record; the app marks the hole by flushing a resync
-    /// marker row directly, outside the block model, so replays never
-    /// reorder it against transferred rows). Whether this attach IS a
-    /// re-sync is the drainer's fact, carried on the feed — never
-    /// re-derived from view state.
+    /// pumps first, so everything flushable is already in scrollback; on a
+    /// re-sync (`resync`) the rebuilt history then lands pre-flushed (the old
+    /// scrollback rendering is the same fold, deterministic) — content that
+    /// fell into the lag hole stays unrendered there (headless parity: the
+    /// trajectory log is the intact record; the app marks the hole by
+    /// flushing a resync marker row directly, outside the block model, so
+    /// replays never reorder it against transferred rows). Whether this
+    /// attach IS a re-sync is the drainer's fact, carried on the feed —
+    /// never re-derived from view state. A first attach owns nothing of the
+    /// baseline, so the rebuild renders block by block through the normal
+    /// pump.
     ///
     /// The in-flight tail continues close to where the old one left off:
     /// same turn ⇒ its flushed prefix (already in scrollback) transfers by
@@ -205,7 +208,7 @@ impl Transcript {
     /// presentation loss bounded to the lag window, next to the certain
     /// alternative of duplicating the whole prefix on every resync. Theme
     /// and depth play no part: the transfer measures lines, never rows.
-    pub fn apply_sync(&mut self, sync: &Sync, width: u16, highlighter: &Highlighter) {
+    pub fn apply_sync(&mut self, sync: &Sync, width: u16, highlighter: &Highlighter, resync: bool) {
         let transfer = match (self.open_turn, self.blocks.last()) {
             (Some(turn), Some(Block::Agent(agent))) => Some((turn, agent.acked)),
             _ => None,
@@ -217,11 +220,41 @@ impl Transcript {
         self.approvals.clear();
         self.as_of_seq = sync.as_of_seq;
 
-        for message in &sync.history.messages {
-            self.push_history_message(message);
+        // Settled approvals whose batch rode one of the history messages'
+        // calls replay where the live path rendered them — after the
+        // turn's text, before its tool markers. A batch whose message
+        // never folded (the crash window) lands at the end, in window
+        // order: the explicit record, wherever its consequence allows.
+        let mut placed: Vec<Vec<&SettledApproval>> = vec![Vec::new(); sync.history.messages.len()];
+        let mut unplaced: Vec<&SettledApproval> = Vec::new();
+        for settled in &sync.settled_approvals {
+            let at = sync.history.messages.iter().position(|message| {
+                message
+                    .tool_calls()
+                    .any(|call| settled.calls.iter().any(|c| c.id == call.id))
+            });
+            match at {
+                Some(at) => placed[at].push(settled),
+                None => unplaced.push(settled),
+            }
         }
-        // History lands pre-flushed (see the doc comment).
-        self.flushed = self.blocks.len();
+        for (message, settled) in sync.history.messages.iter().zip(placed) {
+            self.push_history_message(message, &settled);
+        }
+        for settled in unplaced {
+            let names: Vec<String> = settled.calls.iter().map(|call| call.name.clone()).collect();
+            self.blocks
+                .push(Block::Static(resolution_lines(&names, &settled.decisions)));
+        }
+        // On a re-sync the rebuild lands pre-flushed: this transcript
+        // already rendered the run's content and the pre-sync pump flushed
+        // everything flushable, so the deterministic rebuild must not
+        // re-enter scrollback (the transfer above is the one exception). A
+        // first attach owns nothing of the baseline — the rebuild renders
+        // block by block through the normal pump.
+        if resync {
+            self.flushed = self.blocks.len();
+        }
         if let Some(open) = &sync.in_flight.open_turn {
             self.blocks.push(Block::Agent(Agent {
                 stream: {
@@ -519,38 +552,23 @@ impl Transcript {
     }
 
     /// The recorded resolution of one approval request: the durable half of
-    /// the approval (the request was live-only). Names what was decided from
-    /// the request the transcript saw — approved calls quiet, rejected calls
-    /// in the error slot. A missing decision is a denial (the gate's
-    /// short-reply rule), so it reads as a rejection. The settled request
-    /// leaves the map; a resolve the transcript never saw a request for (a
-    /// lag hole) names the request id itself.
+    /// the approval (the request was live-only). A resolve the transcript
+    /// never saw a request for (a lag hole) names the request id itself.
     fn push_resolution(&mut self, request_id: &str, decisions: &[Approval]) {
         let names = self
             .approvals
             .remove(request_id)
             .unwrap_or_else(|| vec![request_id.to_string()]);
-        let mut approved = Vec::new();
-        let mut rejected = Vec::new();
-        for (index, name) in names.iter().enumerate() {
-            match decisions.get(index) {
-                Some(Approval::Approved) => approved.push(name.as_str()),
-                _ => rejected.push(name.as_str()),
-            }
-        }
-        let mut lines = Vec::new();
-        if !approved.is_empty() {
-            lines.push(subtle_line(format!("✓ approved {}", approved.join(", "))));
-        }
-        if !rejected.is_empty() {
-            lines.push(error_line(format!("✗ rejected {}", rejected.join(", "))));
-        }
-        self.blocks.push(Block::Static(lines));
+        self.blocks
+            .push(Block::Static(resolution_lines(&names, decisions)));
     }
 
     /// History rebuild for [`Transcript::apply_sync`]: messages map onto the
     /// same block shapes the live path builds (deterministic fold).
-    fn push_history_message(&mut self, message: &Message) {
+    /// `settled` carries the approval batches whose calls this message
+    /// proposed — their resolution lines precede its tool markers, the
+    /// live path's order.
+    fn push_history_message(&mut self, message: &Message, settled: &[&SettledApproval]) {
         match message.role {
             Role::User => self.push_user(&message.text_body()),
             Role::Assistant => {
@@ -565,6 +583,12 @@ impl Transcript {
                         },
                         acked: 0,
                     }));
+                }
+                for settled in settled {
+                    let names: Vec<String> =
+                        settled.calls.iter().map(|call| call.name.clone()).collect();
+                    self.blocks
+                        .push(Block::Static(resolution_lines(&names, &settled.decisions)));
                 }
                 for call in message.tool_calls() {
                     self.calls.insert(call.id.clone(), call.name.clone());
@@ -651,6 +675,29 @@ fn error_line(text: impl Into<String>) -> ir::Line {
     ir::Line::from_spans(vec![ir::Span::slotted(text, Slot::Error)])
 }
 
+/// The resolution's display lines, shared by the live path and the attach
+/// rebuild: approved calls quiet, rejected calls in the error slot. A
+/// missing decision is a denial (the gate's short-reply rule), so it reads
+/// as a rejection.
+fn resolution_lines(names: &[String], decisions: &[Approval]) -> Vec<ir::Line> {
+    let mut approved = Vec::new();
+    let mut rejected = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        match decisions.get(index) {
+            Some(Approval::Approved) => approved.push(name.as_str()),
+            _ => rejected.push(name.as_str()),
+        }
+    }
+    let mut lines = Vec::new();
+    if !approved.is_empty() {
+        lines.push(subtle_line(format!("✓ approved {}", approved.join(", "))));
+    }
+    if !rejected.is_empty() {
+        lines.push(error_line(format!("✗ rejected {}", rejected.join(", "))));
+    }
+    lines
+}
+
 /// The `selfevol.turn` attribute as the loop stamps it (1-based) — the same
 /// helper the transport keeps private; the frontend cannot link core or
 /// transport (ADR-0018 item 10), so the five lines live here too.
@@ -712,6 +759,30 @@ mod tests {
                 warnings: Vec::new(),
             },
         )
+    }
+
+    /// An attach baseline over the given history and settled window — the
+    /// two inputs the rebuild placement consumes.
+    fn sync_with(messages: Vec<Message>, settled: Vec<SettledApproval>) -> Sync {
+        Sync {
+            history: RunState {
+                trace_id: "tr-test".into(),
+                provider: None,
+                model: None,
+                messages,
+                turns: 0,
+                warnings: Vec::new(),
+                scores: Vec::new(),
+                dangling_tool_calls: Vec::new(),
+                finished: None,
+            },
+            in_flight: InFlight {
+                open_turn: None,
+                pending_approvals: Vec::new(),
+            },
+            settled_approvals: settled,
+            as_of_seq: 0,
+        }
     }
 
     fn snapshot(transcript: &mut Transcript) -> Snapshot {
@@ -928,9 +999,10 @@ mod tests {
                 }),
                 pending_approvals: Vec::new(),
             },
+            settled_approvals: Vec::new(),
             as_of_seq: 4,
         };
-        transcript.apply_sync(&sync, 80, highlighter());
+        transcript.apply_sync(&sync, 80, highlighter(), true);
         let (flushed, live) = pump(&mut transcript);
         // The rebuilt tail re-shows only what never left (one paragraph —
         // soft breaks join into one logical line), and nothing re-flushes.
@@ -1091,9 +1163,10 @@ mod tests {
                     wait_timeout: std::time::Duration::from_secs(300),
                 }],
             },
+            settled_approvals: Vec::new(),
             as_of_seq: 0,
         };
-        transcript.apply_sync(&sync, 80, highlighter());
+        transcript.apply_sync(&sync, 80, highlighter(), false);
         transcript.apply_item(&recorded(
             1,
             1,
@@ -1105,5 +1178,93 @@ mod tests {
         ));
         let (flushed, _) = pump(&mut transcript);
         assert_eq!(flushed, vec!["✓ approved write_file, edit_file"]);
+    }
+
+    /// The settle-before-attach replay: the settled batch rides the sync
+    /// baseline and the rebuild renders its record where the live path
+    /// did — after the turn's text, before its tool markers, with the
+    /// rejection's consequence still behind.
+    #[test]
+    fn a_settled_approval_replays_between_the_text_and_the_tool_markers() {
+        let calls = gated_calls();
+        let assistant = cadmus_contract::Message {
+            role: Role::Assistant,
+            content: vec![
+                cadmus_contract::ContentPart::Text {
+                    text: "will do".into(),
+                },
+                cadmus_contract::ContentPart::ToolCall {
+                    call: calls[0].clone(),
+                },
+                cadmus_contract::ContentPart::ToolCall {
+                    call: calls[1].clone(),
+                },
+            ],
+            tool_call_id: None,
+            is_error: false,
+            opaque: None,
+        };
+        let sync = sync_with(
+            vec![
+                cadmus_contract::Message::user("change it"),
+                assistant,
+                cadmus_contract::Message::tool_error(
+                    "c2",
+                    serde_json::json!("rejected by a human"),
+                ),
+            ],
+            vec![cadmus_contract::SettledApproval {
+                request_id: "ap1".into(),
+                calls: calls.clone(),
+                decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
+            }],
+        );
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        // A first attach owns nothing of the baseline: the rebuild renders
+        // through the normal pump, the settled record in the live order.
+        let (flushed, live) = pump(&mut transcript);
+        assert_eq!(live, Vec::<String>::new());
+        assert_eq!(
+            flushed,
+            vec![
+                "> change it",
+                "",
+                "will do",
+                "✓ approved write_file",
+                "✗ rejected edit_file",
+                "→ write_file",
+                "→ edit_file",
+                "✗ edit_file: rejected by a human",
+            ]
+        );
+    }
+
+    /// The crash window: the batch settled but its turn's response never
+    /// folded, so no message carries its calls. The explicit record still
+    /// renders — after the history, in window order.
+    #[test]
+    fn a_settled_approval_without_a_matching_message_renders_at_the_end() {
+        let sync = sync_with(
+            vec![cadmus_contract::Message::user("change it")],
+            vec![cadmus_contract::SettledApproval {
+                request_id: "ap1".into(),
+                calls: gated_calls(),
+                decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
+            }],
+        );
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let (flushed, live) = pump(&mut transcript);
+        assert_eq!(live, Vec::<String>::new());
+        assert_eq!(
+            flushed,
+            vec![
+                "> change it",
+                "",
+                "✓ approved write_file",
+                "✗ rejected edit_file",
+            ]
+        );
     }
 }
