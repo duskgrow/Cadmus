@@ -917,12 +917,12 @@ fn render_list(
             item_lines.extend(child_lines);
         }
         if item_lines.is_empty() {
-            // An empty item renders as its bare marker.
-            item_lines.push(Line::plain(format!(
-                "{}{}",
-                " ".repeat(base),
-                marker.trim_end()
-            )));
+            // An empty item renders as its bare marker (the marker is
+            // chrome, slotted like every other one).
+            item_lines.push(Line::from_spans(vec![Span::slotted(
+                format!("{}{}", " ".repeat(base), marker.trim_end()),
+                Slot::TextSubtle,
+            )]));
         }
         lines.extend(item_lines);
     }
@@ -938,11 +938,23 @@ fn splice_marker(line: &mut Line, base: usize, marker: &str, child_base: usize) 
     while prefix.len() < child_base {
         prefix.push(' ');
     }
+    // The marker (indent included) is chrome: the TextSubtle slot, the same
+    // tier as the quote prefix and table separators (ADR-0017).
+    let marker = Span::slotted(prefix, Slot::TextSubtle);
     match line.spans.first_mut() {
         Some(first) if first.style == Style::default() && first.text.trim().is_empty() => {
-            first.text = prefix;
+            first.text = marker.text;
+            first.style = marker.style;
         }
-        _ => line.spans.insert(0, Span::plain(prefix)),
+        // A nested list as the first child arrives carrying its own marker
+        // line whose leading indent is this `child_base`; the parent marker
+        // absorbs that indent (the same absorption the first arm performs on
+        // a paragraph's padding span), keeping the nest at two spaces.
+        Some(first) if first.text.starts_with(&" ".repeat(child_base)) => {
+            first.text = first.text[child_base..].to_string();
+            line.spans.insert(0, marker);
+        }
+        _ => line.spans.insert(0, marker),
     }
 }
 
@@ -1039,7 +1051,7 @@ fn transpose_table(header: &[Line], rows: &[Vec<Line>], cols: usize) -> Vec<Line
             if let Some(head) = header.get(ci) {
                 spans.extend(head.spans.iter().cloned());
             }
-            spans.push(Span::plain(": "));
+            spans.push(Span::slotted(": ", Slot::TextSubtle));
             if let Some(cell) = row.get(ci) {
                 spans.extend(cell.spans.iter().cloned());
             }
@@ -1607,6 +1619,28 @@ mod tests {
     }
 
     #[test]
+    fn list_markers_render_in_the_subtle_slot() {
+        for (source, expected) in [
+            ("- a\n- b\n\n", vec!["- a", "- b"]),
+            ("3. a\n\n", vec!["3. a"]),
+            ("- a\n  - b\n\n", vec!["- a", "  - b"]),
+            ("-\n\n", vec!["-"]),
+            ("- - x\n\n", vec!["- - x"]),
+        ] {
+            let lines = render_document(source, 80, highlighter());
+            assert_eq!(texts(&lines), expected, "the shape of {source:?}");
+            for line in &lines {
+                assert_eq!(
+                    line.spans[0].style.fg,
+                    Some(Color::Slot(Slot::TextSubtle)),
+                    "the marker span of {:?}",
+                    line.text()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn atx_headings_render_bold_in_paragraph_shape() {
         let lines = render_document("# Title\n\n", 80, highlighter());
         assert_eq!(lines.len(), 1);
@@ -1779,6 +1813,16 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.text == "x" && span.style.mods.italic)
+        );
+        let sep = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text == ": ")
+            .expect("the record separator span");
+        assert_eq!(
+            sep.style.fg,
+            Some(Color::Slot(Slot::TextSubtle)),
+            "the transposed separator matches the flat table's"
         );
     }
 

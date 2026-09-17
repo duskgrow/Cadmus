@@ -120,7 +120,11 @@ expression: "render_document(source, 60, highlighter())"
             Span {
                 text: "- ",
                 style: Style {
-                    fg: None,
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
                     bg: None,
                     mods: Modifiers {
                         bold: false,
@@ -154,7 +158,11 @@ expression: "render_document(source, 60, highlighter())"
             Span {
                 text: "- ",
                 style: Style {
-                    fg: None,
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
                     bg: None,
                     mods: Modifiers {
                         bold: false,
@@ -203,7 +211,11 @@ expression: "render_document(source, 60, highlighter())"
             Span {
                 text: "  - ",
                 style: Style {
-                    fg: None,
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
                     bg: None,
                     mods: Modifiers {
                         bold: false,
