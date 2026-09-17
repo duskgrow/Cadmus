@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cadmus_contract::{ChatRequest, Command, Message, Provider};
+use cadmus_contract::{ChatRequest, Command, LiveSink, Message, Provider};
 use cadmus_core::{AgentLoop, ClientProtocol, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
@@ -102,17 +102,26 @@ impl RunDriver for TuiDriver {
         let first = broadcaster.attach();
         let (sender, commands) = command_channel();
         let app_commands = sender.clone();
-        let resolver = approval::AutoResolver::new(
-            broadcaster.clone(),
-            sender,
-            approval::unattended(self.approve_writes),
-        );
+        // The interactive prompt is the default: the app's live feed sees
+        // approval requests directly and answers them over the command
+        // channel. `--yes` keeps the unattended policy even in the TUI (the
+        // operator pre-authorized the mutations); the rules engine owns
+        // this decision next slice (ADR-0011's 2026-09-11 amendment item 3).
+        let live: Arc<dyn LiveSink> = if self.approve_writes {
+            Arc::new(approval::AutoResolver::new(
+                broadcaster.clone(),
+                sender,
+                approval::approve_all,
+            ))
+        } else {
+            broadcaster.clone()
+        };
         let agent = AgentLoop::new(
             self.provider.clone(),
             tools,
             pipeline,
             ClientProtocol {
-                live: Arc::new(resolver),
+                live,
                 commands: Arc::new(commands),
             },
             self.max_turns,

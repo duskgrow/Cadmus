@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use cadmus_contract::{
-    Command, Event, EventKind, LiveItem, LiveKind, Message, Role, Status, Sync, attrs,
+    Approval, Command, Event, EventKind, LiveItem, LiveKind, Message, Role, Status, Sync, attrs,
 };
 use cadmus_ui::highlight::Highlighter;
 use cadmus_ui::ir::{self, Slot};
@@ -97,6 +97,10 @@ pub struct Transcript {
     as_of_seq: u64,
     /// call id → tool name, so a failed result's marker can name its tool.
     calls: HashMap<String, String>,
+    /// Approval request id → the presented calls' tool names, so the
+    /// recorded resolution can name what was decided (the request itself is
+    /// live-only; the resolution is the durable fact — ADR-0013 item 6).
+    approvals: HashMap<String, Vec<String>>,
 }
 
 impl Transcript {
@@ -108,6 +112,7 @@ impl Transcript {
             open_turn: None,
             as_of_seq: 0,
             calls: HashMap::new(),
+            approvals: HashMap::new(),
         }
     }
 
@@ -161,9 +166,17 @@ impl Transcript {
                 self.agent_block(*turn).stream.push_delta(text);
                 Light::Streaming
             }
-            LiveKind::ApprovalRequested { .. } => {
-                // Answered by the wiring's auto-resolver for now; the
-                // interactive dialog lands with the approval slice.
+            LiveKind::ApprovalRequested {
+                request_id, calls, ..
+            } => {
+                // The app holds the pending request for the band's dialog;
+                // the transcript remembers the names so the recorded
+                // resolution can name what was decided (the request itself
+                // never reaches the log).
+                self.approvals.insert(
+                    request_id.clone(),
+                    calls.iter().map(|call| call.name.clone()).collect(),
+                );
                 Light::None
             }
             LiveKind::Recorded { event } => self.apply_event(event),
@@ -201,6 +214,7 @@ impl Transcript {
         self.flushed = 0;
         self.open_turn = None;
         self.calls.clear();
+        self.approvals.clear();
         self.as_of_seq = sync.as_of_seq;
 
         for message in &sync.history.messages {
@@ -236,8 +250,24 @@ impl Transcript {
                 agent.acked = lines;
             }
         }
-        // `Sync.in_flight.pending_approvals` renders nothing yet (see
-        // `apply_item`'s ApprovalRequested arm).
+        // The attach baseline seeds the approval names too: an attach
+        // mid-wait replays the pending request(s) (ADR-0013 item 3), and
+        // the recorded resolution names them.
+        self.approvals
+            .extend(sync.in_flight.pending_approvals.iter().map(|pending| {
+                (
+                    pending.request_id.clone(),
+                    pending.calls.iter().map(|call| call.name.clone()).collect(),
+                )
+            }));
+    }
+
+    /// The client rule's current baseline (ADR-0013 item 4): the app
+    /// consults it so the approval queue only takes requests the transcript
+    /// will actually apply.
+    #[must_use]
+    pub fn as_of_seq(&self) -> u64 {
+        self.as_of_seq
     }
 
     /// One materialization pass over the unflushed blocks: the flush plan
@@ -461,6 +491,14 @@ impl Transcript {
                 self.push_user(text);
                 Light::None
             }
+            EventKind::Command(Command::ResolveApproval {
+                request_id,
+                decisions,
+                ..
+            }) => {
+                self.push_resolution(request_id, decisions);
+                Light::None
+            }
             EventKind::RunFinished { .. } => {
                 if event.status == Status::Error {
                     let detail = event
@@ -478,6 +516,36 @@ impl Transcript {
             }
             _ => Light::None,
         }
+    }
+
+    /// The recorded resolution of one approval request: the durable half of
+    /// the approval (the request was live-only). Names what was decided from
+    /// the request the transcript saw — approved calls quiet, rejected calls
+    /// in the error slot. A missing decision is a denial (the gate's
+    /// short-reply rule), so it reads as a rejection. The settled request
+    /// leaves the map; a resolve the transcript never saw a request for (a
+    /// lag hole) names the request id itself.
+    fn push_resolution(&mut self, request_id: &str, decisions: &[Approval]) {
+        let names = self
+            .approvals
+            .remove(request_id)
+            .unwrap_or_else(|| vec![request_id.to_string()]);
+        let mut approved = Vec::new();
+        let mut rejected = Vec::new();
+        for (index, name) in names.iter().enumerate() {
+            match decisions.get(index) {
+                Some(Approval::Approved) => approved.push(name.as_str()),
+                _ => rejected.push(name.as_str()),
+            }
+        }
+        let mut lines = Vec::new();
+        if !approved.is_empty() {
+            lines.push(subtle_line(format!("✓ approved {}", approved.join(", "))));
+        }
+        if !rejected.is_empty() {
+            lines.push(error_line(format!("✗ rejected {}", rejected.join(", "))));
+        }
+        self.blocks.push(Block::Static(lines));
     }
 
     /// History rebuild for [`Transcript::apply_sync`]: messages map onto the
@@ -527,7 +595,7 @@ impl Default for Transcript {
 }
 
 /// A quiet activity/marker line.
-fn subtle_line(text: impl Into<String>) -> ir::Line {
+pub(crate) fn subtle_line(text: impl Into<String>) -> ir::Line {
     ir::Line::from_spans(vec![ir::Span::slotted(text, Slot::TextSubtle)])
 }
 
@@ -535,8 +603,9 @@ fn subtle_line(text: impl Into<String>) -> ir::Line {
 /// run of same-name calls stays distinguishable (field report 2026-09-16:
 /// 23 bare `→ list_dir` rows read as duplicates). The marker is one quiet
 /// line, never a table — the expandable transcript view is the approval/diff
-/// slice's.
-fn tool_marker(call: &cadmus_contract::ToolCall) -> String {
+/// slice's. `pub(crate)`: the approval section's call lines mirror the shape
+/// (one home per fact — the marker format lives here).
+pub(crate) fn tool_marker(call: &cadmus_contract::ToolCall) -> String {
     match tool_target(call) {
         Some(target) => format!("→ {} {target}", call.name),
         None => format!("→ {}", call.name),
@@ -891,5 +960,148 @@ mod tests {
         ));
         let (flushed, _) = pump(&mut transcript);
         assert_eq!(flushed, vec!["> also check tests", ""]);
+    }
+
+    fn approval_request(seq: u64, request_id: &str, calls: Vec<ToolCall>) -> LiveItem {
+        LiveItem {
+            seq,
+            trace_id: "tr-test".into(),
+            kind: LiveKind::ApprovalRequested {
+                request_id: request_id.into(),
+                turn: 1,
+                calls,
+            },
+        }
+    }
+
+    fn gated_calls() -> Vec<ToolCall> {
+        vec![
+            ToolCall {
+                id: "c1".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "c2".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({}),
+            },
+        ]
+    }
+
+    #[test]
+    fn an_approved_resolution_names_the_calls_quietly() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+        // The request itself renders nothing; the resolution names the calls.
+        transcript.apply_item(&recorded(
+            2,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-1".into(),
+                request_id: "ap1".into(),
+                decisions: vec![Approval::Approved, Approval::Approved],
+            }),
+        ));
+        let (flushed, live) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["✓ approved write_file, edit_file"]);
+        assert_eq!(live, Vec::<String>::new());
+        // The settled request leaves the map: a duplicate resolve names the id.
+        transcript.apply_item(&recorded(
+            3,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-2".into(),
+                request_id: "ap1".into(),
+                decisions: vec![Approval::Approved],
+            }),
+        ));
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["✓ approved ap1"]);
+    }
+
+    #[test]
+    fn a_rejected_resolution_reads_in_the_error_slot() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+        transcript.apply_item(&recorded(
+            2,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-1".into(),
+                request_id: "ap1".into(),
+                decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
+            }),
+        ));
+        let snapshot = snapshot(&mut transcript);
+        let rows = texts(&snapshot.flush_rows);
+        assert_eq!(rows, vec!["✓ approved write_file", "✗ rejected edit_file"]);
+        let rejected = &snapshot.flush_rows[1];
+        assert_eq!(
+            rejected.spans[0].style.fg,
+            Some(ratatui::style::Color::Red),
+            "the rejection rides the error slot"
+        );
+    }
+
+    #[test]
+    fn a_short_reply_denies_the_remainder() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+        transcript.apply_item(&recorded(
+            2,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-1".into(),
+                request_id: "ap1".into(),
+                decisions: vec![Approval::Approved],
+            }),
+        ));
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(
+            flushed,
+            vec!["✓ approved write_file", "✗ rejected edit_file"]
+        );
+    }
+
+    #[test]
+    fn a_sync_mid_wait_seeds_the_resolution_names() {
+        // Attach during the wait: the dialog's request replays through the
+        // sync baseline, and the recorded resolution still names the calls.
+        let mut transcript = Transcript::new();
+        let sync = Sync {
+            history: RunState {
+                trace_id: "tr-test".into(),
+                provider: None,
+                model: None,
+                messages: Vec::new(),
+                turns: 0,
+                warnings: Vec::new(),
+                scores: Vec::new(),
+                dangling_tool_calls: Vec::new(),
+                finished: None,
+            },
+            in_flight: InFlight {
+                open_turn: None,
+                pending_approvals: vec![cadmus_contract::PendingApproval {
+                    request_id: "ap9".into(),
+                    turn: 1,
+                    calls: gated_calls(),
+                }],
+            },
+            as_of_seq: 0,
+        };
+        transcript.apply_sync(&sync, 80, highlighter());
+        transcript.apply_item(&recorded(
+            1,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-1".into(),
+                request_id: "ap9".into(),
+                decisions: vec![Approval::Approved, Approval::Approved],
+            }),
+        ));
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["✓ approved write_file, edit_file"]);
     }
 }

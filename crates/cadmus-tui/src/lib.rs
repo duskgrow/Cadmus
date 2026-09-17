@@ -18,6 +18,9 @@
 //!   cursor/word ops, selection, bounded snapshot undo, hard-wrap layout
 //!   with cursor placement, and the paste-burst heuristic (ADR-0018 item 6,
 //!   ADR-0012's editor-grade-input floor).
+//! - [`approval`] — the interactive approval surface (ADR-0018 item 8): the
+//!   pending request's band section and the pure `ToolCall` → diff-lines
+//!   mapping, built from call arguments only.
 //! - [`stream`] — the stream widget: the band's live tail over `cadmus-ui`'s
 //!   markdown pipeline, owning the flush contract with the shell (ADR-0018
 //!   items 2 and 4).
@@ -42,6 +45,7 @@
 //!   and the real-terminal boot.
 
 pub mod app;
+pub mod approval;
 pub mod composer;
 pub mod cursor;
 pub mod debounce;

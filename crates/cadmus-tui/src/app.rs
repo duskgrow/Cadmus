@@ -15,13 +15,18 @@
 //! snapshot's measurement can justify.
 //!
 //! Key handling is a minimal fixed map (chars, editing ops, Enter submits,
-//! Esc interrupts, Ctrl-C quits) — ADR-0018 item 6's mode × key → command
-//! layer with keymap-as-data is its own slice, and the default bindings are
-//! decided in its binding-design task.
+//! Esc interrupts, Ctrl-C quits, y/n answer a pending approval) —
+//! ADR-0018 item 6's mode × key → command layer with keymap-as-data is its
+//! own slice, and the default bindings are decided in its binding-design
+//! task.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 
-use cadmus_contract::{Attachment, Command, LiveItem, LiveUpdate, Message, Sync};
+use cadmus_contract::{
+    Approval, Attachment, Command, EventKind, LiveItem, LiveKind, LiveUpdate, Message,
+    PendingApproval, Sync,
+};
 use cadmus_ui::highlight::Highlighter;
 use cadmus_ui::ir::{self, Slot};
 use cadmus_ui::theme::{ColorDepth, Theme};
@@ -37,6 +42,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
+use crate::approval;
 use crate::composer::Composer;
 use crate::cursor::CursorTracker;
 use crate::debounce::ResizeDebounce;
@@ -203,7 +209,45 @@ pub struct App<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> 
     feed: Option<mpsc::Receiver<FeedMsg>>,
     status: Status,
     command_seq: u64,
+    /// Approval requests awaiting the user's decision, FIFO — the band
+    /// renders the head and y/n answer it. One batch at a time is
+    /// deliberate: the gate presents one batch per turn and awaits it, so
+    /// the queue holds a single request in practice; the FIFO covers an
+    /// attach mid-wait (the sync baseline replays the pending list) and the
+    /// protocol's general shape without a modal stack. Cleared when the run
+    /// ends — a dead run's channel drop already denied the request, the app
+    /// must not answer it.
+    approvals: VecDeque<QueuedApproval>,
     quit: bool,
+}
+
+/// One queued request plus its section's logical lines. The section is
+/// materialized once, at enqueue (and sync-reseed), not per frame: the
+/// diff is `O(content)`, and the render re-wraps at frame rate — caching
+/// the lines keeps the per-pump work bounded by the per-call budget
+/// (`approval::section_lines`' contract), not by the file being written.
+struct QueuedApproval {
+    request: PendingApproval,
+    section: Vec<ir::Line>,
+}
+
+/// The head request's display rows at `width`: the cached section lines
+/// wrapped — wrapping is the only per-frame work ([`QueuedApproval`]'s
+/// contract).
+fn wrap_section(
+    approvals: &VecDeque<QueuedApproval>,
+    width: u16,
+    theme: &Theme,
+    depth: ColorDepth,
+) -> Vec<Line<'static>> {
+    wrap_rows(
+        approvals
+            .front()
+            .map_or(&[][..], |queued| queued.section.as_slice()),
+        width,
+        theme,
+        depth,
+    )
 }
 
 impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, I> {
@@ -240,6 +284,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             feed: None,
             status: Status::Idle,
             command_seq: 0,
+            approvals: VecDeque::new(),
             quit: false,
         }
     }
@@ -292,11 +337,22 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             depth,
             label,
             status,
+            approvals,
             ..
         } = &mut *self;
         let width = shell.width();
         let snapshot = transcript.snapshot(width, highlighter, theme, *depth);
-        let layout = band_layout(shell, composer, snapshot.live_rows.len());
+        // The approval section wraps its cached lines at this width: the row
+        // count feeds the height function and the rows themselves feed the
+        // band render, so flush math and pixels can never disagree (the
+        // snapshot contract's shape).
+        let approval_rows = wrap_section(approvals, width, theme, *depth);
+        let layout = band_layout(
+            shell,
+            composer,
+            snapshot.live_rows.len(),
+            approval_rows.len(),
+        );
         let mut band = BandCtx {
             composer,
             label,
@@ -306,7 +362,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             depth: *depth,
         };
         if !snapshot.flush_rows.is_empty() {
-            let render = band_render(snapshot.live_rows.clone(), &mut band);
+            let render = band_render(snapshot.live_rows.clone(), approval_rows.clone(), &mut band);
             // Flush first, then confirm: the ack contract is a *successful*
             // shell flush, so a structural failure must die un-acked.
             shell.flush(&snapshot.flush_rows, render)?;
@@ -316,10 +372,10 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             // The recreation seam: the cursor tracker answers the anchor
             // query without a CPR round-trip (cursor.rs), so no quiesce
             // window — the event stream stays live across recreation.
-            let render = band_render(snapshot.live_rows.clone(), &mut band);
+            let render = band_render(snapshot.live_rows.clone(), approval_rows.clone(), &mut band);
             shell.set_height(layout.band_height, render)?;
         }
-        let render = band_render(snapshot.live_rows, &mut band);
+        let render = band_render(snapshot.live_rows, approval_rows, &mut band);
         shell.draw(render);
         Ok(())
     }
@@ -348,6 +404,18 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
     /// The minimal fixed keymap (module docs). Everything the composer can
     /// do is a plain method, so the item-6 keymap layer can rebind any of it.
     fn on_key(&mut self, key: KeyEvent) {
+        // The approval dialog's modal capture, explicit at the dispatch
+        // point (keymap-as-data is item 6's own slice): bare y/n answers
+        // the pending request; every other key — composer edits, Esc's
+        // interrupt, Ctrl-C's quit — falls through untouched.
+        if !self.approvals.is_empty()
+            && key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Char('y' | 'n'))
+        {
+            self.resolve_approval(matches!(key.code, KeyCode::Char('y')));
+            self.requester.schedule_frame();
+            return;
+        }
         let composer = &mut self.composer;
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match (key.code, key.modifiers) {
@@ -412,10 +480,87 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
         self.command_seq += 1;
     }
 
+    /// Queue a pending request: the section's logical lines are built here,
+    /// once per request ([`QueuedApproval`]'s contract).
+    fn queue_approval(&mut self, pending: PendingApproval) {
+        let section = approval::section_lines(&pending);
+        self.approvals.push_back(QueuedApproval {
+            request: pending,
+            section,
+        });
+    }
+
+    /// y/n on the pending request: one decision per presented call, sent
+    /// through the run's command sink — the same path as the interrupt (the
+    /// app is a client; commands are the only upstream, ADR-0013 item 6).
+    /// The decision is batch-wide for now: per-call decisions (and the
+    /// gate's per-call settlement) land with the rules-engine composition
+    /// slice. Typed rejection comments are a follow-up landing with the
+    /// keymap slice; `None` denies by the gate's conservative default. The
+    /// human-wait deny timeout (ADR-0008 item 4's pairing rule) is the
+    /// gate's mechanism: five minutes unanswered settles the batch as a
+    /// recorded rejection, which also clears this dialog (the app's feed
+    /// drops the settled request).
+    fn resolve_approval(&mut self, approved: bool) {
+        let Some(run) = &self.run else { return };
+        let Some(queued) = self.approvals.pop_front() else {
+            return;
+        };
+        let pending = queued.request;
+        let decisions = pending
+            .calls
+            .iter()
+            .map(|_| {
+                if approved {
+                    Approval::Approved
+                } else {
+                    Approval::Rejected { comment: None }
+                }
+            })
+            .collect();
+        (run.commands)(Command::ResolveApproval {
+            command_id: format!("tui-{}", self.command_seq),
+            request_id: pending.request_id,
+            decisions,
+        });
+        self.command_seq += 1;
+    }
+
     fn on_feed(&mut self, msg: FeedMsg) -> io::Result<()> {
         match msg {
             FeedMsg::Item(item) => {
+                // The one client rule (ADR-0013 item 4) guards the dialog
+                // queue too: a stale request must not reopen it. The
+                // baseline is read before the item applies.
+                let fresh = item.seq > self.transcript.as_of_seq();
                 let light = self.transcript.apply_item(&item);
+                if fresh
+                    && let LiveKind::ApprovalRequested {
+                        request_id,
+                        turn,
+                        calls,
+                    } = &item.kind
+                {
+                    self.queue_approval(PendingApproval {
+                        request_id: request_id.clone(),
+                        turn: *turn,
+                        calls: calls.clone(),
+                    });
+                }
+                // A resolution that settled elsewhere — the gate's deny
+                // timeout, a resolve that raced the dialog — drops the
+                // matching prompt: answering a settled request is a no-op
+                // at the gate, but the dialog must not linger. The client
+                // rule guards here too: a stale replay must not clear a
+                // dialog the attach baseline re-seeded.
+                if fresh
+                    && let LiveKind::Recorded { event } = &item.kind
+                    && let EventKind::Command(Command::ResolveApproval { request_id, .. }) =
+                        &event.kind
+                {
+                    self.approvals
+                        .retain(|queued| queued.request.request_id != *request_id);
+                }
                 self.status.note(light);
                 self.requester.schedule_frame();
             }
@@ -425,6 +570,14 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                 self.pump()?;
                 let width = self.shell.width();
                 self.transcript.apply_sync(&sync, width, &self.highlighter);
+                // The attach baseline is authoritative for the dialog queue
+                // as well: an attach mid-wait replays the pending request(s)
+                // (ADR-0013 item 3), a lag re-attach drops what settled in
+                // the hole.
+                self.approvals.clear();
+                for pending in &sync.in_flight.pending_approvals {
+                    self.queue_approval(pending.clone());
+                }
                 if resync {
                     // The hole marker: flushed directly, outside the block
                     // model, so replays never reorder it (transcript docs).
@@ -444,8 +597,14 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                             &self.theme,
                             self.depth,
                         );
-                        let layout =
-                            band_layout(&mut self.shell, &self.composer, snapshot.live_rows.len());
+                        let approval_rows =
+                            wrap_section(&self.approvals, width, &self.theme, self.depth);
+                        let layout = band_layout(
+                            &mut self.shell,
+                            &self.composer,
+                            snapshot.live_rows.len(),
+                            approval_rows.len(),
+                        );
                         let mut band = BandCtx {
                             composer: &mut self.composer,
                             label: &self.label,
@@ -454,7 +613,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                             theme: &self.theme,
                             depth: self.depth,
                         };
-                        let render = band_render(snapshot.live_rows, &mut band);
+                        let render = band_render(snapshot.live_rows, approval_rows, &mut band);
                         self.shell.flush(&marker, render)?;
                     }
                 }
@@ -465,6 +624,9 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             FeedMsg::Outcome(outcome) => {
                 self.feed = None;
                 self.run = None;
+                // A dead run owns no dialog: its gate already denied every
+                // pending request (the channel-drop rule).
+                self.approvals.clear();
                 match outcome {
                     Ok(messages) => {
                         self.history = messages;
@@ -502,6 +664,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
         let band_rows =
             self.transcript
                 .unflushed_rows(cols, &self.highlighter, &self.theme, self.depth);
+        let approval_rows = wrap_section(&self.approvals, cols, &self.theme, self.depth);
         let Self {
             shell,
             transcript,
@@ -513,7 +676,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             status,
             ..
         } = &mut *self;
-        let layout = band_layout(shell, composer, band_rows.len());
+        let layout = band_layout(shell, composer, band_rows.len(), approval_rows.len());
         let mut band = BandCtx {
             composer,
             label,
@@ -522,7 +685,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             theme,
             depth: *depth,
         };
-        let render = band_render(band_rows, &mut band);
+        let render = band_render(band_rows, approval_rows, &mut band);
         shell.on_resize(
             cols,
             rows,
@@ -564,10 +727,12 @@ fn band_layout<B: Backend<Error = io::Error> + Clone, W: Write>(
     shell: &mut InlineShell<B, W>,
     composer: &Composer,
     live_rows: usize,
+    approval_rows: usize,
 ) -> BandLayout {
     layout::layout(&LayoutInput {
         screen_rows: shell.screen_rows(),
         stream_rows: u16::try_from(live_rows).unwrap_or(u16::MAX),
+        approval_rows: u16::try_from(approval_rows).unwrap_or(u16::MAX),
         composer_rows: composer.desired_rows(shell.width()),
     })
 }
@@ -586,12 +751,14 @@ struct BandCtx<'a> {
 }
 
 /// The band render closure: owned rows in, widgets drawn top to bottom —
-/// stream tail (bottom-anchored in its slice), composer, status line. Every
-/// slice is intersected with the frame area: during the stale-frame window
-/// around a resize, the split math may exceed the band, and clipping beats
+/// stream tail (bottom-anchored in its slice), the approval section
+/// (head-clipped to its slice), composer, status line. Every slice is
+/// intersected with the frame area: during the stale-frame window around a
+/// resize, the split math may exceed the band, and clipping beats
 /// panicking.
 fn band_render<'a>(
     rows: Vec<Line<'static>>,
+    approval: Vec<Line<'static>>,
     ctx: &'a mut BandCtx<'_>,
 ) -> impl FnOnce(&mut Frame<'_>) + 'a {
     let subtle = ir_style(
@@ -636,8 +803,25 @@ fn band_render<'a>(
             Paragraph::new(shown),
             clip(Rect::new(area.x, stream_y, area.width, shown_len)),
         );
+        if layout.approval_rows > 0 {
+            // Head-clipped: the header and call lines are the
+            // decision-relevant part; a clipped diff tail waits for the
+            // cumulative, file-backed diff slice (layout docs).
+            let take = usize::from(layout.approval_rows);
+            let shown: Vec<Line> = approval.iter().take(take).cloned().collect();
+            let approval_y = area.y + layout.stream_rows;
+            frame.render_widget(
+                Paragraph::new(shown),
+                clip(Rect::new(
+                    area.x,
+                    approval_y,
+                    area.width,
+                    layout.approval_rows,
+                )),
+            );
+        }
         if layout.composer_rows > 0 {
-            let composer_y = area.y + layout.stream_rows;
+            let composer_y = area.y + layout.stream_rows + layout.approval_rows;
             composer.render(
                 clip(Rect::new(
                     area.x,
@@ -765,6 +949,7 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
     let band = layout::layout(&LayoutInput {
         screen_rows,
         stream_rows: 0,
+        approval_rows: 0,
         composer_rows: 1,
     })
     .band_height;

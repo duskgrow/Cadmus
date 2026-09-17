@@ -167,6 +167,7 @@ fn split(stream_rows: u16) -> layout::BandLayout {
     layout::layout(&LayoutInput {
         screen_rows: SCREEN_ROWS,
         stream_rows,
+        approval_rows: 0,
         composer_rows: 1,
     })
 }
