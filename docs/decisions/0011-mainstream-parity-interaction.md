@@ -124,10 +124,11 @@ differ, this amendment wins.
    allow/ask/deny rules gain matching over tool input (OpenCode globs,
    Codex execpolicy precedents) and grant scope — once / turn / session /
    persisted (Codex `acceptForSession` and `scope: turn|session`
-   precedents). The four approval modes remain, as presets over the rule
-   layer (OpenCode's presets-as-sugar). The scoped-rules open item keeps
-   its consumer (the config-layer implementation); this amendment sets the
-   direction.
+   precedents; the scope list is superseded by the 2026-09-19 amendment
+   below, which drops `turn`). The four approval modes remain, as presets
+   over the rule layer (OpenCode's presets-as-sugar). The scoped-rules
+   open item keeps its consumer (the config-layer implementation); this
+   amendment sets the direction.
 4. **Rewind becomes a four-action algebra.** The existing restore split
    (conversation-only / code-only / both) and edit-and-fork are joined by
    summarize (from-here / up-to-here — rewind merged with targeted
@@ -155,6 +156,39 @@ differ, this amendment wins.
    renderer demonstrates the escalation pattern (auto `/diff` side panel
    at ≥144 columns); an opt-in escalation strategy may be evaluated at
    implementation — no philosophy change.
+
+## Amendment — 2026-09-19: grant scope is a lifetime, not a turn
+
+Maintainer's call, answerable ahead of the config layer because the rule
+engine already exists (`crates/cadmus/src/rules.rs`): the 2026-09-11
+amendment's `turn` scope is dropped, and the lattice is restated as **once
+/ session / persisted**, where a persisted grant's _location_ is a
+settings-precedence level (ADR-0012: `project` / `user`, later `system`),
+not a peer of the lifetimes. `profile` joins the persisted locations when
+personas exist (the persona-profiles open item).
+
+Why `turn` was a pseudo-requirement: a turn-scoped grant means "allowed
+now, re-prompted next turn" — a permission whose revocation is a boundary
+the approver does not control, and whose only distinct content is "the
+rest of this batch". That content needs no grant at all: the gate already
+presents a turn's gated calls as one request (ADR-0008 item 4, the batch
+presentation rule), so answering the batch is N single decisions and a
+"this batch" shortcut is a dialog affordance over those decisions. A
+turn-wide allow degrades to `once` (single call, the conservative
+direction); a user who wants coverage past the call says `session`
+explicitly. Codex's `scope: turn` precedent is therefore rejected, not
+copied.
+
+The lifetimes keep their meanings: `once` covers the next matching call,
+`session` every subsequent matching call within the run, `persisted`
+survives into later runs by being written to a rule file. `Scope` is the
+extension point, and `Rules::decide` no longer takes a turn at all —
+nothing in the lattice needs one.
+
+Deferred to the config slice, with the scoped-rules open item as the
+consumer: the `persisted` variant itself, the store's keyed shape, and the
+merge rules between stored rules and session grants (the open item now
+lists those questions and the workspace-as-untrusted-input asymmetry).
 
 ## Consequences
 

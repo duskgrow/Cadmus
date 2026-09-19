@@ -1,9 +1,10 @@
 //! The client-side approval rule engine (ADR-0011 item 3 as amended
-//! 2026-09-11 item 3; ADR-0018 item 8): ordered per-tool rules over the
-//! call's subject, each carrying a decision and a grant scope. The approval
-//! modes are presets over this rule layer — the modes-as-sugar shape of
-//! `OpenCode`'s presets (the amendment's precedents: Codex `acceptForSession`,
-//! `scope: turn|session`, `OpenCode` globs).
+//! 2026-09-11 item 3 and 2026-09-19; ADR-0018 item 8): ordered per-tool
+//! rules over the call's subject, each carrying a decision and a grant
+//! scope. The approval modes are presets over this rule layer — the
+//! modes-as-sugar shape of `OpenCode`'s presets (the amendment's precedents:
+//! Codex `acceptForSession`, `OpenCode` globs; Codex's `scope: turn` is the
+//! precedent the 2026-09-19 amendment rejects).
 //!
 //! This module is deliberately pure and unwired: no IO, no transport, no
 //! TUI or config types. A follow-up slice composes it into the interactive
@@ -42,14 +43,21 @@
 //! Scope bookkeeping: only `Allow` rules grant. A grant is recorded the
 //! first time the engine is asked about a call matching such a rule; the
 //! grant's own (recording) call still goes through the rule's decision.
-//! [`Scope::Once`] covers the next matching call only, [`Scope::Turn`]
-//! covers matching calls in the granting call's turn (fixed at recording;
-//! a call in a new turn does not re-grant), and [`Scope::Session`] covers
-//! every subsequent matching call. After a grant lapses, the rule's matches
-//! fall back to `Ask` rather than to a later, broader rule — the first
-//! match claims the call for good, and an expired allowance prompting again
-//! is the safe direction. `Ask` and `Deny` rules re-decide every matching
-//! call, so their scope field is inert.
+//! [`Scope::Once`] covers the next matching call only and [`Scope::Session`]
+//! covers every subsequent matching call. After a grant lapses, the rule's
+//! matches fall back to `Ask` rather than to a later, broader rule — the
+//! first match claims the call for good, and an expired allowance prompting
+//! again is the safe direction. `Ask` and `Deny` rules re-decide every
+//! matching call, so their scope field is inert.
+//!
+//! Scope is a *lifetime*, and the two above are the lifetimes that need no
+//! store (ADR-0011's 2026-09-19 amendment). A grant that outlives the run is
+//! `persisted`, and where it is written — the workspace/project file or the
+//! user-global one (ADR-0012's precedence levels), plus a profile level once
+//! personas exist — is a *location*, not a third lifetime. `turn` is not a
+//! scope at all: the gate already presents a turn's gated calls as one
+//! request (ADR-0008 item 4), so "the rest of this batch" is an affordance
+//! over N single decisions, never a grant the next turn silently loses.
 //!
 //! Assumption: the engine only ever sees calls the approval gate has already
 //! flagged as needing approval (today the `Effect::Mutation` tools
@@ -59,11 +67,13 @@
 //! rule denies every call no explicit rule claims, so a future mutation
 //! tool cannot prompt its way past the mode's intent.
 //!
-//! Deferred, each with its consumer: the `persisted` grant scope needs the
-//! TOML config layer (ADR-0018 item 7) — its consumer is the config slice,
-//! and [`Scope`] is the extension point; the `plan` mode is its own slice
-//! (read-only exploration plus a plan file plus mode-transition UX);
-//! `shell_exec` is in no preset (phase 3, ADR-0008 item 1).
+//! Deferred, each with its consumer: the `persisted` lifetime, and with it
+//! the merge rules between stored rules and session grants (the scoped-rules
+//! open item), needs the TOML config layer (ADR-0018 item 7) — its consumer
+//! is the config slice, and [`Scope`] is the extension point; the `plan` mode
+//! is its own slice (read-only exploration plus a plan file plus
+//! mode-transition UX); `shell_exec` is in no preset (phase 3, ADR-0008
+//! item 1).
 
 use cadmus_contract::ToolCall;
 
@@ -86,17 +96,16 @@ pub enum Decision {
 }
 
 /// How far an [`Decision::Allow`] rule's grant extends past its granting
-/// call (the 2026-09-11 amendment's once / turn / session scopes).
+/// call (the 2026-09-19 amendment's lifetimes; the module doc says why a
+/// stored grant's location is not one of these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// The grant covers the next matching call only.
     Once,
-    /// The grant covers matching calls in the granting call's turn.
-    Turn,
     /// The grant covers every subsequent matching call.
     Session,
-    // The amendment's fourth scope, `persisted`, is deliberately absent: it
-    // needs the TOML config layer (ADR-0018 item 7) — see the module doc.
+    // The amendment's `persisted` lifetime is deliberately absent: it needs
+    // the TOML config layer (ADR-0018 item 7) — see the module doc.
 }
 
 /// One ordered entry of a rule table. Rules are tried in order; the first
@@ -122,17 +131,14 @@ pub struct Rule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Grant {
     scope: Scope,
-    /// The granting call's turn ([`Scope::Turn`] compares against it).
-    turn: u32,
     /// [`Scope::Once`]: consumed by the next matching call.
     once_used: bool,
 }
 
 impl Grant {
-    fn covers(&self, turn: u32) -> bool {
+    fn covers(&self) -> bool {
         match self.scope {
             Scope::Session => true,
-            Scope::Turn => self.turn == turn,
             Scope::Once => !self.once_used,
         }
     }
@@ -189,15 +195,12 @@ impl Rules {
         Self::new(mutation_rules(Decision::Allow))
     }
 
-    /// The verdict for `call` in `turn`.
+    /// The verdict for `call`.
     ///
-    /// `turn` is the turn the call arrives in (the gate's
-    /// `ApprovalRequested.turn`); it is stored on the grant so a
-    /// [`Scope::Turn`] rule can tell same-turn from later calls. Grants are
-    /// recorded here, on the engine's first matching call — never at
-    /// construction — and the recording call still answers with its rule's
-    /// decision (see the module doc for the full scope semantics).
-    pub fn decide(&mut self, call: &ToolCall, turn: u32) -> Decision {
+    /// Grants are recorded here, on the engine's first matching call — never
+    /// at construction — and the recording call still answers with its
+    /// rule's decision (see the module doc for the full scope semantics).
+    pub fn decide(&mut self, call: &ToolCall) -> Decision {
         let subject = subject(call);
         for (index, rule) in self.rules.iter().enumerate() {
             if !glob_match(&rule.tool, &call.name) {
@@ -214,21 +217,19 @@ impl Rules {
                 return rule.decision;
             }
             return match &mut self.grants[index] {
-                Some(grant) if grant.covers(turn) => {
+                Some(grant) if grant.covers() => {
                     if grant.scope == Scope::Once {
                         grant.once_used = true;
                     }
                     Decision::Allow
                 }
-                // Lapsed (the Once grant spent, or a later turn): the first
-                // match still claims the call, and a gated call without a
-                // live grant prompts again rather than falling through to a
-                // later, broader rule.
+                // Lapsed (the Once grant spent): the first match still claims
+                // the call, and a gated call without a live grant prompts
+                // again rather than falling through to a later, broader rule.
                 Some(_) => Decision::Ask,
                 None => {
                     self.grants[index] = Some(Grant {
                         scope: rule.scope,
-                        turn,
                         once_used: false,
                     });
                     rule.decision
@@ -354,13 +355,13 @@ mod tests {
             rule("write_file", None, Decision::Allow, Scope::Session),
             rule("write_file", None, Decision::Deny, Scope::Session),
         ]);
-        assert_eq!(allow_first.decide(&write("a"), 1), Decision::Allow);
+        assert_eq!(allow_first.decide(&write("a")), Decision::Allow);
 
         let mut deny_first = Rules::new(vec![
             rule("write_file", None, Decision::Deny, Scope::Session),
             rule("write_file", None, Decision::Allow, Scope::Session),
         ]);
-        assert_eq!(deny_first.decide(&write("a"), 1), Decision::Deny);
+        assert_eq!(deny_first.decide(&write("a")), Decision::Deny);
     }
 
     #[test]
@@ -368,7 +369,7 @@ mod tests {
         let mut rules = Rules::new(vec![allow(Scope::Session)]);
         // Not a prefix match: the longer name claims no rule.
         assert_eq!(
-            rules.decide(&call("write_files", json!({ "path": "a" })), 1),
+            rules.decide(&call("write_files", json!({ "path": "a" }))),
             Decision::Ask
         );
     }
@@ -377,7 +378,7 @@ mod tests {
     fn a_star_tool_glob_catches_every_tool() {
         let mut rules = Rules::new(vec![rule("*", None, Decision::Deny, Scope::Session)]);
         assert_eq!(
-            rules.decide(&call("any_future_tool", json!({ "path": "a" })), 1),
+            rules.decide(&call("any_future_tool", json!({ "path": "a" }))),
             Decision::Deny
         );
     }
@@ -440,24 +441,21 @@ mod tests {
             Decision::Allow,
             Scope::Session,
         )]);
-        assert_eq!(rules.decide(&write("src/main.rs"), 1), Decision::Allow);
-        assert_eq!(
-            rules.decide(&write("src/deep/nested.rs"), 1),
-            Decision::Allow
-        );
-        assert_eq!(rules.decide(&write("docs/readme.md"), 1), Decision::Ask);
+        assert_eq!(rules.decide(&write("src/main.rs")), Decision::Allow);
+        assert_eq!(rules.decide(&write("src/deep/nested.rs")), Decision::Allow);
+        assert_eq!(rules.decide(&write("docs/readme.md")), Decision::Ask);
     }
 
     #[test]
     fn an_unclaimed_call_is_asked() {
         let mut empty = Rules::new(vec![]);
-        assert_eq!(empty.decide(&write("a"), 1), Decision::Ask);
+        assert_eq!(empty.decide(&write("a")), Decision::Ask);
 
         // The ask-presets claim no other tool: they fall through to Ask
         // (read-only is the closed preset — its catch-all denies).
         let mut approve_writes = Rules::approve_writes();
         assert_eq!(
-            approve_writes.decide(&call("grep", json!({ "pattern": "x" })), 1),
+            approve_writes.decide(&call("grep", json!({ "pattern": "x" }))),
             Decision::Ask
         );
     }
@@ -466,39 +464,29 @@ mod tests {
     fn an_once_grant_covers_the_next_matching_call_only() {
         let mut rules = Rules::new(vec![allow(Scope::Once)]);
         // The granting call goes through the rule's decision...
-        assert_eq!(rules.decide(&write("a"), 1), Decision::Allow);
+        assert_eq!(rules.decide(&write("a")), Decision::Allow);
         // ...the grant covers exactly the next matching call...
-        assert_eq!(rules.decide(&write("b"), 1), Decision::Allow);
-        // ...and is spent afterwards, whatever the turn.
-        assert_eq!(rules.decide(&write("c"), 1), Decision::Ask);
-        assert_eq!(rules.decide(&write("d"), 2), Decision::Ask);
+        assert_eq!(rules.decide(&write("b")), Decision::Allow);
+        // ...and is spent afterwards.
+        assert_eq!(rules.decide(&write("c")), Decision::Ask);
+        assert_eq!(rules.decide(&write("d")), Decision::Ask);
     }
 
     #[test]
     fn unrelated_calls_do_not_consume_an_once_grant() {
         let mut rules = Rules::new(vec![allow(Scope::Once)]);
-        assert_eq!(rules.decide(&write("a"), 1), Decision::Allow);
+        assert_eq!(rules.decide(&write("a")), Decision::Allow);
         // A call no rule claims cannot spend the grant.
-        assert_eq!(rules.decide(&edit("b"), 1), Decision::Ask);
-        assert_eq!(rules.decide(&write("c"), 1), Decision::Allow);
-        assert_eq!(rules.decide(&write("d"), 1), Decision::Ask);
-    }
-
-    #[test]
-    fn a_turn_grant_expires_when_the_granting_turn_ends() {
-        let mut rules = Rules::new(vec![allow(Scope::Turn)]);
-        assert_eq!(rules.decide(&write("a"), 3), Decision::Allow); // the granting call, turn 3
-        assert_eq!(rules.decide(&write("b"), 3), Decision::Allow); // same turn covered
-        assert_eq!(rules.decide(&write("c"), 4), Decision::Ask); // a later turn is not
-        // A later turn does not re-grant: the grant stays anchored at turn 3.
-        assert_eq!(rules.decide(&write("d"), 5), Decision::Ask);
+        assert_eq!(rules.decide(&edit("b")), Decision::Ask);
+        assert_eq!(rules.decide(&write("c")), Decision::Allow);
+        assert_eq!(rules.decide(&write("d")), Decision::Ask);
     }
 
     #[test]
     fn a_session_grant_covers_every_subsequent_call() {
         let mut rules = Rules::new(vec![allow(Scope::Session)]);
-        for turn in 1..=5 {
-            assert_eq!(rules.decide(&write("loop.rs"), turn), Decision::Allow);
+        for _ in 0..5 {
+            assert_eq!(rules.decide(&write("loop.rs")), Decision::Allow);
         }
     }
 
@@ -511,25 +499,24 @@ mod tests {
             rule("write_file", None, Decision::Allow, Scope::Once),
             rule("write_file", None, Decision::Allow, Scope::Session),
         ]);
-        assert_eq!(rules.decide(&write("a"), 1), Decision::Allow);
-        assert_eq!(rules.decide(&write("b"), 1), Decision::Allow);
-        assert_eq!(rules.decide(&write("c"), 1), Decision::Ask);
+        assert_eq!(rules.decide(&write("a")), Decision::Allow);
+        assert_eq!(rules.decide(&write("b")), Decision::Allow);
+        assert_eq!(rules.decide(&write("c")), Decision::Ask);
     }
 
     #[test]
-    fn a_glob_scoped_turn_grant_covers_only_matching_subjects() {
+    fn a_glob_scoped_once_grant_covers_only_matching_subjects() {
         let mut rules = Rules::new(vec![rule(
             "write_file",
             Some("src/**"),
             Decision::Allow,
-            Scope::Turn,
+            Scope::Once,
         )]);
-        assert_eq!(rules.decide(&write("src/a"), 5), Decision::Allow);
-        assert_eq!(rules.decide(&write("src/b"), 5), Decision::Allow);
-        assert_eq!(rules.decide(&write("src/c"), 6), Decision::Ask);
-        // A non-matching subject neither is covered nor re-grants.
-        assert_eq!(rules.decide(&write("docs/d"), 6), Decision::Ask);
-        assert_eq!(rules.decide(&write("src/e"), 7), Decision::Ask);
+        assert_eq!(rules.decide(&write("src/a")), Decision::Allow);
+        // A non-matching subject neither is covered nor spends the grant.
+        assert_eq!(rules.decide(&write("docs/d")), Decision::Ask);
+        assert_eq!(rules.decide(&write("src/b")), Decision::Allow);
+        assert_eq!(rules.decide(&write("src/c")), Decision::Ask);
     }
 
     #[test]
@@ -538,11 +525,11 @@ mod tests {
         // tool via the catch-all rule — a future mutation tool must never
         // see a prompt in read-only mode.
         let mut rules = Rules::read_only();
-        assert_eq!(rules.decide(&write("a"), 1), Decision::Deny);
-        assert_eq!(rules.decide(&write("b"), 1), Decision::Deny);
-        assert_eq!(rules.decide(&edit("a"), 2), Decision::Deny);
+        assert_eq!(rules.decide(&write("a")), Decision::Deny);
+        assert_eq!(rules.decide(&write("b")), Decision::Deny);
+        assert_eq!(rules.decide(&edit("a")), Decision::Deny);
         assert_eq!(
-            rules.decide(&call("grep", json!({ "pattern": "x" })), 2),
+            rules.decide(&call("grep", json!({ "pattern": "x" }))),
             Decision::Deny
         );
     }
@@ -550,17 +537,17 @@ mod tests {
     #[test]
     fn approve_writes_asks_on_every_mutation_call() {
         let mut rules = Rules::approve_writes();
-        for turn in 1..=3 {
-            assert_eq!(rules.decide(&write("a"), turn), Decision::Ask);
-            assert_eq!(rules.decide(&edit("a"), turn), Decision::Ask);
+        for _ in 0..3 {
+            assert_eq!(rules.decide(&write("a")), Decision::Ask);
+            assert_eq!(rules.decide(&edit("a")), Decision::Ask);
         }
     }
 
     #[test]
     fn auto_edit_allows_writes_and_edits_from_the_first_call() {
         let mut rules = Rules::auto_edit();
-        assert_eq!(rules.decide(&write("a"), 1), Decision::Allow);
-        assert_eq!(rules.decide(&edit("a"), 1), Decision::Allow);
-        assert_eq!(rules.decide(&write("b"), 9), Decision::Allow);
+        assert_eq!(rules.decide(&write("a")), Decision::Allow);
+        assert_eq!(rules.decide(&edit("a")), Decision::Allow);
+        assert_eq!(rules.decide(&write("b")), Decision::Allow);
     }
 }

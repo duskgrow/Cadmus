@@ -167,9 +167,9 @@ preclude_, not as a day-one feature.
    MSRV). Nothing to migrate: data-shaped config stays TOML; the
    expression zone, when triggered, is new files.
 8. **Approvals and diff UI.** Scoped rules land data-shaped first
-   (match over tool input via globs; grant scope once/turn/session/
-   persisted) per ADR-0011's 2026-09-11 amendment item 3, the four
-   modes as presets over the rule layer. Diffs render from `similar`
+   (match over tool input via globs; the grant-scope lattice is
+   ADR-0011's to state — its 2026-09-19 amendment), the four modes as
+   presets over the rule layer. Diffs render from `similar`
    (line + inline word-level) with theme-aware added/removed tints from
    ADR-0017's `diff-*` slots; approval prompts embed the diff;
    rejections carry an optional comment into the trajectory.

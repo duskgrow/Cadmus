@@ -153,10 +153,38 @@ users approve ~93% of prompts anyway, so scoped "always" rules are comfort
 for the last mile, never the safety mechanism.
 
 Direction set 2026-09-11: rules gain matching over tool input and grant
-scope (once/turn/session/persisted), with the approval modes as presets
-over the rule layer (ADR-0011's 2026-09-11 amendment item 3); one
-decorator may serve N sessions as fleet policy (ADR-0015 item 5). The
-design questions above remain for the config-layer implementation.
+scope, with the approval modes as presets over the rule layer (one
+decorator may serve N sessions as fleet policy, ADR-0015 item 5). The
+scope lattice is ADR-0011's 2026-09-19 amendment (once / session /
+persisted, the last one located by settings-precedence level); the design
+questions above remain for the config-layer implementation.
+
+Merge-rule questions raised 2026-09-19, for the same consumer (they bind
+the rule engine, so they live here until the config slice answers them):
+
+1. **Store shape.** A keyed map per origin (`(tool glob, input glob) ->
+   decision`) makes two rules unable to conflict and re-granting idempotent;
+   an ordered list keeps explicit precedence but admits duplicates and
+   order-dependent behavior. The engine's evaluation is already
+   order-sensitive (first match wins), so the store must either fix a
+   canonical order or hand the engine a documented one.
+2. **May a narrower origin widen a broader one?** Straight
+   specificity-wins (narrow overrides broad, mirroring ADR-0012's settings
+   precedence) is simple, but the workspace origin is attacker-controlled
+   data — a cloned repository's rule file could then grant itself tool
+   permissions the user's own config denies. The alternative is monotone
+   narrowing: a workspace rule may add `ask` / `deny` but never an `allow`
+   the user level does not already permit, an in-session human grant is the
+   only path that relaxes a stored `ask`, and nothing relaxes a stored
+   `deny` (the engine never prompts for a `Deny`, so there is no UI path to
+   click — deny is absorbing by construction).
+3. **Session grants versus stored rules.** Recommended: session grants are
+   consulted first (they are the most recent human decision) and may relax a
+   stored `ask`, never a stored `deny`.
+4. **Workspace identity.** A `project`-located grant needs a stable key for
+   "this project" — the identity the trace attributes also lack (the "traces
+   carry no workspace or ruler identity" item above), so that decision now
+   has two consumers and is no longer phase-2-only.
 
 Direction added 2026-09-13 (ADR-0018 item 7): config files are TOML
 data; the expression zone (computed rule conditions, hooks) is
