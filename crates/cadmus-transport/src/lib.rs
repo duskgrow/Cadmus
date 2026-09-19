@@ -16,16 +16,17 @@
 //! stamps every position). The stdio/NDJSON and phase-5 socket transports
 //! run the same contract-test suite.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use cadmus_contract::testing::ProtocolSubject;
 use cadmus_contract::{
-    Attachment, Command, CommandSource, Event, EventKind, InFlight, LiveItem, LiveKind, LiveSink,
-    LiveUpdate, OpenTurn, PendingApproval, SettledApproval, Sync, TimedRecv, attrs,
+    Approval, Attachment, Command, CommandSource, Event, EventKind, InFlight, LiveItem, LiveKind,
+    LiveSink, LiveUpdate, OpenTurn, PendingApproval, SettledApproval, Sync, TimedRecv,
+    ToolCompletion,
 };
-use cadmus_core::{MessageAssembler, replay_trace};
+use cadmus_core::{MessageAssembler, latest_response_anchor, replay_trace};
 
 /// The default per-subscriber queue bound. Deltas arrive at token rate, so
 /// a stalled renderer eventually lags — and is told to re-sync (item 5),
@@ -51,10 +52,15 @@ struct State {
     /// (attach to finished or foreign traces reads the log file instead;
     /// that path lands with the session picker).
     events: Vec<Event>,
+    /// Recorded event ids already applied, so a duplicate republication cannot
+    /// apply the aggregator's transitions twice (the fold dedups separately).
+    seen_event_ids: HashSet<String>,
     /// The open turn's replica of the loop's assembler, fed the same deltas.
     open_turn: Option<(u32, MessageAssembler)>,
     /// Approval requests not yet settled by a recorded resolve.
     pending_approvals: Vec<PendingApproval>,
+    /// Provisional outcomes only; durable results retire them by unique span.
+    completed_tools: Vec<ToolCompletion>,
     /// Settled batches awaiting an attach, oldest first, capped at
     /// [`SETTLED_APPROVAL_WINDOW`]: the sync baseline's explicit record of
     /// decisions the log holds but the fold does not replay.
@@ -99,6 +105,8 @@ impl Broadcaster {
     pub fn close(&self) {
         let mut state = self.state.lock().expect("broadcaster poisoned");
         state.closed = true;
+        Self::retire_pending_approvals(&mut state);
+        state.completed_tools.clear();
         state.subscribers.clear();
     }
 
@@ -116,6 +124,7 @@ impl Broadcaster {
                 partial: assembler.snapshot(),
             }),
             pending_approvals: state.pending_approvals.clone(),
+            completed_tools: state.completed_tools.clone(),
         };
         let sync = Sync {
             history: replay_trace(&state.events),
@@ -157,50 +166,7 @@ impl Broadcaster {
         );
         state.last_seq = state.last_seq.max(item.seq);
         match &item.kind {
-            LiveKind::Recorded { event } => {
-                match &event.kind {
-                    EventKind::LlmResponse { .. } => {
-                        // The response reconciles the delta buffer: the open
-                        // turn's replica is retired, the completed message
-                        // now lives in the fold (item 5's zero-jump rule).
-                        let turn = turn_of(event);
-                        if state.open_turn.as_ref().map(|(open, _)| *open) == turn {
-                            state.open_turn = None;
-                        }
-                    }
-                    EventKind::Command(Command::ResolveApproval {
-                        request_id,
-                        decisions,
-                        ..
-                    }) => {
-                        if let Some(position) = state
-                            .pending_approvals
-                            .iter()
-                            .position(|pending| pending.request_id == *request_id)
-                        {
-                            // The pending entry carries the presented calls;
-                            // the recorded resolve carries the decisions.
-                            // Pairing them here is the aggregator's one
-                            // chance — the request itself is live-only.
-                            let pending = state.pending_approvals.remove(position);
-                            state.settled_approvals.push_back(SettledApproval {
-                                request_id: pending.request_id,
-                                calls: pending.calls,
-                                decisions: decisions.clone(),
-                            });
-                            while state.settled_approvals.len() > SETTLED_APPROVAL_WINDOW {
-                                state.settled_approvals.pop_front();
-                            }
-                        }
-                    }
-                    EventKind::RunFinished { .. } => {
-                        state.open_turn = None;
-                        state.pending_approvals.clear();
-                    }
-                    _ => {}
-                }
-                state.events.push((**event).clone());
-            }
+            LiveKind::Recorded { event } => Self::track_recorded(state, event),
             LiveKind::AssistantDelta { turn, chunk } => {
                 let replica = match &mut state.open_turn {
                     Some((open, assembler)) if *open == *turn => assembler,
@@ -210,6 +176,22 @@ impl Broadcaster {
                 };
                 replica.push(chunk.clone());
             }
+            LiveKind::ToolCompleted { completion } => {
+                // Only the current batch's unrecorded outcomes belong here,
+                // never a run-long cache keyed by provider call ids.
+                state
+                    .completed_tools
+                    .retain(|done| done.turn == completion.turn);
+                if let Some(previous) = state
+                    .completed_tools
+                    .iter_mut()
+                    .find(|done| done.span_id == completion.span_id)
+                {
+                    previous.clone_from(completion);
+                } else {
+                    state.completed_tools.push(completion.clone());
+                }
+            }
             LiveKind::ApprovalRequested {
                 request_id,
                 turn,
@@ -218,9 +200,179 @@ impl Broadcaster {
             } => state.pending_approvals.push(PendingApproval {
                 request_id: request_id.clone(),
                 turn: *turn,
+                // One walk over the log per gated batch — bounded by the run,
+                // and far cheaper than the attach-time fold reading the same
+                // vec; a kept counter would have to mirror that fold by hand.
+                message_index: latest_response_anchor(&state.events)
+                    .filter(|(response_turn, _)| response_turn == turn)
+                    .map(|(_, index)| index),
                 calls: calls.clone(),
+                decisions: vec![None; calls.len()],
                 wait_timeout: *wait_timeout,
             }),
+        }
+    }
+
+    fn track_recorded(state: &mut State, event: &Event) {
+        // The fold dedups by id too; here the guard keeps a duplicate
+        // republication from applying the aggregator's own transitions twice.
+        if !state.seen_event_ids.insert(event.id.clone()) {
+            return;
+        }
+        match &event.kind {
+            EventKind::LlmResponse { .. } => {
+                // The completed message now lives in the fold, replacing the
+                // open turn's delta replica (item 5's zero-jump rule).
+                if state.open_turn.as_ref().map(|(open, _)| *open) == event.turn() {
+                    state.open_turn = None;
+                }
+            }
+            EventKind::ToolResult { .. } => {
+                state
+                    .completed_tools
+                    .retain(|done| done.span_id != event.span_id);
+            }
+            EventKind::LlmRequest { .. } => state.completed_tools.clear(),
+            EventKind::Command(Command::ResolveApproval {
+                request_id,
+                decisions,
+                ..
+            }) => Self::resolve_approval_batch(state, request_id, decisions),
+            EventKind::Command(Command::ResolveApprovalCall {
+                request_id,
+                call_index,
+                decision,
+                ..
+            }) => Self::resolve_approval_call(state, request_id, *call_index, decision),
+            EventKind::RunFinished { .. } => {
+                state.open_turn = None;
+                Self::retire_pending_approvals(state);
+                state.completed_tools.clear();
+            }
+            EventKind::Command(
+                Command::StartRun { .. } | Command::Steer { .. } | Command::Interrupt { .. },
+            )
+            | EventKind::InstructionInjected { .. }
+            | EventKind::ToolCall { .. }
+            | EventKind::EvalScore(_)
+            | EventKind::Fold { .. } => {}
+        }
+        state.events.push(event.clone());
+    }
+
+    fn resolve_approval_call(
+        state: &mut State,
+        request_id: &str,
+        call_index: usize,
+        decision: &Approval,
+    ) {
+        let Some(position) = state
+            .pending_approvals
+            .iter()
+            .position(|pending| pending.request_id == request_id)
+        else {
+            return;
+        };
+
+        let complete = {
+            let pending = &mut state.pending_approvals[position];
+            if call_index >= pending.calls.len() || pending.decisions[call_index].is_some() {
+                return;
+            }
+            // Addressing is by the original batch position, not by call id:
+            // duplicate provider ids must still have independent slots.
+            pending.decisions[call_index] = Some(decision.clone());
+            pending.decisions.iter().all(Option::is_some)
+        };
+
+        if complete {
+            let pending = state.pending_approvals.remove(position);
+            let decisions = pending
+                .decisions
+                .into_iter()
+                .map(|decision| decision.expect("a complete approval has every decision"))
+                .collect();
+            Self::remember_settlement(
+                state,
+                SettledApproval {
+                    request_id: pending.request_id,
+                    message_index: pending.message_index,
+                    calls: pending.calls,
+                    decisions,
+                },
+            );
+        }
+    }
+
+    fn resolve_approval_batch(state: &mut State, request_id: &str, decisions: &[Approval]) {
+        let Some(position) = state
+            .pending_approvals
+            .iter()
+            .position(|pending| pending.request_id == request_id)
+        else {
+            return;
+        };
+
+        let pending = state.pending_approvals.remove(position);
+        let decisions = if pending.calls.is_empty() {
+            // Preserve the legacy settlement shape for empty batches.
+            decisions.to_vec()
+        } else {
+            pending
+                .decisions
+                .into_iter()
+                .enumerate()
+                .map(|(index, recorded)| {
+                    // Batch replies retain original positions, even for slots
+                    // already settled individually. Missing answers deny.
+                    recorded.unwrap_or_else(|| {
+                        decisions
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(Approval::Rejected { comment: None })
+                    })
+                })
+                .collect()
+        };
+        Self::remember_settlement(
+            state,
+            SettledApproval {
+                request_id: pending.request_id,
+                message_index: pending.message_index,
+                calls: pending.calls,
+                decisions,
+            },
+        );
+    }
+
+    fn retire_pending_approvals(state: &mut State) {
+        for pending in std::mem::take(&mut state.pending_approvals) {
+            // Termination is not a resolution command: preserve known answers
+            // in relative call order, without inventing denials for siblings.
+            let (calls, decisions): (Vec<_>, Vec<_>) = pending
+                .calls
+                .into_iter()
+                .zip(pending.decisions)
+                .filter_map(|(call, decision)| decision.map(|decision| (call, decision)))
+                .unzip();
+            if !decisions.is_empty() {
+                Self::remember_settlement(
+                    state,
+                    SettledApproval {
+                        request_id: pending.request_id,
+                        message_index: pending.message_index,
+                        calls,
+                        decisions,
+                    },
+                );
+            }
+        }
+    }
+
+    fn remember_settlement(state: &mut State, settled: SettledApproval) {
+        state.settled_approvals.push_back(settled);
+        while state.settled_approvals.len() > SETTLED_APPROVAL_WINDOW {
+            state.settled_approvals.pop_front();
         }
     }
 }
@@ -272,12 +424,6 @@ impl ProtocolSubject for Broadcaster {
     fn queue_capacity(&self) -> usize {
         self.queue_capacity()
     }
-}
-
-/// The `selfevol.turn` attribute as the loop stamps it (1-based).
-fn turn_of(event: &Event) -> Option<u32> {
-    let value = event.attributes.get(attrs::TURN)?.as_u64()?;
-    u32::try_from(value).ok()
 }
 
 /// One attachment's live tail: queued items, then the lag marker if the
@@ -355,9 +501,12 @@ impl CommandSource for CommandReceiver {
     }
 
     fn poll(&self) -> Option<Command> {
-        // A contended lock means the loop itself is parked in `recv` — in
-        // which case no poll is running (single loop task), so `None` here
-        // is always "nothing buffered".
+        // `recv` holds this lock across its await, so while a retained receive
+        // future is parked (the gate's approval wait) the lock is held and a
+        // poll here is a no-op by construction — the parked future is what
+        // delivers the next command, which is why dispatch polls it before
+        // admitting work. Otherwise (single loop task) `None` is "nothing
+        // buffered".
         self.receiver.try_lock().ok()?.try_recv().ok()
     }
 }

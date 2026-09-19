@@ -209,6 +209,34 @@ the run's content must not re-enter scrollback), so settlements inside
 the hole stay unrendered like the rest of the episode — the accepted,
 marker-flagged hole-loss policy.
 
+## Amendment — 2026-09-18: partial approvals and early tool completion
+
+A partially answered approval remains in the attach baseline with its
+recorded decisions; answering one call must not remove its siblings.
+Termination retires that request into the bounded settled window with
+only the recorded subset, never fabricated answers. History placement
+uses the originating message's position, including seeded history, rather
+than provider call ids: repeated ids must not move a decision to another
+turn. An absent anchor renders at the tail instead of guessing.
+
+Ordered durable results (ADR-0008) can wait behind an unanswered earlier
+call. The live stream therefore exposes a provisional completion when a
+finished outcome cannot yet enter that ordered history, so the user can
+inspect success or failure before deciding its siblings. Attach carries
+only those outstanding completions; the eventual durable result retires
+them by run-unique tool span, not provider call id. Clients reconcile the
+two observations rather than printing the outcome twice. This is the same
+live/durable split as assistant deltas: a crash before the durable result
+still leaves an honestly open tool span in the log.
+
+An interrupt may skip unanswered calls while draining later results, so a
+partial attach cannot infer result ownership from message order. Gated
+results carry their approval address in additive event attributes; the
+history fold retains that address separately from provider messages.
+Clients pair it with the pending request and its history anchor before
+labelling a durable preview. Older logs remain valid, but a successful
+result without verified attribution stays quiet.
+
 ## Consequences
 
 - The write-tools PR (ADR-0008) implements the minimal protocol — the

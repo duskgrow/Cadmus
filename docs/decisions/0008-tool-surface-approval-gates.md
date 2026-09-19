@@ -159,3 +159,27 @@ case):
 - Unchanged: the L0–L3 tiers, rejection-as-tool-result (denied calls enter
   the trajectory as `approval_rejected` feedback), and the batch
   presentation itself.
+
+## Amendment — 2026-09-18: per-call execution and compatibility
+
+Per-call addressing lands as a distinct `resolve_approval_call` command,
+not an optional field on the batch command. An older reader ignores an
+unknown field and could mistake permission for one call for permission for
+the batch; an unknown command instead fails loudly (ADR-0005). Original
+positions in the presented batch identify calls because provider call ids
+can repeat. The first recorded decision is final; retries or a later batch
+reply cannot replace it. The existing batch form retains its short-reply
+deny rule for still-undecided positions.
+
+A serial declaration prohibits overlap, not readiness-based ordering.
+When any call declares serial execution, the dispatcher runs one ready
+call at a time; an unanswered sibling is not an execution barrier. Calls
+ready together retain original order. This realizes the evening
+amendment's interactive behavior without declaring write tools parallel-safe.
+Durable results and model history still reassemble in original order;
+early user-visible completion belongs to ADR-0013's live channel.
+
+Interrupt stops new invocations and drains work already in flight before
+recording the terminal event. It does not invent rejections for untouched
+calls. Timeout and channel closure, unlike interrupt, settle unanswered
+calls as denials and preserve decisions already recorded.

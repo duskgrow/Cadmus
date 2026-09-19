@@ -17,11 +17,12 @@
 //! render and the layout input — a single pipeline render and a single wrap
 //! pass per block, never one per accessor.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 use cadmus_contract::{
-    Approval, Command, Event, EventKind, LiveItem, LiveKind, Message, Role, SettledApproval,
-    Status, Sync, attrs,
+    Approval, Command, Event, EventError, EventKind, LiveItem, LiveKind, Message, PendingApproval,
+    Role, SettledApproval, Status, Sync, ToolCompletion,
 };
 use cadmus_ui::highlight::Highlighter;
 use cadmus_ui::ir::{self, Slot};
@@ -96,12 +97,15 @@ pub struct Transcript {
     /// The client rule's position filter (ADR-0013 item 4): items with
     /// `seq ≤ as_of_seq` are dropped.
     as_of_seq: u64,
-    /// call id → tool name, so a failed result's marker can name its tool.
-    calls: HashMap<String, String>,
-    /// Approval request id → the presented calls' tool names, so the
-    /// recorded resolution can name what was decided (the request itself is
-    /// live-only; the resolution is the durable fact — ADR-0013 item 6).
-    approvals: HashMap<String, Vec<String>>,
+    /// Outstanding live span → tool name. Provider ids can repeat even in
+    /// one batch; each result retires its span, including silent successes.
+    live_calls: HashMap<String, String>,
+    /// Original approval slots retain their indices; taking a name marks its
+    /// decision rendered, so retries and batch fallback cannot render it twice.
+    approvals: HashMap<String, Vec<Option<String>>>,
+    /// Only provisional outcomes still awaiting their durable result; span
+    /// ids are run-unique, unlike provider call ids.
+    completed_tools: HashSet<String>,
 }
 
 impl Transcript {
@@ -112,8 +116,9 @@ impl Transcript {
             flushed: 0,
             open_turn: None,
             as_of_seq: 0,
-            calls: HashMap::new(),
+            live_calls: HashMap::new(),
             approvals: HashMap::new(),
+            completed_tools: HashSet::new(),
         }
     }
 
@@ -176,8 +181,12 @@ impl Transcript {
                 // never reaches the log).
                 self.approvals.insert(
                     request_id.clone(),
-                    calls.iter().map(|call| call.name.clone()).collect(),
+                    calls.iter().map(|call| Some(call.name.clone())).collect(),
                 );
+                Light::None
+            }
+            LiveKind::ToolCompleted { completion } => {
+                self.push_completion(completion);
                 Light::None
             }
             LiveKind::Recorded { event } => self.apply_event(event),
@@ -216,30 +225,45 @@ impl Transcript {
         self.blocks.clear();
         self.flushed = 0;
         self.open_turn = None;
-        self.calls.clear();
+        self.live_calls.clear();
         self.approvals.clear();
         self.as_of_seq = sync.as_of_seq;
 
-        // Settled approvals whose batch rode one of the history messages'
-        // calls replay where the live path rendered them — after the
-        // turn's text, before its tool markers. A batch whose message
-        // never folded (the crash window) lands at the end, in window
-        // order: the explicit record, wherever its consequence allows.
+        // The transport's message index includes seeded history. Provider
+        // ids and even whole calls may repeat, so neither can locate a turn.
+        // Partial decisions are durable too. Sync carries their positions,
+        // not arrival order, so rebuild those records in original call order.
+        let partial: Vec<SettledApproval> = sync
+            .in_flight
+            .pending_approvals
+            .iter()
+            .filter_map(partial_settlement)
+            .collect();
         let mut placed: Vec<Vec<&SettledApproval>> = vec![Vec::new(); sync.history.messages.len()];
         let mut unplaced: Vec<&SettledApproval> = Vec::new();
-        for settled in &sync.settled_approvals {
-            let at = sync.history.messages.iter().position(|message| {
-                message
-                    .tool_calls()
-                    .any(|call| settled.calls.iter().any(|c| c.id == call.id))
+        for settled in sync.settled_approvals.iter().chain(&partial) {
+            let at = settled.message_index.filter(|&index| {
+                sync.history
+                    .messages
+                    .get(index)
+                    .is_some_and(|message| message.role == Role::Assistant)
             });
             match at {
                 Some(at) => placed[at].push(settled),
                 None => unplaced.push(settled),
             }
         }
-        for (message, settled) in sync.history.messages.iter().zip(placed) {
-            self.push_history_message(message, &settled);
+        // Folded messages have no spans; their provider-id lookup must never
+        // leak into the unique-span attribution of subsequent live events.
+        let mut history_calls = HashMap::new();
+        let pending_results = pending_result_names(sync);
+        for (index, (message, settled)) in sync.history.messages.iter().zip(placed).enumerate() {
+            self.push_history_message(
+                message,
+                &settled,
+                &mut history_calls,
+                pending_results.get(&index).copied(),
+            );
         }
         for settled in unplaced {
             let names: Vec<String> = settled.calls.iter().map(|call| call.name.clone()).collect();
@@ -255,6 +279,7 @@ impl Transcript {
         if resync {
             self.flushed = self.blocks.len();
         }
+        self.sync_completions(&sync.in_flight.completed_tools, resync);
         if let Some(open) = &sync.in_flight.open_turn {
             self.blocks.push(Block::Agent(Agent {
                 stream: {
@@ -290,9 +315,48 @@ impl Transcript {
             .extend(sync.in_flight.pending_approvals.iter().map(|pending| {
                 (
                     pending.request_id.clone(),
-                    pending.calls.iter().map(|call| call.name.clone()).collect(),
+                    pending
+                        .calls
+                        .iter()
+                        .enumerate()
+                        .map(|(index, call)| {
+                            if pending.decisions.get(index).is_some_and(Option::is_some) {
+                                None
+                            } else {
+                                Some(call.name.clone())
+                            }
+                        })
+                        .collect(),
                 )
             }));
+    }
+
+    fn push_completion(&mut self, completion: &ToolCompletion) {
+        if !self.completed_tools.insert(completion.span_id.clone()) {
+            return;
+        }
+        self.seal_open();
+        self.blocks
+            .push(Block::Static(completion_lines(completion)));
+    }
+
+    fn sync_completions(&mut self, completions: &[ToolCompletion], resync: bool) {
+        let seen = std::mem::take(&mut self.completed_tools);
+        // The old pump flushed everything before resync. Rebuild those
+        // previews as pre-flushed, then expose any completions missed in the
+        // gap. Keep both in replay without printing the old ones twice.
+        if resync {
+            for completion in completions
+                .iter()
+                .filter(|completion| seen.contains(&completion.span_id))
+            {
+                self.push_completion(completion);
+            }
+            self.flushed = self.blocks.len();
+        }
+        for completion in completions {
+            self.push_completion(completion);
+        }
     }
 
     /// The client rule's current baseline (ADR-0013 item 4): the app
@@ -460,7 +524,7 @@ impl Transcript {
         match &event.kind {
             EventKind::LlmResponse { message, .. } => {
                 let text = message.text_body();
-                let turn = turn_of(event);
+                let turn = event.turn();
                 if turn.is_some() && turn == self.open_turn {
                     // The response is authoritative over the delta buffer.
                     let Some(Block::Agent(agent)) = self.blocks.last_mut() else {
@@ -485,33 +549,33 @@ impl Transcript {
             }
             EventKind::ToolCall { call } => {
                 self.seal_open();
-                self.calls.insert(call.id.clone(), call.name.clone());
+                self.live_calls
+                    .insert(event.span_id.clone(), call.name.clone());
                 self.blocks
                     .push(Block::Static(vec![subtle_line(tool_marker(call))]));
                 Light::Tool(call.name.clone())
             }
-            EventKind::ToolResult { call_id, .. } if event.status == Status::Error => {
-                let tool = self
-                    .calls
-                    .get(call_id)
-                    .map_or(call_id.as_str(), String::as_str);
-                let detail = event
-                    .error
-                    .as_ref()
-                    .and_then(|error| error.message.lines().next())
-                    .unwrap_or("failed");
-                self.blocks.push(Block::Static(vec![error_line(format!(
-                    "✗ {tool}: {detail}"
-                ))]));
+            EventKind::ToolResult { call_id, result } => {
+                let text = result.as_str();
+                let display: &dyn std::fmt::Display = match &text {
+                    Some(text) => text,
+                    None => result,
+                };
+                self.push_result(event, call_id, display);
                 Light::None
             }
             EventKind::InstructionInjected { path, .. } => {
+                // Every Static push seals first: only the tail block may be an
+                // open Agent, or the next delta for the same turn would land
+                // after this one and hit `agent_block`'s unreachable arm.
+                self.seal_open();
                 self.blocks.push(Block::Static(vec![subtle_line(format!(
                     "+ instructions: {path}"
                 ))]));
                 Light::None
             }
             EventKind::Fold { folded, .. } => {
+                self.seal_open();
                 self.blocks.push(Block::Static(vec![subtle_line(format!(
                     "⑃ context folded: {} result(s) compressed",
                     folded.len()
@@ -532,13 +596,26 @@ impl Transcript {
                 self.push_resolution(request_id, decisions);
                 Light::None
             }
+            EventKind::Command(Command::ResolveApprovalCall {
+                request_id,
+                call_index,
+                decision,
+                ..
+            }) => {
+                self.push_call_resolution(request_id, *call_index, decision);
+                Light::None
+            }
             EventKind::RunFinished { .. } => {
+                self.live_calls.clear();
+                self.approvals.clear();
+                self.completed_tools.clear();
                 if event.status == Status::Error {
                     let detail = event
                         .error
                         .as_ref()
                         .and_then(|error| error.message.lines().next())
                         .unwrap_or("failed");
+                    self.seal_open();
                     self.blocks.push(Block::Static(vec![error_line(format!(
                         "run failed: {detail}"
                     ))]));
@@ -551,16 +628,90 @@ impl Transcript {
         }
     }
 
+    fn push_result(&mut self, event: &Event, call_id: &str, result: &dyn std::fmt::Display) {
+        let name = self.live_calls.remove(&event.span_id);
+        if self.completed_tools.remove(&event.span_id) {
+            return;
+        }
+        // Attach may have missed the opening span. A provider id alone cannot
+        // verify a successful result's label; legacy errors retain their fallback.
+        if name.is_none() && event.status != Status::Error {
+            return;
+        }
+        let tool = name.as_deref().unwrap_or(call_id);
+        if self
+            .approvals
+            .values()
+            .any(|slots| slots.iter().any(Option::is_some))
+        {
+            // In-order results are already durable, but still inform a human
+            // deciding a sibling. No full-batch index exists on this event.
+            let lines = outcome_lines(
+                &truncate_cells(tool, 48),
+                result,
+                event.error.as_ref(),
+                event.status == Status::Error,
+            );
+            self.seal_open();
+            self.blocks.push(Block::Static(lines));
+        } else if event.status == Status::Error {
+            let detail = event
+                .error
+                .as_ref()
+                .and_then(|error| error.message.lines().next())
+                .unwrap_or("failed");
+            self.seal_open();
+            self.blocks.push(Block::Static(vec![error_line(format!(
+                "✗ {tool}: {detail}"
+            ))]));
+        }
+    }
+
     /// The recorded resolution of one approval request: the durable half of
     /// the approval (the request was live-only). A resolve the transcript
     /// never saw a request for (a lag hole) names the request id itself.
     fn push_resolution(&mut self, request_id: &str, decisions: &[Approval]) {
-        let names = self
+        let slots = self
             .approvals
             .remove(request_id)
-            .unwrap_or_else(|| vec![request_id.to_string()]);
-        self.blocks
-            .push(Block::Static(resolution_lines(&names, decisions)));
+            .unwrap_or_else(|| vec![Some(request_id.to_string())]);
+        let (names, decisions): (Vec<_>, Vec<_>) = slots
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                name.map(|name| {
+                    (
+                        name,
+                        decisions
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(Approval::Rejected { comment: None }),
+                    )
+                })
+            })
+            .unzip();
+        self.seal_open();
+        let lines = resolution_lines(&names, &decisions);
+        if !lines.is_empty() {
+            self.blocks.push(Block::Static(lines));
+        }
+    }
+
+    fn push_call_resolution(&mut self, request_id: &str, call_index: usize, decision: &Approval) {
+        let Some(slots) = self.approvals.get_mut(request_id) else {
+            return;
+        };
+        let Some(name) = slots.get_mut(call_index).and_then(Option::take) else {
+            return;
+        };
+        if slots.iter().all(Option::is_none) {
+            self.approvals.remove(request_id);
+        }
+        self.seal_open();
+        self.blocks.push(Block::Static(resolution_lines(
+            &[name],
+            std::slice::from_ref(decision),
+        )));
     }
 
     /// History rebuild for [`Transcript::apply_sync`]: messages map onto the
@@ -568,7 +719,13 @@ impl Transcript {
     /// `settled` carries the approval batches whose calls this message
     /// proposed — their resolution lines precede its tool markers, the
     /// live path's order.
-    fn push_history_message(&mut self, message: &Message, settled: &[&SettledApproval]) {
+    fn push_history_message(
+        &mut self,
+        message: &Message,
+        settled: &[&SettledApproval],
+        history_calls: &mut HashMap<String, String>,
+        preview_tool: Option<&str>,
+    ) {
         match message.role {
             Role::User => self.push_user(&message.text_body()),
             Role::Assistant => {
@@ -591,15 +748,22 @@ impl Transcript {
                         .push(Block::Static(resolution_lines(&names, &settled.decisions)));
                 }
                 for call in message.tool_calls() {
-                    self.calls.insert(call.id.clone(), call.name.clone());
+                    history_calls.insert(call.id.clone(), call.name.clone());
                     self.blocks
                         .push(Block::Static(vec![subtle_line(tool_marker(call))]));
                 }
             }
             Role::Tool => {
-                if message.is_error {
+                if let Some(tool) = preview_tool {
+                    self.blocks.push(Block::Static(outcome_lines(
+                        &truncate_cells(tool, 48),
+                        &HistoryResult(message),
+                        None,
+                        message.is_error,
+                    )));
+                } else if message.is_error {
                     let call_id = message.tool_call_id.as_deref().unwrap_or("?");
-                    let tool = self.calls.get(call_id).map_or(call_id, String::as_str);
+                    let tool = history_calls.get(call_id).map_or(call_id, String::as_str);
                     let detail = message.text_body();
                     let detail = detail.lines().next().unwrap_or("failed");
                     self.blocks.push(Block::Static(vec![error_line(format!(
@@ -610,6 +774,176 @@ impl Transcript {
             Role::System => {}
         }
     }
+}
+
+/// Match `Message::text_body` without copying an entire result before the
+/// preview budget can stop formatting it.
+struct HistoryResult<'a>(&'a Message);
+
+impl std::fmt::Display for HistoryResult<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut separator = "";
+        for part in &self.0.content {
+            if let cadmus_contract::ContentPart::Text { text } = part {
+                formatter.write_str(separator)?;
+                formatter.write_str(text)?;
+                separator = "\n";
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Interrupt can skip unanswered leading calls before recording later results.
+/// Only the durable approval address verifies a name; neither result order nor
+/// provider ids can. The request's anchor confines it to the originating turn.
+fn pending_result_names(sync: &Sync) -> HashMap<usize, &str> {
+    let mut names = HashMap::new();
+    let messages = &sync.history.messages;
+    for pending in &sync.in_flight.pending_approvals {
+        if !(0..pending.calls.len())
+            .any(|index| pending.decisions.get(index).is_none_or(Option::is_none))
+        {
+            continue;
+        }
+        let Some(anchor) = pending.message_index.filter(|&index| {
+            messages
+                .get(index)
+                .is_some_and(|message| message.role == Role::Assistant)
+        }) else {
+            continue;
+        };
+        let end = messages
+            .iter()
+            .enumerate()
+            .skip(anchor + 1)
+            .find(|(_, message)| message.role == Role::Assistant)
+            .map_or(messages.len(), |(index, _)| index);
+        for result in &sync.history.tool_results {
+            if result.request_id != pending.request_id
+                || result.message_index <= anchor
+                || result.message_index >= end
+                || messages[result.message_index].role != Role::Tool
+                || pending
+                    .decisions
+                    .get(result.call_index)
+                    .is_none_or(Option::is_none)
+            {
+                continue;
+            }
+            if let Some(call) = pending.calls.get(result.call_index) {
+                names.insert(result.message_index, call.name.as_str());
+            }
+        }
+    }
+    names
+}
+
+fn completion_lines(completion: &ToolCompletion) -> Vec<ir::Line> {
+    let name = truncate_cells(&completion.name, 48);
+    // The index is the call's position in the assistant message, not in the
+    // approval batch — labelled "tool call" so it never reads as the dialog's
+    // "M/N", which numbers the gated subset.
+    let label = format!(
+        "{name} (turn {}, tool call {})",
+        completion.turn,
+        completion.message_call_index.saturating_add(1)
+    );
+    let text = completion.result.as_str();
+    let display: &dyn std::fmt::Display = match &text {
+        Some(text) => text,
+        None => &completion.result,
+    };
+    outcome_lines(
+        &label,
+        display,
+        completion.error.as_ref(),
+        completion.error.is_some(),
+    )
+}
+
+/// Both early and durable results share the same bounded preview. A durable
+/// result lacks a full-batch index, so its caller supplies only a tool label.
+fn outcome_lines(
+    label: &str,
+    result: &dyn std::fmt::Display,
+    error: Option<&EventError>,
+    failed: bool,
+) -> Vec<ir::Line> {
+    let mut lines = vec![if failed {
+        error_line(format!("✗ failed {label}"))
+    } else {
+        subtle_line(format!("✓ completed {label}"))
+    }];
+    let mut preview = CompletionPreview::default();
+    if let Some(error) = error {
+        let _ = writeln!(preview, "{}: {}", error.kind, error.message);
+    }
+    let _ = write!(preview, "{result}");
+    // Control bytes are untrusted tool output, not terminal instructions.
+    let text: String = preview
+        .text
+        .chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect();
+    lines.extend(
+        text.lines()
+            .take(4)
+            .map(|line| subtle_line(format!("  {}", truncate_cells(line, 120)))),
+    );
+    if preview.truncated || text.lines().count() > 4 {
+        lines.push(subtle_line("  ⋯ result preview truncated"));
+    }
+    lines
+}
+
+const COMPLETION_PREVIEW_BYTES: usize = 512;
+
+#[derive(Default)]
+struct CompletionPreview {
+    text: String,
+    truncated: bool,
+}
+
+impl std::fmt::Write for CompletionPreview {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if self.truncated {
+            return Err(std::fmt::Error);
+        }
+        let remaining = COMPLETION_PREVIEW_BYTES - self.text.len();
+        if text.len() <= remaining {
+            self.text.push_str(text);
+            return Ok(());
+        }
+        let mut end = remaining;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&text[..end]);
+        self.truncated = true;
+        Err(std::fmt::Error)
+    }
+}
+
+/// Adapt the decided subset for the same history-placement path as a
+/// complete settlement; absent slots remain pending, never implicit denials.
+fn partial_settlement(pending: &PendingApproval) -> Option<SettledApproval> {
+    let (calls, decisions): (Vec<_>, Vec<_>) = pending
+        .calls
+        .iter()
+        .zip(&pending.decisions)
+        .filter_map(|(call, decision)| {
+            decision
+                .as_ref()
+                .map(|decision| (call.clone(), decision.clone()))
+        })
+        .unzip();
+    (!calls.is_empty()).then(|| SettledApproval {
+        request_id: pending.request_id.clone(),
+        message_index: pending.message_index,
+        calls,
+        decisions,
+    })
 }
 
 impl Default for Transcript {
@@ -698,18 +1032,11 @@ fn resolution_lines(names: &[String], decisions: &[Approval]) -> Vec<ir::Line> {
     lines
 }
 
-/// The `selfevol.turn` attribute as the loop stamps it (1-based) — the same
-/// helper the transport keeps private; the frontend cannot link core or
-/// transport (ADR-0018 item 10), so the five lines live here too.
-fn turn_of(event: &Event) -> Option<u32> {
-    let value = event.attributes.get(attrs::TURN)?.as_u64()?;
-    u32::try_from(value).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use cadmus_contract::{
-        EventError, InFlight, LiveKind, OpenTurn, RunState, StreamChunk, ToolCall, TurnSnapshot,
+        EventError, InFlight, LiveKind, OpenTurn, RunState, StreamChunk, ToolCall,
+        ToolResultProjection, TurnSnapshot, attrs,
     };
 
     use super::*;
@@ -770,6 +1097,7 @@ mod tests {
                 provider: None,
                 model: None,
                 messages,
+                tool_results: Vec::new(),
                 turns: 0,
                 warnings: Vec::new(),
                 scores: Vec::new(),
@@ -779,6 +1107,7 @@ mod tests {
             in_flight: InFlight {
                 open_turn: None,
                 pending_approvals: Vec::new(),
+                completed_tools: Vec::new(),
             },
             settled_approvals: settled,
             as_of_seq: 0,
@@ -956,6 +1285,305 @@ mod tests {
         );
     }
 
+    fn completion(span: &str) -> ToolCompletion {
+        ToolCompletion {
+            span_id: span.into(),
+            turn: 1,
+            message_call_index: 1,
+            call_id: "duplicate".into(),
+            name: "write_file".into(),
+            result: serde_json::json!("updated file"),
+            error: None,
+        }
+    }
+
+    fn completed(seq: u64, completion: ToolCompletion) -> LiveItem {
+        LiveItem {
+            seq,
+            trace_id: "tr-test".into(),
+            kind: LiveKind::ToolCompleted { completion },
+        }
+    }
+
+    fn tool_started(seq: u64, span_id: &str, call: ToolCall) -> LiveItem {
+        let mut item = recorded(seq, 1, EventKind::ToolCall { call });
+        let LiveKind::Recorded { event } = &mut item.kind else {
+            unreachable!()
+        };
+        event.span_id = span_id.into();
+        item
+    }
+
+    fn durable_completion(seq: u64, completion: &ToolCompletion) -> LiveItem {
+        let mut item = recorded(
+            seq,
+            completion.turn,
+            EventKind::ToolResult {
+                call_id: completion.call_id.clone(),
+                result: completion.result.clone(),
+            },
+        );
+        let LiveKind::Recorded { event } = &mut item.kind else {
+            unreachable!()
+        };
+        event.span_id.clone_from(&completion.span_id);
+        event.error.clone_from(&completion.error);
+        if event.error.is_some() {
+            event.status = Status::Error;
+        }
+        item
+    }
+
+    #[test]
+    fn an_in_order_success_is_visible_before_the_remaining_approval() {
+        let mut transcript = Transcript::new();
+        let calls = gated_calls();
+        transcript.apply_item(&approval_request(1, "ap1", calls.clone()));
+        transcript.apply_item(&call_resolution(2, "ap1", 0, Approval::Approved));
+        transcript.apply_item(&tool_started(3, "first", calls[0].clone()));
+        let mut first = completion("first");
+        first.call_id.clone_from(&calls[0].id);
+        transcript.apply_item(&durable_completion(4, &first));
+        assert_eq!(
+            pump(&mut transcript).0,
+            [
+                "✓ approved write_file",
+                "→ write_file",
+                "✓ completed write_file",
+                "  updated file",
+            ]
+        );
+        assert!(
+            transcript.approvals["ap1"][1].is_some(),
+            "feedback precedes the sibling decision"
+        );
+        assert!(transcript.live_calls.is_empty());
+        assert!(
+            transcript.completed_tools.is_empty(),
+            "there was no provisional completion"
+        );
+        transcript.apply_item(&call_resolution(5, "ap1", 1, Approval::Approved));
+        transcript.apply_item(&tool_started(6, "second", calls[1].clone()));
+        let mut second = completion("second");
+        second.call_id.clone_from(&calls[1].id);
+        transcript.apply_item(&durable_completion(7, &second));
+        assert_eq!(
+            pump(&mut transcript).0,
+            ["✓ approved edit_file", "→ edit_file"],
+            "settled approvals do not broaden ordinary success output"
+        );
+        assert!(transcript.live_calls.is_empty());
+    }
+
+    #[test]
+    fn same_id_live_errors_use_their_outstanding_span_names() {
+        for approval_open in [false, true] {
+            let mut transcript = Transcript::new();
+            let mut calls = gated_calls();
+            calls[1].id = calls[0].id.clone();
+            if approval_open {
+                let mut batch = calls.clone();
+                batch.push(calls[0].clone());
+                transcript.apply_item(&approval_request(1, "ap1", batch));
+                transcript.apply_item(&call_resolution(2, "ap1", 0, Approval::Approved));
+                transcript.apply_item(&call_resolution(3, "ap1", 1, Approval::Approved));
+                pump(&mut transcript);
+            }
+            // Serial execution can still open B's span before A's buffered
+            // result lands. The duplicate provider id cannot rename A.
+            transcript.apply_item(&tool_started(4, "first", calls[0].clone()));
+            transcript.apply_item(&tool_started(5, "second", calls[1].clone()));
+            assert_eq!(transcript.live_calls.len(), 2);
+            let mut failed = completion("first");
+            failed.call_id.clone_from(&calls[0].id);
+            failed.error = Some(EventError {
+                kind: "tool".into(),
+                message: "write failed".into(),
+            });
+            failed.result = serde_json::json!({"retry": false});
+            transcript.apply_item(&durable_completion(6, &failed));
+            let rows = pump(&mut transcript).0;
+            if approval_open {
+                assert_eq!(
+                    rows,
+                    [
+                        "→ write_file",
+                        "→ edit_file",
+                        "✗ failed write_file",
+                        "  tool: write failed",
+                        "  {\"retry\":false}"
+                    ]
+                );
+            } else {
+                assert_eq!(
+                    rows,
+                    ["→ write_file", "→ edit_file", "✗ write_file: write failed"]
+                );
+            }
+            assert_eq!(transcript.live_calls.len(), 1);
+            assert_eq!(transcript.live_calls["second"], "edit_file");
+            failed.span_id = "second".into();
+            failed.error.as_mut().unwrap().message = "edit failed".into();
+            transcript.apply_item(&durable_completion(7, &failed));
+            assert!(pump(&mut transcript).0[0].contains("edit_file"));
+            assert!(transcript.live_calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn history_call_ids_never_supply_live_result_names() {
+        let sync = sync_with(history_with_repeated_calls(), Vec::new());
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        pump(&mut transcript);
+        let mut failed = completion("unseen-span");
+        failed.call_id = "c1".into();
+        failed.error = Some(EventError {
+            kind: "tool".into(),
+            message: "failed".into(),
+        });
+        transcript.apply_item(&durable_completion(1, &failed));
+        assert_eq!(
+            pump(&mut transcript).0,
+            ["✗ c1: failed"],
+            "span-free history is not evidence of a live tool's identity"
+        );
+        transcript.apply_item(&tool_started(2, "outstanding", gated_calls().remove(0)));
+        transcript.apply_item(&recorded(3, 1, EventKind::RunFinished { turns: 1 }));
+        assert!(transcript.live_calls.is_empty());
+    }
+
+    #[test]
+    fn an_unobserved_live_success_stays_quiet_during_a_pending_approval() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+        transcript.apply_item(&durable_completion(2, &completion("unseen-span")));
+        assert!(pump(&mut transcript).0.is_empty());
+    }
+
+    #[test]
+    fn completion_feedback_is_visible_before_a_sibling_is_decided() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+        transcript.apply_item(&call_resolution(2, "ap1", 1, Approval::Approved));
+        let completion = completion("second");
+        transcript.apply_item(&tool_started(
+            3,
+            "second",
+            ToolCall {
+                id: completion.call_id.clone(),
+                name: completion.name.clone(),
+                arguments: serde_json::json!({}),
+            },
+        ));
+        transcript.apply_item(&completed(4, completion.clone()));
+        transcript.apply_item(&completed(5, completion.clone()));
+        assert_eq!(
+            pump(&mut transcript).0,
+            [
+                "✓ approved edit_file",
+                "→ write_file",
+                "✓ completed write_file (turn 1, tool call 2)",
+                "  updated file",
+            ]
+        );
+        assert!(transcript.approvals["ap1"][0].is_some());
+        transcript.apply_item(&durable_completion(6, &completion));
+        assert!(pump(&mut transcript).0.is_empty());
+        assert!(transcript.live_calls.is_empty());
+        assert!(transcript.completed_tools.is_empty());
+    }
+
+    #[test]
+    fn completion_errors_deduplicate_by_span_not_provider_call_id() {
+        let mut transcript = Transcript::new();
+        let mut failed = completion("second");
+        failed.error = Some(EventError {
+            kind: "tool".into(),
+            message: "write failed".into(),
+        });
+        failed.result = serde_json::json!({"retry": false});
+        transcript.apply_item(&completed(1, failed.clone()));
+        let rows = pump(&mut transcript).0;
+        assert_eq!(
+            rows,
+            [
+                "✗ failed write_file (turn 1, tool call 2)",
+                "  tool: write failed",
+                "  {\"retry\":false}"
+            ]
+        );
+        let mut sibling = failed.clone();
+        sibling.span_id = "first".into();
+        transcript.apply_item(&durable_completion(2, &sibling));
+        assert_eq!(pump(&mut transcript).0, ["✗ duplicate: write failed"]);
+        transcript.apply_item(&durable_completion(3, &failed));
+        assert!(
+            pump(&mut transcript).0.is_empty(),
+            "the preview's own durable error must not render twice"
+        );
+    }
+
+    #[test]
+    fn completion_sync_restores_previews_without_double_rendering_after_lag() {
+        let mut sync = sync_with(Vec::new(), Vec::new());
+        sync.as_of_seq = 3;
+        sync.in_flight.completed_tools.push(completion("second"));
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        assert_eq!(pump(&mut transcript).0.len(), 2);
+        let mut third = completion("third");
+        third.message_call_index = 2;
+        third.result = serde_json::json!("another update");
+        sync.in_flight.completed_tools.push(third.clone());
+        sync.as_of_seq = 5;
+        transcript.apply_sync(&sync, 80, highlighter(), true);
+        assert_eq!(
+            pump(&mut transcript).0,
+            [
+                "✓ completed write_file (turn 1, tool call 3)",
+                "  another update"
+            ]
+        );
+        transcript.apply_sync(&sync, 80, highlighter(), true);
+        assert!(pump(&mut transcript).0.is_empty());
+        let replay = texts(&transcript.replay_tail(
+            20,
+            80,
+            highlighter(),
+            &Theme::ansi(),
+            ColorDepth::Truecolor,
+        ));
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|row| row.contains("✓ completed"))
+                .count(),
+            2
+        );
+        transcript.apply_item(&completed(5, third.clone()));
+        transcript.apply_item(&durable_completion(6, &completion("second")));
+        transcript.apply_item(&durable_completion(7, &third));
+        assert!(pump(&mut transcript).0.is_empty());
+        assert!(transcript.completed_tools.is_empty());
+    }
+
+    #[test]
+    fn completion_preview_bounds_text_structured_output_and_control_bytes() {
+        let mut completion = completion("span");
+        for result in [
+            serde_json::json!("\x1b[31m界\n".repeat(1000)),
+            serde_json::json!({"data": "界".repeat(10000)}),
+        ] {
+            completion.result = result;
+            let lines = completion_lines(&completion);
+            assert!(lines.len() <= 6);
+            assert!(lines.iter().map(|line| line.text().len()).sum::<usize>() < 1024);
+            assert!(lines.last().unwrap().text().contains("truncated"));
+            assert!(lines.iter().all(|line| !line.text().contains('\x1b')));
+        }
+    }
+
     #[test]
     fn replay_covers_the_open_tails_flushed_prefix_only() {
         let mut transcript = Transcript::new();
@@ -983,6 +1611,7 @@ mod tests {
                 provider: None,
                 model: None,
                 messages: Vec::new(),
+                tool_results: Vec::new(),
                 turns: 0,
                 warnings: Vec::new(),
                 scores: Vec::new(),
@@ -998,6 +1627,7 @@ mod tests {
                     },
                 }),
                 pending_approvals: Vec::new(),
+                completed_tools: Vec::new(),
             },
             settled_approvals: Vec::new(),
             as_of_seq: 4,
@@ -1093,6 +1723,118 @@ mod tests {
         assert_eq!(flushed, vec!["✓ approved ap1"]);
     }
 
+    fn call_resolution(
+        seq: u64,
+        request_id: &str,
+        call_index: usize,
+        decision: Approval,
+    ) -> LiveItem {
+        recorded(
+            seq,
+            1,
+            EventKind::Command(Command::ResolveApprovalCall {
+                command_id: format!("cmd-{seq}"),
+                request_id: request_id.into(),
+                call_index,
+                decision,
+            }),
+        )
+    }
+
+    #[test]
+    fn per_call_records_ignore_duplicates_and_leave_batch_indices_intact() {
+        let mut transcript = Transcript::new();
+        let mut calls = gated_calls();
+        calls[1].id = calls[0].id.clone();
+        transcript.apply_item(&approval_request(1, "ap1", calls));
+        transcript.apply_item(&call_resolution(2, "unknown", 0, Approval::Approved));
+        transcript.apply_item(&call_resolution(3, "ap1", usize::MAX, Approval::Approved));
+        transcript.apply_item(&call_resolution(4, "ap1", 1, Approval::Approved));
+        transcript.apply_item(&call_resolution(
+            5,
+            "ap1",
+            1,
+            Approval::Rejected { comment: None },
+        ));
+        assert_eq!(pump(&mut transcript).0, ["✓ approved edit_file"]);
+        transcript.apply_item(&recorded(
+            6,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-batch".into(),
+                request_id: "ap1".into(),
+                decisions: Vec::new(),
+            }),
+        ));
+        assert_eq!(pump(&mut transcript).0, ["✗ rejected write_file"]);
+        transcript.apply_item(&call_resolution(7, "ap1", 0, Approval::Approved));
+        assert!(pump(&mut transcript).0.is_empty());
+    }
+
+    #[test]
+    fn a_batch_fallback_uses_original_positions_after_an_individual_rejection() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+        transcript.apply_item(&call_resolution(
+            2,
+            "ap1",
+            0,
+            Approval::Rejected { comment: None },
+        ));
+        assert_eq!(pump(&mut transcript).0, ["✗ rejected write_file"]);
+        transcript.apply_item(&recorded(
+            3,
+            1,
+            EventKind::Command(Command::ResolveApproval {
+                command_id: "cmd-batch".into(),
+                request_id: "ap1".into(),
+                decisions: vec![Approval::Rejected { comment: None }, Approval::Approved],
+            }),
+        ));
+        assert_eq!(pump(&mut transcript).0, ["✓ approved edit_file"]);
+    }
+
+    #[test]
+    fn partial_sync_rebuilds_decisions_once_and_keeps_siblings_open() {
+        let mut sync = sync_with(Vec::new(), Vec::new());
+        sync.as_of_seq = 4;
+        sync.in_flight.pending_approvals.push(PendingApproval {
+            request_id: "ap1".into(),
+            turn: 1,
+            message_index: None,
+            calls: gated_calls(),
+            decisions: vec![None, Some(Approval::Approved)],
+            wait_timeout: std::time::Duration::from_secs(300),
+        });
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        assert_eq!(pump(&mut transcript).0, ["✓ approved edit_file"]);
+        transcript.apply_sync(&sync, 80, highlighter(), true);
+        assert!(
+            pump(&mut transcript).0.is_empty(),
+            "resync cannot reflush an old decision"
+        );
+        transcript.apply_item(&call_resolution(4, "ap1", 0, Approval::Approved));
+        transcript.apply_item(&call_resolution(
+            5,
+            "ap1",
+            1,
+            Approval::Rejected { comment: None },
+        ));
+        assert!(
+            pump(&mut transcript).0.is_empty(),
+            "stale and duplicate answers have no effect"
+        );
+        transcript.apply_item(&call_resolution(
+            6,
+            "ap1",
+            0,
+            Approval::Rejected { comment: None },
+        ));
+        assert_eq!(pump(&mut transcript).0, ["✗ rejected write_file"]);
+        assert!(transcript.approvals.is_empty());
+    }
+
     #[test]
     fn a_rejected_resolution_reads_in_the_error_slot() {
         let mut transcript = Transcript::new();
@@ -1148,6 +1890,7 @@ mod tests {
                 provider: None,
                 model: None,
                 messages: Vec::new(),
+                tool_results: Vec::new(),
                 turns: 0,
                 warnings: Vec::new(),
                 scores: Vec::new(),
@@ -1156,10 +1899,13 @@ mod tests {
             },
             in_flight: InFlight {
                 open_turn: None,
+                completed_tools: Vec::new(),
                 pending_approvals: vec![cadmus_contract::PendingApproval {
                     request_id: "ap9".into(),
                     turn: 1,
+                    message_index: None,
                     calls: gated_calls(),
+                    decisions: Vec::new(),
                     wait_timeout: std::time::Duration::from_secs(300),
                 }],
             },
@@ -1215,6 +1961,7 @@ mod tests {
             ],
             vec![cadmus_contract::SettledApproval {
                 request_id: "ap1".into(),
+                message_index: Some(1),
                 calls: calls.clone(),
                 decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
             }],
@@ -1240,6 +1987,347 @@ mod tests {
         );
     }
 
+    fn history_with_repeated_calls() -> Vec<Message> {
+        let mut first = Message::text(Role::Assistant, "seeded turn");
+        first.content.extend(
+            gated_calls()
+                .into_iter()
+                .map(|call| cadmus_contract::ContentPart::ToolCall { call }),
+        );
+        let mut second = first.clone();
+        second.content[0] = cadmus_contract::ContentPart::Text {
+            text: "current turn one".into(),
+        };
+        let mut third = first.clone();
+        third.content[0] = cadmus_contract::ContentPart::Text {
+            text: "current turn two".into(),
+        };
+        vec![
+            Message::user("seeded prompt"),
+            first,
+            Message::user("current prompt"),
+            second,
+            third,
+        ]
+    }
+
+    fn pending_durable_baseline() -> Sync {
+        let call = gated_calls().remove(0);
+        let mut assistant = Message::text(Role::Assistant, "current turn");
+        assistant.content.extend(
+            [call.clone(), call.clone()]
+                .into_iter()
+                .map(|call| cadmus_contract::ContentPart::ToolCall { call }),
+        );
+        let mut sync = sync_with(
+            vec![
+                Message::user("change it"),
+                assistant,
+                Message::tool_result(call.id.clone(), serde_json::json!("first change written")),
+            ],
+            Vec::new(),
+        );
+        sync.as_of_seq = 10;
+        sync.history.tool_results.push(ToolResultProjection {
+            message_index: 2,
+            request_id: "ap1".into(),
+            call_index: 0,
+        });
+        sync.in_flight.pending_approvals.push(PendingApproval {
+            request_id: "ap1".into(),
+            turn: 1,
+            message_index: Some(1),
+            calls: vec![call.clone(), call],
+            decisions: vec![Some(Approval::Approved), None],
+            wait_timeout: std::time::Duration::from_secs(300),
+        });
+        sync
+    }
+
+    #[test]
+    fn a_fresh_partial_attach_previews_the_durable_success_without_a_completion() {
+        let sync = pending_durable_baseline();
+        assert!(sync.in_flight.completed_tools.is_empty());
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let (rows, live) = pump(&mut transcript);
+        assert_eq!(
+            rows,
+            [
+                "> change it",
+                "",
+                "current turn",
+                "✓ approved write_file",
+                "→ write_file",
+                "→ write_file",
+                "✓ completed write_file",
+                "  first change written"
+            ]
+        );
+        assert!(live.is_empty());
+        assert!(transcript.approvals["ap1"][1].is_some());
+        assert!(pump(&mut transcript).0.is_empty());
+        transcript.apply_sync(&sync, 80, highlighter(), true);
+        assert!(
+            pump(&mut transcript).0.is_empty(),
+            "the durable preview stays preflushed on resync"
+        );
+        let replay = texts(&transcript.replay_tail(
+            20,
+            80,
+            highlighter(),
+            &Theme::ansi(),
+            ColorDepth::Truecolor,
+        ));
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|row| row.contains("first change written"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_fresh_interrupted_partial_attach_attributes_only_bs_result_with_duplicate_ids() {
+        let mut sync = pending_durable_baseline();
+        let mut calls = gated_calls();
+        calls[0].name = "A".into();
+        calls[1].name = "B".into();
+        calls[1].id = calls[0].id.clone();
+        sync.history.messages[1].content = calls
+            .iter()
+            .cloned()
+            .map(|call| cadmus_contract::ContentPart::ToolCall { call })
+            .collect();
+        sync.history.messages[2] =
+            Message::tool_result(calls[1].id.clone(), serde_json::json!("B completed"));
+        sync.history.tool_results[0].call_index = 1;
+        let pending = &mut sync.in_flight.pending_approvals[0];
+        pending.calls = calls;
+        pending.decisions = vec![None, Some(Approval::Approved)];
+        assert!(sync.in_flight.completed_tools.is_empty());
+        assert_eq!(pending_result_names(&sync), HashMap::from([(2, "B")]));
+
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let rows = pump(&mut transcript).0;
+        assert!(
+            rows.windows(2)
+                .any(|rows| rows == ["✓ completed B", "  B completed"])
+        );
+        assert!(!rows.iter().any(|row| row == "✓ completed A"));
+        assert!(transcript.approvals["ap1"][0].is_some());
+    }
+
+    #[test]
+    fn pending_baseline_results_use_approval_addresses_and_stay_in_the_anchored_turn() {
+        let mut sync = pending_durable_baseline();
+        let mut seeded = sync.history.messages[1].clone();
+        seeded.content[0] = cadmus_contract::ContentPart::Text {
+            text: "seeded turn".into(),
+        };
+        sync.history.messages.splice(
+            0..0,
+            [
+                seeded,
+                Message::tool_result("c1", serde_json::json!("old success")),
+            ],
+        );
+        sync.in_flight.pending_approvals[0].message_index = Some(3);
+        // Perception has no approval address, even though its result is first
+        // in the full assistant batch. Every provider id deliberately repeats.
+        sync.history.messages[3].content.insert(
+            1,
+            cadmus_contract::ContentPart::ToolCall {
+                call: ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({}),
+                },
+            },
+        );
+        sync.history.messages.insert(
+            4,
+            Message::tool_result("c1", serde_json::json!("read result")),
+        );
+        sync.history
+            .messages
+            .push(Message::text(Role::Assistant, "later turn"));
+        sync.history.messages.push(Message::tool_result(
+            "c1",
+            serde_json::json!("later success"),
+        ));
+        sync.history.tool_results[0].message_index = 5;
+        // Even matching request metadata cannot move a result across the anchor.
+        for message_index in [1, 7] {
+            sync.history.tool_results.push(ToolResultProjection {
+                message_index,
+                request_id: "ap1".into(),
+                call_index: 0,
+            });
+        }
+        assert_eq!(
+            pending_result_names(&sync),
+            HashMap::from([(5, "write_file")])
+        );
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let rows = pump(&mut transcript).0;
+        assert!(!rows.iter().any(|row| row.contains("read result")));
+        assert!(
+            rows.windows(2)
+                .any(|rows| rows == ["✓ completed write_file", "  first change written"])
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("old success") || row.contains("later success"))
+        );
+    }
+
+    #[test]
+    fn a_pending_baseline_result_uses_the_bounded_preview_for_text_and_errors() {
+        let mut sync = pending_durable_baseline();
+        let result = sync.history.messages.last_mut().unwrap();
+        result.is_error = true;
+        result.content = vec![
+            cadmus_contract::ContentPart::Text {
+                text: "first error line".into(),
+            },
+            cadmus_contract::ContentPart::Text {
+                text: "detail\n".repeat(1000),
+            },
+        ];
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let rows = pump(&mut transcript).0;
+        let at = rows
+            .iter()
+            .position(|row| row == "✗ failed write_file")
+            .unwrap();
+        assert_eq!(rows[at + 1], "  first error line");
+        assert_eq!(rows.last().unwrap(), "  ⋯ result preview truncated");
+        assert_eq!(rows[at..].len(), 6);
+    }
+
+    #[test]
+    fn successful_history_stays_quiet_without_an_open_anchored_batch() {
+        let baseline = pending_durable_baseline();
+        let mut no_pending = baseline.clone();
+        no_pending.in_flight.pending_approvals.clear();
+        no_pending.history.messages.push(Message::tool_result(
+            "c1",
+            serde_json::json!("second change written"),
+        ));
+        let mut settled = baseline.clone();
+        settled.in_flight.pending_approvals[0].decisions = vec![Some(Approval::Approved); 2];
+        let mut missing_anchor = baseline.clone();
+        missing_anchor.in_flight.pending_approvals[0].message_index = None;
+        let mut invalid_anchor = baseline.clone();
+        invalid_anchor.in_flight.pending_approvals[0].message_index = Some(0);
+        let mut no_metadata = baseline.clone();
+        no_metadata.history.tool_results.clear();
+        let mut wrong_request = baseline.clone();
+        wrong_request.history.tool_results[0].request_id = "another request".into();
+        let mut unanswered_call = baseline.clone();
+        unanswered_call.history.tool_results[0].call_index = 1;
+        let mut invalid_call = baseline.clone();
+        invalid_call.history.tool_results[0].call_index = usize::MAX;
+        let mut invalid_result = baseline;
+        invalid_result.history.tool_results[0].message_index = usize::MAX;
+        for sync in [
+            no_pending,
+            settled,
+            missing_anchor,
+            invalid_anchor,
+            no_metadata,
+            wrong_request,
+            unanswered_call,
+            invalid_call,
+            invalid_result,
+        ] {
+            let mut transcript = Transcript::new();
+            transcript.apply_sync(&sync, 80, highlighter(), false);
+            let rows = pump(&mut transcript).0;
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| row.contains("first change written")
+                        || row.starts_with("✓ completed"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_legacy_pending_result_retains_error_rendering_without_a_success_preview() {
+        let mut sync = pending_durable_baseline();
+        sync.history.tool_results.clear();
+        sync.history.messages[2] = Message::tool_error("c1", serde_json::json!("legacy failure"));
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let rows = pump(&mut transcript).0;
+        assert_eq!(rows.last().unwrap(), "✗ write_file: legacy failure");
+    }
+
+    #[test]
+    fn approval_anchors_distinguish_identical_calls_across_seeded_and_current_turns() {
+        let mut sync = sync_with(
+            history_with_repeated_calls(),
+            vec![SettledApproval {
+                request_id: "settled".into(),
+                message_index: Some(3),
+                calls: gated_calls(),
+                decisions: vec![Approval::Approved; 2],
+            }],
+        );
+        sync.in_flight.pending_approvals.push(PendingApproval {
+            request_id: "partial".into(),
+            turn: 2,
+            message_index: Some(4),
+            calls: gated_calls(),
+            decisions: vec![None, Some(Approval::Rejected { comment: None })],
+            wait_timeout: std::time::Duration::from_secs(300),
+        });
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let rows = pump(&mut transcript).0;
+        let current = rows
+            .iter()
+            .position(|row| row == "current turn one")
+            .unwrap();
+        let next = rows
+            .iter()
+            .position(|row| row == "current turn two")
+            .unwrap();
+        assert_eq!(rows[current + 1], "✓ approved write_file, edit_file");
+        assert_eq!(rows[next + 1], "✗ rejected edit_file");
+        assert!(
+            !rows[..current]
+                .iter()
+                .any(|row| row.contains("approved") || row.contains("rejected"))
+        );
+    }
+
+    #[test]
+    fn absent_invalid_or_non_assistant_anchors_render_at_the_tail() {
+        for message_index in [None, Some(usize::MAX), Some(0)] {
+            let sync = sync_with(
+                history_with_repeated_calls(),
+                vec![SettledApproval {
+                    request_id: "ap1".into(),
+                    message_index,
+                    calls: gated_calls(),
+                    decisions: vec![Approval::Approved; 2],
+                }],
+            );
+            let mut transcript = Transcript::new();
+            transcript.apply_sync(&sync, 80, highlighter(), false);
+            let rows = pump(&mut transcript).0;
+            assert_eq!(rows.last().unwrap(), "✓ approved write_file, edit_file");
+        }
+    }
+
     /// The crash window: the batch settled but its turn's response never
     /// folded, so no message carries its calls. The explicit record still
     /// renders — after the history, in window order.
@@ -1249,6 +2337,7 @@ mod tests {
             vec![cadmus_contract::Message::user("change it")],
             vec![cadmus_contract::SettledApproval {
                 request_id: "ap1".into(),
+                message_index: None,
                 calls: gated_calls(),
                 decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
             }],

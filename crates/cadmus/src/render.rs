@@ -27,7 +27,8 @@ pub fn spawn(
     first: cadmus_contract::Attachment,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        // call id → tool name, so a failed result line can name its tool.
+        // Outstanding span → tool name; provider call ids may repeat, and
+        // per-call execution need not start in result order.
         let mut calls: HashMap<String, String> = HashMap::new();
         let mut attachment = first;
         loop {
@@ -35,6 +36,7 @@ pub fn spawn(
                 None => break,
                 Some(LiveUpdate::Lagged) => {
                     eprintln!("… progress display fell behind; resynced");
+                    calls.clear();
                     attachment = broadcaster.attach();
                 }
                 Some(LiveUpdate::Item { item }) => {
@@ -50,7 +52,9 @@ pub fn spawn(
 /// Renders one item; returns true at the run's terminal record.
 fn render(item: &LiveItem, calls: &mut HashMap<String, String>) -> bool {
     match &item.kind {
-        LiveKind::AssistantDelta { .. } => {}
+        // Print mode needs no provisional feedback for a human deciding a
+        // sibling; the ordered durable result below owns its progress output.
+        LiveKind::AssistantDelta { .. } | LiveKind::ToolCompleted { .. } => {}
         LiveKind::ApprovalRequested { calls: batch, .. } => {
             let names = batch
                 .iter()
@@ -75,20 +79,84 @@ fn render(item: &LiveItem, calls: &mut HashMap<String, String>) -> bool {
                 eprintln!("  ⑃ context folded: {} result(s) compressed", folded.len());
             }
             EventKind::ToolCall { call } => {
-                calls.insert(call.id.clone(), call.name.clone());
+                calls.insert(event.span_id.clone(), call.name.clone());
                 eprintln!("  → {}", call.name);
             }
-            EventKind::ToolResult { call_id, .. } if event.status == Status::Error => {
-                let tool = calls.get(call_id).map_or(call_id.as_str(), String::as_str);
-                let detail = event
-                    .error
-                    .as_ref()
-                    .map_or("failed", |error| error.message.as_str());
-                eprintln!("  ✗ {tool}: {detail}");
+            EventKind::ToolResult { call_id, .. } => {
+                let name = calls.remove(&event.span_id);
+                if event.status == Status::Error {
+                    let tool = name.as_deref().unwrap_or(call_id);
+                    let detail = event
+                        .error
+                        .as_ref()
+                        .map_or("failed", |error| error.message.as_str());
+                    eprintln!("  ✗ {tool}: {detail}");
+                }
             }
             EventKind::RunFinished { .. } => return true,
             _ => {}
         },
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cadmus_contract::{Event, ToolCall};
+    use serde_json::json;
+
+    fn item(span: &str, kind: EventKind) -> LiveItem {
+        LiveItem {
+            seq: 1,
+            trace_id: "test".into(),
+            kind: LiveKind::Recorded {
+                event: Box::new(Event::new(
+                    1,
+                    "event".into(),
+                    "test".into(),
+                    span.into(),
+                    None,
+                    0,
+                    kind,
+                )),
+            },
+        }
+    }
+
+    #[test]
+    fn repeated_provider_ids_keep_independent_span_names_until_each_result() {
+        let mut calls = HashMap::new();
+        for (span, name) in [("s1", "write_file"), ("s2", "edit_file")] {
+            render(
+                &item(
+                    span,
+                    EventKind::ToolCall {
+                        call: ToolCall {
+                            id: "same".into(),
+                            name: name.into(),
+                            arguments: json!({}),
+                        },
+                    },
+                ),
+                &mut calls,
+            );
+        }
+        assert_eq!(calls.get("s1").map(String::as_str), Some("write_file"));
+        assert_eq!(calls.get("s2").map(String::as_str), Some("edit_file"));
+        for span in ["s1", "s2"] {
+            render(
+                &item(
+                    span,
+                    EventKind::ToolResult {
+                        call_id: "same".into(),
+                        result: json!("ok"),
+                    },
+                ),
+                &mut calls,
+            );
+            assert!(!calls.contains_key(span));
+        }
+        assert!(calls.is_empty());
+    }
 }

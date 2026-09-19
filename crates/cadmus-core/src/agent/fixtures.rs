@@ -213,6 +213,7 @@ pub fn kind_name(event: &Event) -> &'static str {
     match &event.kind {
         EventKind::Command(Command::StartRun { .. }) => "start_run",
         EventKind::Command(Command::ResolveApproval { .. }) => "resolve_approval",
+        EventKind::Command(Command::ResolveApprovalCall { .. }) => "resolve_approval_call",
         EventKind::Command(Command::Steer { .. }) => "steer",
         EventKind::Command(Command::Interrupt { .. }) => "interrupt",
         EventKind::LlmRequest { .. } => "llm_request",

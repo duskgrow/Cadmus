@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Approval, Command, Event, RunState, StreamChunk, ToolCall, Usage};
+use crate::{Approval, Command, Event, EventError, RunState, StreamChunk, ToolCall, Usage};
 
 /// One item on a run's live stream: a monotonic `seq` (the same sequence
 /// durable events draw from) plus the payload.
@@ -53,10 +53,15 @@ pub enum LiveKind {
     /// `llm_response` event, which reconciles exactly with the buffered
     /// deltas (item 5).
     AssistantDelta { turn: u32, chunk: StreamChunk },
+    /// A tool finished ahead of the ordered durable-result cursor. Clients
+    /// can inspect its outcome before deciding an earlier sibling. The later
+    /// recorded `tool_result` on the same span reconciles this provisional
+    /// observation; it is not a second result in the conversation or log.
+    ToolCompleted { completion: ToolCompletion },
     /// A gated tool batch awaits resolution (ADR-0008 item 4): clients draw
     /// the approval dialog from this. The resolution arrives as a
-    /// `Recorded` `resolve_approval` command — the request itself is never
-    /// logged (the decision is the durable fact), so an attach during the
+    /// `Recorded` `resolve_approval` or `resolve_approval_call` command. The
+    /// request itself is never logged (the decision is the durable fact), so an attach during the
     /// wait reconstructs the dialog from [`InFlight::pending_approvals`].
     /// `wait_timeout` is the budget after which the gate settles the batch
     /// as a recorded denial (item 4's pairing rule), so the dialog can name
@@ -114,6 +119,32 @@ pub struct InFlight {
     /// approval wait renders the dialog immediately from this (item 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_approvals: Vec<PendingApproval>,
+    /// Completed calls still waiting for their ordered durable result. Entries
+    /// retire by span id when `tool_result` lands; this never grows with history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_tools: Vec<ToolCompletion>,
+}
+
+/// A provisional tool outcome whose durable result is awaiting earlier calls.
+/// Span identity, unlike provider call ids, is unique within the run.
+///
+/// `result` is the durable body verbatim, so a blocked result travels the
+/// live stream twice (here and in the later `tool_result`): the provisional
+/// copy shows exists for the human deciding a sibling, and the client
+/// reconciles the two by `span_id` instead of printing both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCompletion {
+    pub span_id: String,
+    pub turn: u32,
+    /// Position in the assistant's complete tool-call list — *not* the gated
+    /// batch position `ApprovalRequested.calls` and the approval address
+    /// attributes use, so the two spaces are never mixed when labelling.
+    pub message_call_index: usize,
+    pub call_id: String,
+    pub name: String,
+    pub result: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<EventError>,
 }
 
 /// One in-flight assistant turn.
@@ -164,29 +195,43 @@ pub enum CallSnapshot {
 pub struct PendingApproval {
     pub request_id: String,
     pub turn: u32,
+    /// Originating assistant message in `Sync.history.messages`, including the
+    /// run's seeded history. Absent in older baselines or when no response was
+    /// observed; clients then render the record at the tail, never guess by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
     pub calls: Vec<ToolCall>,
+    /// Decisions already recorded for this request while it remains open.
+    /// The vector is indexed like `calls`; `None` means the client still owns
+    /// that call. An attach can therefore resume a partially settled dialog
+    /// without asking a call twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Option<Approval>>,
     /// The wait budget the request was published with — an attach
     /// mid-wait reconstructs the same dialog, deadline naming included
     /// (`ApprovalRequested`'s field, aggregated unchanged).
     pub wait_timeout: Duration,
 }
 
-/// One approval batch settled by a recorded `resolve_approval` — the attach
-/// baseline's explicit record of the decision (the live path renders it
-/// when the resolve arrives; an attach after the settle would otherwise
-/// show only the consequence). The request itself was live-only, so the
-/// aggregator pairs the recorded resolve with the calls it saw presented.
+/// Recorded decisions from an approval request no longer open: a completed
+/// batch, or only the decided subset if termination left siblings unanswered.
+/// The request itself was live-only, so the aggregator pairs recorded decisions
+/// with the calls it saw presented; untouched siblings are never invented as
+/// rejections on termination.
 /// A bounded window, oldest first: render support for the rebuild, never
 /// the record — the trajectory log owns the durable fact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettledApproval {
     pub request_id: String,
-    /// The presented batch's calls, as the request carried them — the
-    /// rebuild names the decision per call, like the live path.
+    /// The same history anchor as `PendingApproval::message_index`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
+    /// Calls with recorded decisions, in original relative order. Termination
+    /// may leave only a subset; this is a display record, not an address space.
     pub calls: Vec<ToolCall>,
-    /// The recorded decisions, one per presented call; a short reply
-    /// denies the remainder (the gate's rule), so the rebuild renders
-    /// the missing tail as rejections too.
+    /// The recorded decisions aligned with `calls`. The aggregator fills
+    /// legacy short batch replies with rejections; readers of older baselines
+    /// still treat a missing tail as rejected.
     pub decisions: Vec<Approval>,
 }
 

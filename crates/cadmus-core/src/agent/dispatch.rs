@@ -1,41 +1,45 @@
-//! Tool-call dispatch (ADR-0008 items 2/4): batch approval first, then
-//! serial or cooperative-parallel execution, with messages and events
-//! always landing in call order so the trajectory reads the same either way.
+//! Tool-call dispatch (ADR-0008 items 2/4): per-call approval and execution
+//! advance together, while result events and messages retain original order —
+//! except on interrupt, which stops new starts, skips untouched calls without
+//! inventing rejections for them, and records the results that did land in
+//! their relative order.
 
-use std::collections::HashMap;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
+use std::task::Poll;
 
-use cadmus_contract::{EventError, EventKind, Message, ToolCall, error_kinds};
+use cadmus_contract::{
+    Approval, EventError, EventKind, LiveKind, Message, TimedRecv, ToolCall, ToolCompletion, attrs,
+    error_kinds,
+};
 use serde_json::Value;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 
+use super::events::interrupted_detail;
 use super::fold::ResultTrack;
+use super::gate::Gate;
 use super::{AgentError, AgentLoop, Concurrency, ToolError};
 
+type ToolOutcome = (Value, Option<EventError>);
+type CommandWait<'a> = Pin<Box<dyn Future<Output = TimedRecv> + Send + 'a>>;
+
+enum DispatchTick {
+    Tool(usize, ToolOutcome),
+    Command(TimedRecv),
+}
+
 impl AgentLoop {
-    /// Executes one assistant turn's tool calls, appending call/result event
-    /// pairs, and pushing the tool messages onto the history. A batch runs
-    /// concurrently only when EVERY call in it is parallel-safe; a single
-    /// undeclared call serializes the whole batch in call order (ADR-0008
-    /// item 2). Messages and events always land in call order, so the
-    /// trajectory reads the same either way.
+    /// All-parallel-safe batches launch every decided call without waiting
+    /// for siblings. Any serial declaration limits the batch to one invocation
+    /// at a time, choosing the first ready, unstarted call in original order.
+    /// Undecided siblings do not block execution; only durable result events
+    /// and messages wait for original positions.
     ///
-    /// Batch approval precedes any execution (ADR-0008 item 4 amendment):
-    /// the turn's gated (mutation) calls are presented together, each
-    /// approved or rejected independently, so a decision can depend on the
-    /// batch's contents but never on another gated call's result. A
-    /// rejected call never invokes; its rejection lands as an `is_error`
-    /// tool result in call order.
-    ///
-    /// All-or-nothing, not segment mixing: the model emits a turn's calls as
-    /// one unordered batch — it cannot know which tools are parallel-safe,
-    /// and scheduling is not its job — so a finer-grained schedule buys no
-    /// real ordering information, while a sloppy batch (a write followed by
-    /// its own run command) is still rescued by in-order serial execution.
-    /// Safety is a property of the tool's side effects (a same-file
-    /// read-modify-write race, an external session's state), so the
-    /// declaration lives on the tool with a fail-safe serial default. What
-    /// the scheduler protects against is silent corruption, not errors —
-    /// errors are already recoverable model feedback.
+    /// The cooperative poll loop needs no runtime. Interrupt stops new starts,
+    /// drains in-flight work, and records its results before the terminal event.
+    // Keep start/flush/interrupt ordering together: these transitions share
+    // the same cursors, and splitting them obscures which calls may still run.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn dispatch_tools(
         &self,
         calls: Vec<ToolCall>,
@@ -43,16 +47,172 @@ impl AgentLoop {
         root_span: &str,
         turn: usize,
     ) -> Result<(), AgentError> {
-        let denied = self.gate(&calls, root_span, turn).await?;
+        let mut gate = self.open_gate(&calls, turn);
         let all_safe = calls.iter().all(|call| self.is_parallel_safe(call));
-        if all_safe {
-            self.dispatch_parallel(&calls, &denied, messages, root_span, turn)
-                .await?;
-        } else {
-            for (position, call) in calls.iter().enumerate() {
-                self.dispatch_one(call, denied.get(&position), messages, root_span, turn)
-                    .await?;
+        let mut branches = tokio_stream::StreamMap::new();
+        let mut spans = vec![None; calls.len()];
+        let mut outcomes: Vec<Option<ToolOutcome>> = vec![None; calls.len()];
+        let mut flushed = 0;
+        let mut interrupt = None;
+        let mut waiting: Option<CommandWait<'_>> = None;
+        let mut completed = Vec::new();
+        loop {
+            // A parked receive owns the source's mutex, so poll_incoming alone
+            // can miss a queued interrupt when a tool completes at the same time.
+            // Poll that receiver before admitting any more work.
+            if let Some(Poll::Ready(command)) =
+                poll_fn(|cx| Poll::Ready(waiting.as_mut().map(|wait| wait.as_mut().poll(cx)))).await
+            {
+                waiting = None;
+                self.receive_during_dispatch(command, &mut gate, root_span, turn)?;
             }
+            self.poll_incoming();
+            if interrupt.is_none() {
+                interrupt = self.take_interrupt();
+            }
+            let mut admitted = false;
+            if interrupt.is_none() {
+                gate.drain(self, root_span, turn)?;
+                for (position, call) in calls.iter().enumerate().skip(flushed) {
+                    if !all_safe && !branches.is_empty() {
+                        break;
+                    }
+                    if spans[position].is_some() {
+                        continue;
+                    }
+                    let Some(decision) = &gate.decisions[position] else {
+                        continue;
+                    };
+                    let span = self.next_span();
+                    self.emit(&self.turn_event(
+                        &span,
+                        root_span,
+                        turn,
+                        EventKind::ToolCall { call: call.clone() },
+                    ))?;
+                    spans[position] = Some(span);
+                    admitted = true;
+                    match decision {
+                        Approval::Rejected { comment } => {
+                            outcomes[position] = Some(rejection(call, comment.as_deref()));
+                            completed.push(position);
+                        }
+                        Approval::Approved => {
+                            // One pinned single-item stream per call, driven on
+                            // this task. Blocking tools still run synchronously.
+                            branches.insert(
+                                position,
+                                Box::pin(
+                                    tokio_stream::iter(std::iter::once(self.execute(call)))
+                                        .then(std::convert::identity),
+                                ),
+                            );
+                        }
+                    }
+                    if !all_safe {
+                        break;
+                    }
+                }
+            }
+            while flushed < calls.len() {
+                if let Some(outcome) = outcomes[flushed].take() {
+                    self.push_result(
+                        &calls[flushed],
+                        spans[flushed].as_deref().expect("started call"),
+                        outcome,
+                        gate.approval_address(flushed),
+                        messages,
+                        root_span,
+                        turn,
+                    )?;
+                } else if interrupt.is_none() || spans[flushed].is_some() {
+                    break;
+                }
+                // On interrupt, untouched slots are not fabricated as denials;
+                // completed later calls still reach the log, in relative order.
+                flushed += 1;
+            }
+            // The ordered cursor consumed everything immediately recordable.
+            // Publish only newly completed outcomes still blocked behind it;
+            // their durable result later reconciles by this exact span id.
+            for position in completed.drain(..) {
+                if let Some((result, error)) = &outcomes[position] {
+                    self.publish(LiveKind::ToolCompleted {
+                        completion: ToolCompletion {
+                            span_id: spans[position].clone().expect("started call"),
+                            turn: u32::try_from(turn).unwrap_or(u32::MAX),
+                            message_call_index: position,
+                            call_id: calls[position].id.clone(),
+                            name: calls[position].name.clone(),
+                            result: result.clone(),
+                            error: error.clone(),
+                        },
+                    });
+                }
+            }
+            if flushed == calls.len() {
+                break;
+            }
+            // A newly admitted rejection may leave more ready serial work.
+            // Buffered later outcomes alone must never cause a busy loop.
+            if admitted && branches.is_empty() {
+                continue;
+            }
+            if !gate.pending() || interrupt.is_some() {
+                waiting = None;
+            } else if waiting.is_none() {
+                waiting = Some(self.protocol.commands.recv_timeout(gate.remaining(self)));
+            }
+            // Retain the receive future across tool completions: neither a
+            // tool wake nor a stray command resets the gate's fixed deadline.
+            let tick = poll_fn(|cx| {
+                if let Poll::Ready(Some((position, outcome))) =
+                    Pin::new(&mut branches).poll_next(cx)
+                {
+                    return Poll::Ready(DispatchTick::Tool(position, outcome));
+                }
+                if let Some(wait) = &mut waiting
+                    && let Poll::Ready(command) = wait.as_mut().poll(cx)
+                {
+                    return Poll::Ready(DispatchTick::Command(command));
+                }
+                Poll::Pending
+            })
+            .await;
+            match tick {
+                DispatchTick::Tool(position, outcome) => {
+                    branches.remove(&position);
+                    outcomes[position] = Some(outcome);
+                    completed.push(position);
+                }
+                DispatchTick::Command(command) => {
+                    waiting = None;
+                    self.receive_during_dispatch(command, &mut gate, root_span, turn)?;
+                }
+            }
+        }
+        if let Some(command) = interrupt {
+            // Recorded after the drained results: those commands were applied
+            // when they arrived (record-on-effect), and the interrupt's
+            // application point is here, where it stopped new starts.
+            self.record_command(command, root_span, turn)?;
+            self.finish_with(root_span, turn, Some(interrupted_detail()))?;
+            return Err(AgentError::Interrupted);
+        }
+        Ok(())
+    }
+
+    fn receive_during_dispatch(
+        &self,
+        command: TimedRecv,
+        gate: &mut Gate,
+        root_span: &str,
+        turn: usize,
+    ) -> Result<(), AgentError> {
+        match command {
+            TimedRecv::Command(command) => self.note(command),
+            TimedRecv::Closed => gate.deny_unanswered(self, root_span, turn, false)?,
+            TimedRecv::TimedOut => gate.deny_unanswered(self, root_span, turn, true)?,
         }
         Ok(())
     }
@@ -63,114 +223,15 @@ impl AgentLoop {
             .is_some_and(|tool| tool.concurrency() == Concurrency::ParallelSafe)
     }
 
-    async fn dispatch_one(
-        &self,
-        call: &ToolCall,
-        denied: Option<&Option<String>>,
-        messages: &mut Vec<Message>,
-        root_span: &str,
-        turn: usize,
-    ) -> Result<(), AgentError> {
-        let tool_span = self.next_span();
-        // The call event opens the span whether or not the gate lets the
-        // invocation through — a rejected call is a paired, closed span,
-        // never a dangling one.
-        self.emit(&self.turn_event(
-            &tool_span,
-            root_span,
-            turn,
-            EventKind::ToolCall { call: call.clone() },
-        ))?;
-        let outcome = match denied {
-            Some(comment) => rejection(call, comment.as_deref()),
-            None => self.execute(call).await,
-        };
-        self.push_result(call, &tool_span, outcome, messages, root_span, turn)
-    }
-
-    /// One batch of parallel-safe calls (ADR-0008 item 2): call events land
-    /// in order, results land in call order, and the invocations are driven
-    /// cooperatively (one pinned single-item branch per call; `StreamMap`
-    /// polls every branch — core stays runtime-free per ADR-0002).
-    /// Cooperative means wall-time overlap exists only for futures that
-    /// yield (MCP wrappers, approval waits): the built-in fs tools are
-    /// blocking and never yield, so their batches currently serialize in
-    /// wall time while keeping the same contract. Tool errors stay
-    /// per-call; a panicking tool aborts the run, exactly as in serial
-    /// execution.
-    async fn dispatch_parallel(
-        &self,
-        calls: &[ToolCall],
-        denied: &HashMap<usize, Option<String>>,
-        messages: &mut Vec<Message>,
-        root_span: &str,
-        turn: usize,
-    ) -> Result<(), AgentError> {
-        let mut spans = Vec::with_capacity(calls.len());
-        for call in calls {
-            let tool_span = self.next_span();
-            self.emit(&self.turn_event(
-                &tool_span,
-                root_span,
-                turn,
-                EventKind::ToolCall { call: call.clone() },
-            ))?;
-            spans.push(tool_span);
-        }
-
-        // One single-item stream per call; StreamMap polls every branch,
-        // so the invocations are driven concurrently on this task. The
-        // iter+then pair is load-bearing: `tokio_stream::once` would yield
-        // the future OBJECT un-driven (its Item is the value itself).
-        let mut branches = tokio_stream::StreamMap::new();
-        let mut outcomes: Vec<Option<(Value, Option<EventError>)>> =
-            (0..calls.len()).map(|_| None).collect();
-        for (offset, call) in calls.iter().enumerate() {
-            // A rejected call never becomes a branch: its denial is the
-            // settled outcome, pre-filled in call order.
-            if let Some(comment) = denied.get(&offset) {
-                outcomes[offset] = Some(rejection(call, comment.as_deref()));
-                continue;
-            }
-            let tool = self
-                .tools
-                .get(&call.name)
-                .cloned()
-                .expect("parallel-safe calls resolve to a registered tool");
-            let arguments = call.arguments.clone();
-            // Pinned to the heap for `Unpin`: an in-flight async block is
-            // not `Unpin`, which `StreamMap` requires of its branches.
-            let branch = Box::pin(
-                tokio_stream::iter(std::iter::once(async move { tool.invoke(arguments).await }))
-                    .then(std::convert::identity),
-            );
-            branches.insert(offset, branch);
-        }
-        while let Some((offset, result)) = branches.next().await {
-            outcomes[offset] = Some(match result {
-                Ok(content) => (content, None),
-                Err(err) => tool_failure(&err),
-            });
-        }
-
-        for (call, (tool_span, outcome)) in calls.iter().zip(spans.iter().zip(outcomes)) {
-            // Invariant, not a runtime condition: every branch yields exactly
-            // one item, so every slot is filled. No AgentError variant would
-            // help a caller — a miss means this code changed shape — so the
-            // assertion panics instead of propagating.
-            let outcome = outcome.expect("every call in the batch settled");
-            self.push_result(call, tool_span, outcome, messages, root_span, turn)?;
-        }
-        Ok(())
-    }
-
     /// Appends the result event (errored on failure) and the tool message
     /// (`is_error`-marked on failure) for one settled call.
+    #[allow(clippy::too_many_arguments)] // Event coordinates plus the optional approval address.
     fn push_result(
         &self,
         call: &ToolCall,
         tool_span: &str,
         outcome: (Value, Option<EventError>),
+        approval: Option<(&str, usize)>,
         messages: &mut Vec<Message>,
         root_span: &str,
         turn: usize,
@@ -187,6 +248,11 @@ impl AgentLoop {
                 result: result.clone(),
             },
         );
+        if let Some((request_id, call_index)) = approval {
+            result_event = result_event
+                .with_attribute(attrs::APPROVAL_REQUEST_ID, request_id)
+                .with_attribute(attrs::APPROVAL_CALL_INDEX, call_index);
+        }
         if let Some(error) = error {
             result_event = result_event.errored(error);
         }

@@ -46,7 +46,9 @@ impl AgentLoop {
             return;
         }
         match command {
-            Command::ResolveApproval { .. } => inbox.resolves.push_back(command),
+            Command::ResolveApproval { .. } | Command::ResolveApprovalCall { .. } => {
+                inbox.resolves.push_back(command);
+            }
             Command::Steer { .. } => inbox.steers.push(command),
             Command::Interrupt { .. } => {
                 if inbox.interrupt.is_none() {
@@ -70,13 +72,17 @@ impl AgentLoop {
         self.inbox.lock().expect("inbox poisoned").interrupt.take()
     }
 
-    /// The resolve naming `request_id`, taken out of the inbox once.
-    pub(super) fn take_resolve(&self, request_id: &str) -> Option<Command> {
+    /// The approval command naming `request_id`, taken out of the inbox once.
+    /// Both approval variants share this queue so commands are considered in
+    /// receipt order while a request is open.
+    pub(super) fn take_approval(&self, request_id: &str) -> Option<Command> {
         let mut inbox = self.inbox.lock().expect("inbox poisoned");
         let position = inbox.resolves.iter().position(|command| {
             matches!(
                 command,
-                Command::ResolveApproval { request_id: rid, .. } if rid == request_id
+                Command::ResolveApproval { request_id: rid, .. }
+                    | Command::ResolveApprovalCall { request_id: rid, .. }
+                    if rid == request_id
             )
         })?;
         inbox.resolves.remove(position)

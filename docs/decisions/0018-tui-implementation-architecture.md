@@ -351,3 +351,32 @@ misbehaves under the portable path.
   each with its named consumer: item 6's keymap-as-data layer (the
   binding-design task), item 8's approval/diff UX, item 7's TOML
   loaders.
+
+## Amendment — 2026-09-19: the per-call approval dialog's interaction contract
+
+With per-call settlement landed (ADR-0008's 2026-09-18 amendment), item 8's
+approval surface has a contract worth stating before item 6's keymap slice
+owns the concrete bindings:
+
+- The dialog lists every presented call. Tab / Shift-Tab move the selection
+  (the composer keeps the arrow keys), and y / n answer only the _selected_
+  call — one `resolve_approval_call` per answer, never a batch-wide key. The
+  batch stays the presentation unit (ADR-0008 item 4); its submission may be
+  per call.
+- **Tab arms before an answer lands.** y / n do nothing until a Tab has armed
+  the selected call, because a key held or queued across a re-sync, a new
+  request or a new prompt must never answer a prompt the user has not seen;
+  submitting and receiving a remote decision both disarm. This is a safety
+  property, not a default binding: item 6 may rebind the keys but must keep
+  the deliberate-act-before-answer rule.
+- Submission is not settlement: the dialog keeps the request until the
+  recorded decision arrives (a racing client or the gate's timeout may win),
+  and a submitted call reads as `sent` meanwhile. Once nothing is answerable
+  the dialog says it waits rather than advertising keys that do nothing.
+- Local state is display only: the recorded command is the truth, the first
+  recorded decision per call wins (ADR-0008), and a call the user answered
+  must not become answerable again.
+
+The diff embedding is unchanged (item 8; the file-backed cumulative diff
+slice remains its consumer), and the dialog's keys remain subject to item
+6's binding-design task.

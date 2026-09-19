@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use cadmus_contract::{
     Approval, Attachment, Command, Event as TraceEvent, EventKind, InFlight, LiveItem, LiveKind,
     LiveUpdate, Message, PendingApproval, RunState, SettledApproval, StreamChunk, Sync, ToolCall,
+    ToolCompletion,
 };
 use cadmus_tui::app::{App, AppConfig, RunDriver, RunHandle};
 use cadmus_tui::shell::InlineShell;
@@ -33,6 +34,30 @@ struct RunSlots {
     outcome: std::sync::mpsc::Sender<Result<Vec<Message>, String>>,
 }
 
+impl RunSlots {
+    fn record(&self, seq: u64, kind: EventKind) {
+        self.live.send(recorded(seq, 1, kind)).expect("feed");
+    }
+}
+
+fn has_row(rows: &[String], text: &str) -> bool {
+    rows.iter().any(|row| row.contains(text))
+}
+
+fn call_decision(
+    command_id: &str,
+    request_id: &str,
+    call_index: usize,
+    decision: Approval,
+) -> Command {
+    Command::ResolveApprovalCall {
+        command_id: command_id.into(),
+        request_id: request_id.into(),
+        call_index,
+        decision,
+    }
+}
+
 /// The scripted session boundary: `start` records the submitted messages
 /// and hands back a run whose feed and outcome the test drives.
 struct ScriptDriver {
@@ -46,6 +71,7 @@ struct ScriptDriver {
     /// carries them, scripting an attach after the settle (the rebuilt
     /// transcript's explicit record).
     settled: Arc<Mutex<Vec<SettledApproval>>>,
+    reattachment: Arc<Mutex<Option<Attachment>>>,
 }
 
 impl ScriptDriver {
@@ -56,6 +82,7 @@ impl ScriptDriver {
             runs: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             settled: Arc::new(Mutex::new(Vec::new())),
+            reattachment: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -88,12 +115,19 @@ impl RunDriver for ScriptDriver {
         let commands = Arc::clone(&self.commands);
         let pending = self.pending.lock().expect("pending").clone();
         let settled = self.settled.lock().expect("settled").clone();
+        let reattachment = Arc::clone(&self.reattachment);
         RunHandle {
             attachment: Attachment {
                 sync: sync_with_pending(pending, settled),
                 tail: Box::new(live_rx.into_iter()),
             },
-            reattach: Box::new(|| panic!("no re-attach scripted")),
+            reattach: Box::new(move || {
+                reattachment
+                    .lock()
+                    .expect("reattachment")
+                    .take()
+                    .expect("scripted re-attach")
+            }),
             commands: Box::new(move |command| {
                 commands.lock().expect("commands").push(command);
             }),
@@ -109,6 +143,7 @@ fn sync_with_pending(pending: Vec<PendingApproval>, settled: Vec<SettledApproval
             provider: None,
             model: None,
             messages: Vec::new(),
+            tool_results: Vec::new(),
             turns: 0,
             warnings: Vec::new(),
             scores: Vec::new(),
@@ -118,6 +153,7 @@ fn sync_with_pending(pending: Vec<PendingApproval>, settled: Vec<SettledApproval
         in_flight: InFlight {
             open_turn: None,
             pending_approvals: pending,
+            completed_tools: Vec::new(),
         },
         settled_approvals: settled,
         as_of_seq: 0,
@@ -180,6 +216,7 @@ impl ScriptDriver {
             runs: Arc::clone(&self.runs),
             pending: Arc::clone(&self.pending),
             settled: Arc::clone(&self.settled),
+            reattachment: Arc::clone(&self.reattachment),
         }
     }
 }
@@ -480,23 +517,19 @@ fn approval_request(seq: u64, request_id: &str, calls: Vec<ToolCall>) -> LiveUpd
     }
 }
 
-/// The band's approval section while the request waits: header (request,
-/// answer keys, deadline), one marker line per call, then each call's
-/// proposed change (write all-added, edit as an old/new pair).
-const APPROVAL_SECTION: [&str; 6] = [
-    "approve 2 call(s)  y: approve · n: reject  ·  unanswered denies after 5 min",
-    "→ write_file src/main.rs",
+/// The band shows the selected call's change and the other original slots.
+const APPROVAL_SECTION: [&str; 5] = [
+    "approve 2 call(s)  ·  unanswered denies after 5 min",
+    "Tab: arm selected call · y/n: answer it",
+    "> 1/2 → write_file src/main.rs",
     "+ fn main() {}",
-    "→ edit_file src/main.rs",
-    "- let a = 1;",
-    "+ let a = 2;",
+    "  2/2 → edit_file src/main.rs (pending)",
 ];
 
-/// A pending request hosts the dialog in the band; y resolves every call in
-/// the request through the run's command sink, the section leaves the band,
-/// and the recorded resolution lands in the transcript as a quiet line.
+/// A call can be answered ahead of its sibling, even with duplicated wire
+/// ids. Only the recorded answer settles it; focus advances independently.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
-async fn a_pending_approval_prompts_and_y_resolves_it() {
+async fn a_second_call_can_be_approved_before_the_first() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let world = World::new();
@@ -510,19 +543,12 @@ async fn a_pending_approval_prompts_and_y_resolves_it() {
             settle().await;
             let run = driver.take_run();
 
-            // The gate presents the batch; the band grows the section above
-            // the composer. The full sequence (scrollback + screen) is the
-            // assertion: the flushed prompt, the section, the status row.
+            let mut calls = gated_batch();
+            calls[1].id = calls[0].id.clone();
             run.live
-                .send(approval_request(1, "ap1", gated_batch()))
+                .send(approval_request(1, "ap1", calls))
                 .expect("feed");
-            settle_until(|| {
-                world
-                    .visible_rows()
-                    .iter()
-                    .any(|row| row.contains("approve 2 call(s)"))
-            })
-            .await;
+            settle_until(|| has_row(&world.visible_rows(), "approve 2 call(s)")).await;
             assert_eq!(
                 world.nonblank_rows(),
                 [
@@ -534,56 +560,58 @@ async fn a_pending_approval_prompts_and_y_resolves_it() {
             );
             assert!(status_row(&world).ends_with("streaming"));
 
-            // y approves every call in the request: the resolve command
-            // rides the run's sink with one decision per call.
-            rig.input.send(key(KeyCode::Char('y'))).expect("input");
+            rig.input.send(key(KeyCode::Tab)).expect("arm first");
+            rig.input.send(key(KeyCode::Tab)).expect("select second");
             settle().await;
-            assert!(
-                matches!(
-                    driver.commands().as_slice(),
-                    [Command::ResolveApproval { command_id, request_id, decisions }]
-                    if command_id == "tui-0"
-                        && request_id == "ap1"
-                        && decisions == &vec![Approval::Approved, Approval::Approved]
-                ),
-                "commands: {:?}",
-                driver.commands()
+            assert!(has_row(&world.visible_rows(), "> 2/2 → edit_file"));
+            assert!(has_row(&world.visible_rows(), "- let a = 1;"));
+            rig.input.send(key(KeyCode::Char('y'))).expect("input");
+            // Unix auto-repeat is indistinguishable from ordinary Press.
+            rig.input.send(key(KeyCode::Char('y'))).expect("repeat");
+            settle().await;
+            assert_eq!(
+                driver.commands(),
+                vec![call_decision("tui-0", "ap1", 1, Approval::Approved)]
             );
-            // The dialog is gone from the band.
-            assert!(
-                world
-                    .visible_rows()
-                    .iter()
-                    .all(|row| !row.contains("approve 2 call(s)")),
-                "the answered request leaves the band: {:?}",
-                world.visible_rows()
-            );
+            assert!(has_row(&world.visible_rows(), "> 1/2 → write_file"));
+            assert!(has_row(
+                &world.visible_rows(),
+                "edit_file src/main.rs (sent)"
+            ));
+            assert!(!has_row(&world.nonblank_rows(), "✓ approved"));
 
-            // The recorded resolution names the approved calls; the tool
-            // then runs and the run finishes.
-            run.live
-                .send(recorded(
-                    2,
-                    1,
-                    EventKind::Command(Command::ResolveApproval {
-                        command_id: "tui-0".into(),
-                        request_id: "ap1".into(),
-                        decisions: vec![Approval::Approved, Approval::Approved],
-                    }),
-                ))
-                .expect("feed");
-            run.live
-                .send(recorded(
-                    3,
-                    1,
-                    EventKind::ToolCall {
-                        call: gated_batch().remove(0),
-                    },
-                ))
-                .expect("feed");
-            run.live
-                .send(recorded(4, 1, EventKind::RunFinished { turns: 1 }))
-                .expect("feed");
+            run.record(2, EventKind::Command(driver.commands()[0].clone()));
+            settle_until(|| has_row(&world.nonblank_rows(), "✓ approved edit_file")).await;
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("repeat after resolve");
+            settle().await;
+            assert_eq!(driver.commands().len(), 1);
+            assert!(has_row(&world.visible_rows(), "> 1/2 → write_file"));
+            // Focus cannot return to the settled second slot.
+            rig.input.send(key(KeyCode::BackTab)).expect("input");
+            rig.input.send(key(KeyCode::Char('n'))).expect("input");
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("extra answer");
+            settle().await;
+            assert_eq!(
+                driver.commands()[1],
+                call_decision("tui-1", "ap1", 0, Approval::Rejected { comment: None })
+            );
+            assert_eq!(
+                driver.commands().len(),
+                2,
+                "submitted slots are not answerable again"
+            );
+            run.record(3, EventKind::Command(driver.commands()[1].clone()));
+            run.record(
+                4,
+                EventKind::ToolCall {
+                    call: gated_batch().remove(1),
+                },
+            );
+            run.record(5, EventKind::RunFinished { turns: 1 });
             drop(run.live);
             run.outcome
                 .send(Ok(vec![
@@ -596,8 +624,9 @@ async fn a_pending_approval_prompts_and_y_resolves_it() {
                 world.nonblank_rows(),
                 vec![
                     "> change main",
-                    "✓ approved write_file, edit_file",
-                    "→ write_file src/main.rs",
+                    "✓ approved edit_file",
+                    "✗ rejected write_file",
+                    "→ edit_file src/main.rs",
                     "kimi·k2",
                 ]
             );
@@ -607,8 +636,227 @@ async fn a_pending_approval_prompts_and_y_resolves_it() {
         .await;
 }
 
-/// n rejects every call in the request; the recorded resolution reads as an
-/// error-slot line, and the rejected tool never executes.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn a_held_answer_cannot_cross_resync_or_a_new_prompt() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            run.live
+                .send(approval_request(1, "ap1", gated_batch()))
+                .expect("feed");
+            settle_until(|| has_row(&world.visible_rows(), "Tab: arm")).await;
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("held before prompt");
+            settle().await;
+            assert!(driver.commands().is_empty());
+            rig.input.send(key(KeyCode::Tab)).expect("arm first");
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("approve first");
+            settle().await;
+            let mut sync = sync_with_pending(
+                vec![PendingApproval {
+                    request_id: "ap1".into(),
+                    turn: 1,
+                    message_index: None,
+                    calls: gated_batch(),
+                    decisions: Vec::new(),
+                    wait_timeout: Duration::from_secs(300),
+                }],
+                Vec::new(),
+            );
+            sync.as_of_seq = 1;
+            let (tail, receiver) = std::sync::mpsc::channel();
+            *driver.reattachment.lock().expect("reattachment") = Some(Attachment {
+                sync,
+                tail: Box::new(receiver.into_iter()),
+            });
+            run.live.send(LiveUpdate::Lagged).expect("lag");
+            settle_until(|| has_row(&world.nonblank_rows(), "resynced")).await;
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("held across resync");
+            settle().await;
+            assert_eq!(driver.commands().len(), 1);
+            assert!(has_row(
+                &world.visible_rows(),
+                "write_file src/main.rs (sent)"
+            ));
+            rig.input.send(key(KeyCode::Tab)).expect("rearm sibling");
+            rig.input
+                .send(key(KeyCode::Char('n')))
+                .expect("reject sibling");
+            settle().await;
+            assert_eq!(
+                driver.commands()[1],
+                call_decision("tui-1", "ap1", 1, Approval::Rejected { comment: None })
+            );
+            for (index, command) in driver.commands().into_iter().enumerate() {
+                tail.send(recorded(index as u64 + 2, 1, EventKind::Command(command)))
+                    .expect("resolve");
+            }
+            tail.send(approval_request(4, "ap2", gated_batch()))
+                .expect("next prompt");
+            settle_until(|| has_row(&world.visible_rows(), "> 1/2 → write_file")).await;
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("held across new prompt");
+            settle().await;
+            assert_eq!(driver.commands().len(), 2);
+            drop(tail);
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle_until(|| status_row(&world) == "kimi·k2").await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn an_early_completion_is_visible_while_a_sibling_waits() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            run.live
+                .send(approval_request(1, "ap1", gated_batch()))
+                .expect("feed");
+            run.record(
+                2,
+                EventKind::Command(call_decision("remote", "ap1", 1, Approval::Approved)),
+            );
+            let completion = ToolCompletion {
+                span_id: "sp-1".into(),
+                turn: 1,
+                message_call_index: 1,
+                call_id: "c2".into(),
+                name: "edit_file".into(),
+                result: serde_json::json!("changed main.rs"),
+                error: None,
+            };
+            run.live
+                .send(LiveUpdate::Item {
+                    item: Box::new(LiveItem {
+                        seq: 3,
+                        trace_id: "tr-test".into(),
+                        kind: LiveKind::ToolCompleted {
+                            completion: completion.clone(),
+                        },
+                    }),
+                })
+                .expect("completion");
+            settle_until(|| has_row(&world.nonblank_rows(), "changed main.rs")).await;
+            assert!(driver.commands().is_empty());
+            assert!(has_row(&world.visible_rows(), "> 1/2 → write_file"));
+            assert!(has_row(
+                &world.nonblank_rows(),
+                "✓ completed edit_file (turn 1, tool call 2)"
+            ));
+            rig.input.send(key(KeyCode::Tab)).expect("arm sibling");
+            rig.input
+                .send(key(KeyCode::Char('n')))
+                .expect("reject sibling");
+            settle().await;
+            run.record(4, EventKind::Command(driver.commands()[0].clone()));
+            run.record(
+                5,
+                EventKind::ToolResult {
+                    call_id: completion.call_id,
+                    result: completion.result,
+                },
+            );
+            run.record(6, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle_until(|| status_row(&world) == "kimi·k2").await;
+            assert_eq!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .filter(|row| row.contains("changed main.rs"))
+                    .count(),
+                1
+            );
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn an_in_order_result_is_visible_while_a_sibling_waits() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            run.live
+                .send(approval_request(1, "ap1", gated_batch()))
+                .expect("feed");
+            run.record(
+                2,
+                EventKind::Command(call_decision("remote", "ap1", 0, Approval::Approved)),
+            );
+            run.record(
+                3,
+                EventKind::ToolCall {
+                    call: gated_batch().remove(0),
+                },
+            );
+            run.record(
+                4,
+                EventKind::ToolResult {
+                    call_id: "c1".into(),
+                    result: serde_json::json!("created main.rs"),
+                },
+            );
+            settle_until(|| has_row(&world.nonblank_rows(), "created main.rs")).await;
+            assert!(driver.commands().is_empty());
+            assert!(has_row(&world.visible_rows(), "> 2/2 → edit_file"));
+            assert!(has_row(&world.nonblank_rows(), "✓ completed write_file"));
+            rig.input.send(key(KeyCode::Tab)).expect("arm sibling");
+            rig.input
+                .send(key(KeyCode::Char('n')))
+                .expect("reject sibling");
+            settle().await;
+            run.record(5, EventKind::Command(driver.commands()[0].clone()));
+            run.record(6, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle_until(|| status_row(&world) == "kimi·k2").await;
+            assert_eq!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .filter(|row| row.contains("created main.rs"))
+                    .count(),
+                1
+            );
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// n rejects only the focused call; a later legacy batch reply settles the
+/// remaining slot without rendering the first decision twice.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn n_rejects_the_pending_request() {
     tokio::task::LocalSet::new()
@@ -634,40 +882,33 @@ async fn n_rejects_the_pending_request() {
             })
             .await;
 
+            rig.input.send(key(KeyCode::Tab)).expect("arm first");
             rig.input.send(key(KeyCode::Char('n'))).expect("input");
             settle().await;
             assert!(
                 matches!(
                     driver.commands().as_slice(),
-                    [Command::ResolveApproval { command_id, request_id, decisions }]
-                    if command_id == "tui-0"
-                        && request_id == "ap1"
-                        && decisions
-                            == &vec![
-                                Approval::Rejected { comment: None },
-                                Approval::Rejected { comment: None },
-                            ]
+                    [Command::ResolveApprovalCall { command_id, request_id, call_index: 0, decision: Approval::Rejected { comment: None } }]
+                    if command_id == "tui-0" && request_id == "ap1"
                 ),
                 "commands: {:?}",
                 driver.commands()
             );
 
+            run.live.send(recorded(2, 1, EventKind::Command(driver.commands()[0].clone()))).expect("feed");
             run.live
                 .send(recorded(
-                    2,
+                    3,
                     1,
                     EventKind::Command(Command::ResolveApproval {
-                        command_id: "tui-0".into(),
+                        command_id: "remote-batch".into(),
                         request_id: "ap1".into(),
-                        decisions: vec![
-                            Approval::Rejected { comment: None },
-                            Approval::Rejected { comment: None },
-                        ],
+                        decisions: vec![Approval::Approved],
                     }),
                 ))
                 .expect("feed");
             run.live
-                .send(recorded(3, 1, EventKind::RunFinished { turns: 1 }))
+                .send(recorded(4, 1, EventKind::RunFinished { turns: 1 }))
                 .expect("feed");
             drop(run.live);
             run.outcome
@@ -678,7 +919,8 @@ async fn n_rejects_the_pending_request() {
                 world.nonblank_rows(),
                 vec![
                     "> change main",
-                    "✗ rejected write_file, edit_file",
+                    "✗ rejected write_file",
+                    "✗ rejected edit_file",
                     "kimi·k2"
                 ]
             );
@@ -719,12 +961,19 @@ async fn a_recorded_timeout_resolution_clears_the_dialog() {
             })
             .await;
 
-            // The gate settles the batch itself (the deny timeout): the
-            // recorded resolution arrives with no y/n ever pressed.
+            // A remote client settles only the first slot. The second stays
+            // answerable and the eventual timeout cannot overwrite the first.
+            run.live.send(recorded(2, 1, EventKind::Command(Command::ResolveApprovalCall {
+                command_id: "remote".into(), request_id: "ap1".into(), call_index: 0, decision: Approval::Approved,
+            }))).expect("feed");
+            settle_until(|| world.visible_rows().iter().any(|row| row.contains("> 2/2 → edit_file"))).await;
+            run.live.send(recorded(3, 1, EventKind::Command(Command::ResolveApprovalCall {
+                command_id: "duplicate".into(), request_id: "ap1".into(), call_index: 0, decision: Approval::Rejected { comment: None },
+            }))).expect("feed");
             let timeout = "approval request timed out unanswered (5 minutes) — denied by the conservative default";
             run.live
                 .send(recorded(
-                    2,
+                    4,
                     1,
                     EventKind::Command(Command::ResolveApproval {
                         command_id: "ap-timeout-0".into(),
@@ -752,6 +1001,10 @@ async fn a_recorded_timeout_resolution_clears_the_dialog() {
                 "no command was sent: {:?}",
                 driver.commands()
             );
+            let rows = world.nonblank_rows();
+            assert_eq!(rows.iter().filter(|row| row.contains("✓ approved write_file")).count(), 1);
+            assert!(rows.iter().any(|row| row.contains("✗ rejected edit_file")));
+            assert!(!rows.iter().any(|row| row.contains("✗ rejected write_file")));
 
             drop(run.live);
             run.outcome
@@ -766,10 +1019,83 @@ async fn a_recorded_timeout_resolution_clears_the_dialog() {
         .await;
 }
 
-/// An attach mid-wait (ADR-0013 item 3): the run's baseline sync carries
-/// the pending request, so the dialog renders before any live
-/// `ApprovalRequested` item — deleting the sync's re-seed of the dialog
-/// queue leaves this red.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn remote_answers_advance_focus_but_stale_or_invalid_records_do_not() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            run.live
+                .send(approval_request(10, "ap1", gated_batch()))
+                .expect("feed");
+            settle_until(|| has_row(&world.visible_rows(), "> 1/2 → write_file")).await;
+            run.record(
+                11,
+                EventKind::Command(Command::ResolveApprovalCall {
+                    command_id: "remote".into(),
+                    request_id: "ap1".into(),
+                    call_index: 0,
+                    decision: Approval::Approved,
+                }),
+            );
+            settle_until(|| has_row(&world.visible_rows(), "> 2/2 → edit_file")).await;
+            for (seq, request_id, call_index) in
+                [(10, "ap1", 1), (12, "ap1", usize::MAX), (13, "unknown", 1)]
+            {
+                run.record(
+                    seq,
+                    EventKind::Command(Command::ResolveApprovalCall {
+                        command_id: format!("invalid-{seq}"),
+                        request_id: request_id.into(),
+                        call_index,
+                        decision: Approval::Approved,
+                    }),
+                );
+            }
+            settle().await;
+            assert!(has_row(&world.visible_rows(), "> 2/2 → edit_file"));
+            rig.input
+                .send(key(KeyCode::Char('y')))
+                .expect("unarmed press");
+            settle().await;
+            assert!(driver.commands().is_empty());
+            rig.input
+                .send(key(KeyCode::Tab))
+                .expect("rearm after remote answer");
+            rig.input.send(key(KeyCode::Char('n'))).expect("input");
+            settle().await;
+            assert_eq!(
+                driver.commands(),
+                vec![Command::ResolveApprovalCall {
+                    command_id: "tui-0".into(),
+                    request_id: "ap1".into(),
+                    call_index: 1,
+                    decision: Approval::Rejected { comment: None },
+                }]
+            );
+            // The terminal record closes the dialog even before teardown arrives.
+            run.record(14, EventKind::RunFinished { turns: 1 });
+            settle_until(|| !has_row(&world.visible_rows(), "approve 2 call(s)")).await;
+            rig.input.send(key(KeyCode::Char('y'))).expect("input");
+            settle().await;
+            assert_eq!(driver.commands().len(), 1);
+            assert!(!has_row(&world.nonblank_rows(), "✓ approved edit_file"));
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle().await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// A partial attach renders the recorded decision and focuses only the
+/// remaining call, without ever needing the original live request.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn an_attach_mid_wait_seeds_the_dialog_from_the_sync() {
     tokio::task::LocalSet::new()
@@ -780,7 +1106,9 @@ async fn an_attach_mid_wait_seeds_the_dialog_from_the_sync() {
                 vec![PendingApproval {
                     request_id: "ap-sync".into(),
                     turn: 3,
+                    message_index: None,
                     calls: gated_batch(),
+                    decisions: vec![Some(Approval::Rejected { comment: None }), None],
                     wait_timeout: std::time::Duration::from_secs(300),
                 }],
             );
@@ -800,15 +1128,17 @@ async fn an_attach_mid_wait_seeds_the_dialog_from_the_sync() {
             })
             .await;
 
+            rig.input.send(key(KeyCode::Char('y'))).expect("unarmed press");
+            settle().await;
+            assert!(driver.commands().is_empty());
+            rig.input.send(key(KeyCode::Tab)).expect("arm after attach");
             rig.input.send(key(KeyCode::Char('y'))).expect("input");
             settle().await;
             assert!(
                 matches!(
                     driver.commands().as_slice(),
-                    [Command::ResolveApproval { command_id, request_id, decisions }]
-                    if command_id == "tui-0"
-                        && request_id == "ap-sync"
-                        && decisions == &vec![Approval::Approved, Approval::Approved]
+                    [Command::ResolveApprovalCall { command_id, request_id, call_index: 1, decision: Approval::Approved }]
+                    if command_id == "tui-0" && request_id == "ap-sync"
                 ),
                 "commands: {:?}",
                 driver.commands()
@@ -842,6 +1172,7 @@ async fn an_attach_after_a_settle_renders_the_resolution_record() {
                 Vec::new(),
                 vec![SettledApproval {
                     request_id: "ap-settled".into(),
+                    message_index: None,
                     calls: gated_batch(),
                     decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
                 }],

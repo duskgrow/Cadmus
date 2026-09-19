@@ -1,14 +1,12 @@
 //! The approval gate (ADR-0008 item 4 / ADR-0013 item 6): one batch request
-//! per turn over the live stream, resolved by a `resolve_approval` command —
+//! per turn over the live stream, resolved by batch or per-call commands —
 //! one path for local and future remote clients alike, with the resolution
 //! itself entering the trajectory. Unanswered is deny.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use cadmus_contract::{Approval, Command, LiveKind, TimedRecv, ToolCall};
+use cadmus_contract::{Approval, Command, LiveKind, ToolCall};
 
-use super::events::interrupted_detail;
 use super::{AgentError, AgentLoop, Effect};
 
 /// How long the gate waits on a client's resolve before the conservative
@@ -21,125 +19,175 @@ use super::{AgentError, AgentLoop, Effect};
 /// cannot drift from the duration.
 const HUMAN_WAIT: Duration = Duration::from_secs(300);
 
-impl AgentLoop {
-    /// Presents the batch's gated calls as one approval request on the live
-    /// stream and awaits the matching `resolve_approval` command (ADR-0008
-    /// item 4 / ADR-0013 item 6): one path for local and future remote
-    /// clients alike, and the resolution itself enters the trajectory as a
-    /// command event — the approval is recorded, not just its effects.
-    ///
-    /// Returns the rejections keyed by batch position. Position, not call
-    /// id: ids are provider-supplied wire data with no uniqueness check,
-    /// and a duplicated id must never let one call's rejection deny its
-    /// same-id sibling. A short decision reply denies the remainder:
-    /// unanswered is deny (ADR-0008 item 4); extra decisions are ignored;
-    /// a resolve naming another request is dropped. A command channel that
-    /// closes mid-wait denies the whole batch.
-    ///
-    /// An interrupt during the wait ends the run before any gated call
-    /// executes: no call or result events land — the trajectory shows the
-    /// model's intent (the recorded response), then the interrupt. Steers
-    /// received during the wait classify into the inbox and apply at the
-    /// next boundary.
-    ///
-    /// Timeout: the wait carries a deny timeout (ADR-0008 item 4: a
-    /// human-in-the-loop wait always pairs with the conservative default).
-    /// Five minutes unanswered settles the whole batch as a recorded
-    /// rejection — the gate is its own client at that point, so the
-    /// resolution enters the trajectory like any other, clients clear their
-    /// dialogs, and the model sees the timeout reason. The in-process
-    /// auto-answering policies resolve synchronously, long before the
-    /// timeout can fire. A resolve that lands after the deadline is void:
-    /// the recorded timeout is the durable settlement, and the late answer
-    /// drops with its request gone — the trajectory's record is the
-    /// deadline's truth.
-    pub(super) async fn gate(
-        &self,
-        calls: &[ToolCall],
+/// Approval indices address only `positions`; dispatch addresses the full
+/// original call list. Neither uses provider ids, which need not be unique.
+pub(super) struct Gate {
+    request_id: Option<String>,
+    positions: Vec<usize>,
+    pub decisions: Vec<Option<Approval>>,
+    deadline_ms: u64,
+}
+
+impl Gate {
+    /// Preserve the request address even after settlement or skipped interrupt
+    /// slots; result order cannot recover the original gated position.
+    pub fn approval_address(&self, position: usize) -> Option<(&str, usize)> {
+        let request_id = self.request_id.as_deref()?;
+        let call_index = self.positions.iter().position(|&gated| gated == position)?;
+        Some((request_id, call_index))
+    }
+
+    pub fn pending(&self) -> bool {
+        self.positions
+            .iter()
+            .any(|&position| self.decisions[position].is_none())
+    }
+
+    pub fn remaining(&self, agent: &AgentLoop) -> Duration {
+        Duration::from_millis(
+            self.deadline_ms
+                .saturating_sub(agent.telemetry.clock.now_unix_ms()),
+        )
+    }
+
+    /// First recorded decision wins. A legacy reply still indexes the
+    /// original gated list, including slots already settled individually.
+    fn apply(
+        &mut self,
+        agent: &AgentLoop,
+        command: Command,
         root_span: &str,
         turn: usize,
-    ) -> Result<HashMap<usize, Option<String>>, AgentError> {
+    ) -> Result<(), AgentError> {
+        let updates: Vec<_> = match &command {
+            Command::ResolveApproval { decisions, .. } => self
+                .positions
+                .iter()
+                .enumerate()
+                .filter(|(_, position)| self.decisions[**position].is_none())
+                .map(|(index, &position)| {
+                    (
+                        position,
+                        decisions
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(Approval::Rejected { comment: None }),
+                    )
+                })
+                .collect(),
+            Command::ResolveApprovalCall {
+                call_index,
+                decision,
+                ..
+            } => self
+                .positions
+                .get(*call_index)
+                .filter(|&&position| self.decisions[position].is_none())
+                .map(|&position| (position, decision.clone()))
+                .into_iter()
+                .collect(),
+            _ => unreachable!("the approval inbox contains only resolution commands"),
+        };
+        if !updates.is_empty() {
+            agent.record_command(command, root_span, turn)?;
+            for (position, decision) in updates {
+                self.decisions[position] = Some(decision);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn drain(
+        &mut self,
+        agent: &AgentLoop,
+        root_span: &str,
+        turn: usize,
+    ) -> Result<(), AgentError> {
+        while self.pending() {
+            if self.remaining(agent).is_zero() {
+                return self.deny_unanswered(agent, root_span, turn, true);
+            }
+            let Some(command) =
+                agent.take_approval(self.request_id.as_deref().expect("an open request"))
+            else {
+                break;
+            };
+            self.apply(agent, command, root_span, turn)?;
+        }
+        Ok(())
+    }
+
+    /// Timeout and channel closure settle only unanswered slots. Recording
+    /// closure too keeps a partial attach from retaining an unanswerable dialog.
+    pub fn deny_unanswered(
+        &mut self,
+        agent: &AgentLoop,
+        root_span: &str,
+        turn: usize,
+        timed_out: bool,
+    ) -> Result<(), AgentError> {
+        if !self.pending() {
+            return Ok(());
+        }
+        let comment = timed_out.then(|| format!(
+            "approval request timed out unanswered ({} minutes) — denied by the conservative default",
+            HUMAN_WAIT.as_secs() / 60
+        ));
+        let reason = if timed_out { "timeout" } else { "closed" };
+        let command = Command::ResolveApproval {
+            command_id: format!("ap-{reason}-{}", agent.telemetry.ids.next()),
+            request_id: self.request_id.clone().expect("an open request"),
+            decisions: self
+                .positions
+                .iter()
+                .map(|&position| {
+                    self.decisions[position]
+                        .clone()
+                        .unwrap_or_else(|| Approval::Rejected {
+                            comment: comment.clone(),
+                        })
+                })
+                .collect(),
+        };
+        self.apply(agent, command, root_span, turn)
+    }
+}
+
+impl AgentLoop {
+    /// Publish the complete gated context once; dispatch drives its answers
+    /// alongside execution. The injected clock anchors one fixed budget,
+    /// never a fresh five minutes per partial answer or stray command.
+    pub(super) fn open_gate(&self, calls: &[ToolCall], turn: usize) -> Gate {
         let mut positions = Vec::new();
         let mut batch = Vec::new();
+        let mut decisions = vec![Some(Approval::Approved); calls.len()];
         for (position, call) in calls.iter().enumerate() {
             if self.is_gated(call) {
                 positions.push(position);
                 batch.push(call.clone());
+                decisions[position] = None;
             }
         }
-        let mut denied = HashMap::new();
-        if batch.is_empty() {
-            return Ok(denied);
-        }
-
-        let request_id = format!("ap{}", self.telemetry.ids.next());
-        self.publish(LiveKind::ApprovalRequested {
-            request_id: request_id.clone(),
-            turn: u32::try_from(turn).unwrap_or(u32::MAX),
-            calls: batch,
-            // The dialog names its deadline from the same value the wait
-            // races against — the audit text and the header cannot drift
-            // apart.
-            wait_timeout: HUMAN_WAIT,
+        let deadline_ms =
+            self.telemetry.clock.now_unix_ms().saturating_add(
+                u64::try_from(HUMAN_WAIT.as_millis()).expect("human wait fits u64"),
+            );
+        let request_id = (!batch.is_empty()).then(|| {
+            let request_id = format!("ap{}", self.telemetry.ids.next());
+            self.publish(LiveKind::ApprovalRequested {
+                request_id: request_id.clone(),
+                turn: u32::try_from(turn).unwrap_or(u32::MAX),
+                calls: batch,
+                wait_timeout: HUMAN_WAIT,
+            });
+            request_id
         });
-
-        let command = loop {
-            if let Some(command) = self.take_resolve(&request_id) {
-                break command;
-            }
-            if let Some(command) = self.take_interrupt() {
-                self.record_command(command, root_span, turn)?;
-                self.finish_with(root_span, turn, Some(interrupted_detail()))?;
-                return Err(AgentError::Interrupted);
-            }
-            match self.protocol.commands.recv_timeout(HUMAN_WAIT).await {
-                TimedRecv::Command(command) => self.note(command),
-                // The channel closed mid-wait: no client left to answer.
-                TimedRecv::Closed => return Ok(deny_all(&positions)),
-                // The human-wait timeout settled the batch: the denial is
-                // recorded like any resolution — the approval is recorded,
-                // not just its effects — so clients clear their dialogs and
-                // the trajectory shows why the batch never ran.
-                TimedRecv::TimedOut => {
-                    let comment = format!(
-                        "approval request timed out unanswered ({} minutes) — denied by the \
-                         conservative default",
-                        HUMAN_WAIT.as_secs() / 60
-                    );
-                    let command = Command::ResolveApproval {
-                        command_id: format!("ap-timeout-{}", self.telemetry.ids.next()),
-                        request_id: request_id.clone(),
-                        decisions: vec![
-                            Approval::Rejected {
-                                comment: Some(comment.clone()),
-                            };
-                            positions.len()
-                        ],
-                    };
-                    self.record_command(command, root_span, turn)?;
-                    return Ok(positions
-                        .iter()
-                        .map(|position| (*position, Some(comment.clone())))
-                        .collect());
-                }
-            }
-        };
-        let Command::ResolveApproval { decisions, .. } = command.clone() else {
-            unreachable!("take_resolve returns only matching resolves");
-        };
-        self.record_command(command, root_span, turn)?;
-        for (index, position) in positions.iter().enumerate() {
-            match decisions.get(index) {
-                Some(Approval::Approved) => {}
-                Some(Approval::Rejected { comment }) => {
-                    denied.insert(*position, comment.clone());
-                }
-                None => {
-                    denied.insert(*position, None);
-                }
-            }
+        Gate {
+            request_id,
+            positions,
+            decisions,
+            deadline_ms,
         }
-        Ok(denied)
     }
 
     /// A call is gated when its tool declares a mutation effect (ADR-0008
@@ -152,13 +200,6 @@ impl AgentLoop {
     }
 }
 
-/// Every gated position denied without a reason — the gate's conservative
-/// default when the command channel closes mid-wait (unanswered is deny,
-/// ADR-0008 item 4).
-fn deny_all(positions: &[usize]) -> HashMap<usize, Option<String>> {
-    positions.iter().map(|position| (*position, None)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -166,7 +207,8 @@ mod tests {
 
     use async_trait::async_trait;
     use cadmus_contract::{
-        ChatRequest, EventKind, FinishReason, LiveItem, Status, StreamChunk, ToolSpec, error_kinds,
+        ChatRequest, EventKind, FinishReason, LiveItem, Status, StreamChunk, TimedRecv, ToolSpec,
+        error_kinds,
     };
     use serde_json::{Value, json};
 

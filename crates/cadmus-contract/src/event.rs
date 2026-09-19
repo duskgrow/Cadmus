@@ -113,6 +113,14 @@ impl Event {
         self.attributes.insert(key.into(), value.into());
         self
     }
+
+    /// The [`attrs::TURN`] attribute as the loop stamps it (1-based): the one
+    /// home for reading it, so the fold, the transport and the TUI cannot
+    /// drift on how the turn correlates an event to its message.
+    #[must_use]
+    pub fn turn(&self) -> Option<u32> {
+        u32::try_from(self.attributes.get(attrs::TURN)?.as_u64()?).ok()
+    }
 }
 
 /// The per-kind payload; variant names are the wire `kind` values
@@ -250,16 +258,28 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix: Option<PrefixRecord>,
     },
-    /// Resolves one approval request (ADR-0008 item 4 / ADR-0013 item 6):
-    /// one decision per presented call, in call order. A short reply denies
-    /// the remainder — unanswered is deny; extra decisions are ignored. A
-    /// resolve naming an unknown or settled `request_id` is dropped, making
-    /// retries and late answers safe. Recording the resolution is what makes
-    /// the approval itself part of the trajectory.
+    /// Resolves the remaining calls of an approval request (ADR-0008 item 4 /
+    /// ADR-0013 item 6): decisions use the original presented-call order,
+    /// including slots already settled individually (those slots are ignored).
+    /// A short reply denies the remainder; extra decisions are ignored. A
+    /// resolve naming an unknown or settled request is dropped.
     ResolveApproval {
         command_id: String,
         request_id: String,
         decisions: Vec<Approval>,
+    },
+    /// Settles one presented call, leaving its siblings open (ADR-0008's
+    /// per-call amendment). First decision wins, even with a different command
+    /// id; an unknown request or out-of-range index has no effect. This is a
+    /// distinct variant so older readers fail loudly instead of interpreting
+    /// an unknown addressing field as permission for the whole batch.
+    ResolveApprovalCall {
+        command_id: String,
+        request_id: String,
+        /// Zero-based position in `ApprovalRequested.calls`, never a provider
+        /// call id (which may be duplicated) or a shrinking pending list.
+        call_index: usize,
+        decision: Approval,
     },
     /// User text entering a running session (ADR-0011 item 3's two
     /// granularities): the loop appends it as a user message at the next
@@ -287,6 +307,7 @@ impl Command {
         match self {
             Self::StartRun { .. } => None,
             Self::ResolveApproval { command_id, .. }
+            | Self::ResolveApprovalCall { command_id, .. }
             | Self::Steer { command_id, .. }
             | Self::Interrupt { command_id } => Some(command_id),
         }
@@ -404,6 +425,12 @@ pub mod attrs {
     /// 1-based assistant-turn index within the run — on llm request/response
     /// and tool call/result events.
     pub const TURN: &str = "selfevol.turn";
+    /// Approval request owning a gated tool result; paired with
+    /// `APPROVAL_CALL_INDEX`, independent of provider call ids.
+    pub const APPROVAL_REQUEST_ID: &str = "selfevol.approval.request_id";
+    /// Zero-based position in that request's gated batch, not the assistant's
+    /// complete call list. Recorded on gated tool results.
+    pub const APPROVAL_CALL_INDEX: &str = "selfevol.approval.call_index";
     /// The eval isolation split (`search` / `holdout`, ADR-0010 §4): on every
     /// eval run's start-run command and every score event, so reflection
     /// input selection excludes holdout traces by construction.

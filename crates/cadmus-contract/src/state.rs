@@ -21,6 +21,10 @@ pub struct RunState {
     /// The reconstructed history: the start-run seed plus every assistant,
     /// tool and steered user message, in log order.
     pub messages: Vec<Message>,
+    /// Durable tool results with authoritative approval addresses. Legacy
+    /// results without those event attributes have no entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<ToolResultProjection>,
     /// Completed assistant turns (ok `llm_response` events).
     pub turns: u32,
     /// Every turn warning, in log order.
@@ -35,6 +39,16 @@ pub struct RunState {
     /// The terminal record; `None` means the trace ended mid-run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<FinishRecord>,
+}
+
+/// A durable result's approval address, kept outside provider-facing messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultProjection {
+    /// Index of the result in `RunState::messages`, including seeded history.
+    pub message_index: usize,
+    pub request_id: String,
+    /// Zero-based position in the request's gated batch.
+    pub call_index: usize,
 }
 
 /// How the run ended, from its `run_finished` event's envelope.

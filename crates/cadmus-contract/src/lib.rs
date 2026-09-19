@@ -34,7 +34,7 @@ pub use event::{
 };
 pub use live::{
     Attachment, CallSnapshot, CommandSource, InFlight, LiveItem, LiveKind, LiveSink, LiveUpdate,
-    OpenTurn, PendingApproval, SettledApproval, Sync, TimedRecv, TurnSnapshot,
+    OpenTurn, PendingApproval, SettledApproval, Sync, TimedRecv, ToolCompletion, TurnSnapshot,
 };
 pub use log::{ArtifactSink, EventSink, LogError};
 pub use message::{ContentPart, Message, Role, ToolCall};
@@ -43,7 +43,7 @@ pub use provider::{ChunkStream, Provider};
 pub use request::{
     CacheDirective, ChatRequest, EffortLevel, OutputMode, Reasoning, Sampling, ToolChoice, ToolSpec,
 };
-pub use state::{FinishRecord, RunState};
+pub use state::{FinishRecord, RunState, ToolResultProjection};
 pub use stream::{FinishReason, StreamChunk, Usage};
 #[doc(inline)]
 pub use testing::{ContractSubject, QueuedResponse};

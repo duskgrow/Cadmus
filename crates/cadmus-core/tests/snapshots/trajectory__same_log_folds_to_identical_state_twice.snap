@@ -64,6 +64,7 @@ RunState {
             opaque: None,
         },
     ],
+    tool_results: [],
     turns: 2,
     warnings: [],
     scores: [

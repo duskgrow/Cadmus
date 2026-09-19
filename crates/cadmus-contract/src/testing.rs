@@ -360,6 +360,24 @@ fn delta(seq: u64, turn: u32, chunk: StreamChunk) -> LiveItem {
     }
 }
 
+fn approval_request(
+    seq: u64,
+    request_id: &str,
+    turn: u32,
+    calls: Vec<crate::ToolCall>,
+) -> LiveItem {
+    LiveItem {
+        seq,
+        trace_id: SUITE_TRACE.into(),
+        kind: LiveKind::ApprovalRequested {
+            request_id: request_id.into(),
+            turn,
+            calls,
+            wait_timeout: std::time::Duration::from_secs(300),
+        },
+    }
+}
+
 fn start_run(seq: u64) -> LiveItem {
     recorded(
         seq,
@@ -372,12 +390,21 @@ fn start_run(seq: u64) -> LiveItem {
 }
 
 fn text_done(seq: u64, turn: u32, text: &str) -> LiveItem {
+    response(
+        seq,
+        turn,
+        crate::Message::text(crate::Role::Assistant, text),
+        FinishReason::Stop,
+    )
+}
+
+fn response(seq: u64, turn: u32, message: crate::Message, finish: FinishReason) -> LiveItem {
     recorded(
         seq,
         EventKind::LlmResponse {
-            message: crate::Message::text(crate::Role::Assistant, text),
+            message,
             usage: None,
-            finish: FinishReason::Stop,
+            finish,
             outcome: crate::TurnOutcome::Content,
             warnings: Vec::new(),
         },
@@ -519,6 +546,107 @@ pub fn attach_during_approval_wait_shows_the_pending_request(subject: &impl Prot
     );
 }
 
+/// Per-call approval state remains attached to the original request while
+/// siblings are answered: positions, rather than provider call ids, address
+/// decisions, and the first recorded decision wins.
+pub fn partial_approval_syncs_and_settles_in_original_order(subject: &impl ProtocolSubject) {
+    use crate::Approval::{Approved, Rejected};
+
+    let calls = ["one", "two", "three"]
+        .map(|path| crate::ToolCall {
+            id: "duplicate-call-id".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": path}),
+        })
+        .to_vec();
+    let resolve = |seq, command_id: &str, call_index, decision| {
+        recorded(
+            seq,
+            EventKind::Command(Command::ResolveApprovalCall {
+                command_id: command_id.into(),
+                request_id: "ap-partial".into(),
+                call_index,
+                decision,
+            }),
+            Some(1),
+        )
+    };
+    let rejected = Rejected {
+        comment: Some("keep the second file".into()),
+    };
+    subject.publish(&start_run(1));
+    subject.publish(&approval_request(2, "ap-partial", 1, calls.clone()));
+    subject.publish(&resolve(3, "cmd-middle", 1, rejected.clone()));
+
+    let partial = subject.attach();
+    assert_eq!(partial.sync.as_of_seq, 3);
+    assert!(partial.sync.settled_approvals.is_empty());
+    let pending = &partial.sync.in_flight.pending_approvals;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].request_id, "ap-partial");
+    assert_eq!(pending[0].turn, 1);
+    assert_eq!(
+        pending[0].message_index, None,
+        "no observed response to anchor"
+    );
+    assert_eq!(pending[0].wait_timeout, std::time::Duration::from_secs(300));
+    assert_eq!(
+        pending[0].calls, calls,
+        "the full original batch remains visible"
+    );
+    assert_eq!(
+        pending[0].decisions,
+        vec![None, Some(rejected.clone()), None]
+    );
+
+    let script = [
+        resolve(4, "cmd-last", 2, Approved),
+        resolve(5, "cmd-duplicate", 1, Approved),
+        resolve(6, "cmd-first", 0, Approved),
+        resolve(7, "cmd-first", 0, Approved),
+        resolve(8, "cmd-late-duplicate", 0, Rejected { comment: None }),
+    ];
+    for item in &script[..2] {
+        subject.publish(item);
+    }
+    let still_partial = subject.attach();
+    assert_eq!(still_partial.sync.as_of_seq, 5);
+    assert!(still_partial.sync.settled_approvals.is_empty());
+    let pending = &still_partial.sync.in_flight.pending_approvals;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].calls, calls);
+    assert_eq!(
+        pending[0].decisions,
+        vec![None, Some(rejected.clone()), Some(Approved)],
+        "a different command id cannot replace a recorded decision"
+    );
+    for item in &script[2..] {
+        subject.publish(item);
+    }
+    let mut tail = partial.tail;
+    assert_eq!(
+        take_items(&mut *tail, script.len(), partial.sync.as_of_seq),
+        script
+    );
+
+    let settled = subject.attach();
+    assert_eq!(settled.sync.as_of_seq, 8);
+    assert!(settled.sync.in_flight.pending_approvals.is_empty());
+    assert_eq!(
+        settled.sync.settled_approvals.len(),
+        1,
+        "retries settle only once"
+    );
+    assert_eq!(settled.sync.settled_approvals[0].request_id, "ap-partial");
+    assert_eq!(settled.sync.settled_approvals[0].message_index, None);
+    assert_eq!(settled.sync.settled_approvals[0].calls, calls);
+    assert_eq!(
+        settled.sync.settled_approvals[0].decisions,
+        vec![Approved, rejected, Approved],
+        "settlement preserves full original call order"
+    );
+}
+
 /// A batch that settled before the attach replays in the sync baseline
 /// (item 3): the request was live-only, so the aggregator pairs the
 /// recorded resolve with the calls it saw presented — the rebuilt
@@ -565,6 +693,204 @@ pub fn attach_after_a_settled_approval_replays_it(subject: &impl ProtocolSubject
     assert_eq!(settled[0].request_id, "ap9");
     assert_eq!(settled[0].calls[0].name, "write_file");
     assert_eq!(settled[0].decisions, vec![crate::Approval::Approved]);
+}
+
+/// Approval anchors address the actual history, including seeded messages
+/// and every message-producing event. Repeated calls cannot identify a turn.
+pub fn approval_anchors_follow_seeded_history_across_turns(subject: &impl ProtocolSubject) {
+    let call = crate::ToolCall {
+        id: "repeated-id".into(),
+        name: "write_file".into(),
+        arguments: serde_json::json!({"path": "same-file"}),
+    };
+    let mut message = crate::Message::text(crate::Role::Assistant, "same proposal");
+    message
+        .content
+        .push(crate::ContentPart::ToolCall { call: call.clone() });
+    let mut base = ChatRequest::user_text("try again", 4_096);
+    base.messages.extend([
+        message.clone(),
+        crate::Message::tool_result(call.id.clone(), serde_json::json!("old result")),
+    ]);
+    subject.publish(&recorded(
+        1,
+        EventKind::Command(Command::StartRun {
+            base: Box::new(base),
+            prefix: None,
+        }),
+        None,
+    ));
+    for (turn, seq, index) in [(1, 2, 3), (2, 10, 7)] {
+        subject.publish(&response(
+            seq + 1,
+            u32::try_from(turn).expect("small turn"),
+            message.clone(),
+            FinishReason::ToolCalls,
+        ));
+        let request_id = format!("ap-{turn}");
+        subject.publish(&approval_request(
+            seq + 2,
+            &request_id,
+            u32::try_from(turn).expect("small turn"),
+            vec![call.clone()],
+        ));
+        let pending = subject.attach().sync;
+        assert_eq!(pending.in_flight.pending_approvals.len(), 1);
+        assert_eq!(
+            pending.in_flight.pending_approvals[0].message_index,
+            Some(index)
+        );
+        assert_eq!(pending.history.messages.len(), index + 1);
+        assert_eq!(pending.history.messages[index], message);
+        let command = if turn == 1 {
+            Command::ResolveApproval {
+                command_id: "cmd-batch".into(),
+                request_id,
+                decisions: vec![crate::Approval::Approved],
+            }
+        } else {
+            Command::ResolveApprovalCall {
+                command_id: "cmd-call".into(),
+                request_id,
+                call_index: 0,
+                decision: crate::Approval::Approved,
+            }
+        };
+        subject.publish(&recorded(seq + 3, EventKind::Command(command), Some(turn)));
+        if turn == 1 {
+            for item in [
+                recorded(
+                    6,
+                    EventKind::InstructionInjected {
+                        path: "nested/AGENTS.md".into(),
+                        content: "instructions".into(),
+                    },
+                    Some(turn),
+                ),
+                recorded(7, EventKind::ToolCall { call: call.clone() }, Some(turn)),
+                recorded(
+                    8,
+                    EventKind::ToolResult {
+                        call_id: call.id.clone(),
+                        result: serde_json::json!("done"),
+                    },
+                    Some(turn),
+                ),
+                recorded(
+                    9,
+                    EventKind::Command(Command::Steer {
+                        command_id: "cmd-steer".into(),
+                        text: "again".into(),
+                        mode: crate::SteerMode::Inject,
+                    }),
+                    Some(turn),
+                ),
+            ] {
+                subject.publish(&item);
+            }
+        }
+    }
+    let settled = subject.attach().sync;
+    assert!(settled.in_flight.pending_approvals.is_empty());
+    assert_eq!(settled.settled_approvals.len(), 2);
+    assert_eq!(settled.settled_approvals[0].message_index, Some(3));
+    assert_eq!(settled.settled_approvals[1].message_index, Some(7));
+}
+
+/// An out-of-order completion is provisional, not another history message.
+/// Duplicate provider ids remain distinct until their own durable spans land.
+pub fn buffered_tool_completions_sync_and_reconcile_by_span(subject: &impl ProtocolSubject) {
+    subject.publish(&start_run(1));
+    subject.publish(&text_done(2, 1, "tools requested"));
+    let later = crate::ToolCompletion {
+        span_id: "tool-later".into(),
+        turn: 1,
+        message_call_index: 2,
+        call_id: "duplicate-id".into(),
+        name: "write_file".into(),
+        result: serde_json::json!({"written": true}),
+        error: None,
+    };
+    let failed = crate::ToolCompletion {
+        span_id: "tool-failed".into(),
+        message_call_index: 1,
+        result: serde_json::json!("write failed"),
+        error: Some(crate::EventError {
+            kind: crate::error_kinds::TOOL.into(),
+            message: "write failed".into(),
+        }),
+        ..later.clone()
+    };
+    let completed = |seq, completion: &crate::ToolCompletion| LiveItem {
+        seq,
+        trace_id: SUITE_TRACE.into(),
+        kind: LiveKind::ToolCompleted {
+            completion: completion.clone(),
+        },
+    };
+    let result = |seq, completion: &crate::ToolCompletion| {
+        let mut item = recorded(
+            seq,
+            EventKind::ToolResult {
+                call_id: completion.call_id.clone(),
+                result: completion.result.clone(),
+            },
+            Some(u64::from(completion.turn)),
+        );
+        let LiveKind::Recorded { event } = &mut item.kind else {
+            unreachable!()
+        };
+        event.span_id.clone_from(&completion.span_id);
+        if let Some(error) = &completion.error {
+            event.status = crate::Status::Error;
+            event.error = Some(error.clone());
+        }
+        item
+    };
+    subject.publish(&completed(3, &later));
+    subject.publish(&completed(4, &failed));
+    let attached = subject.attach();
+    assert_eq!(attached.sync.as_of_seq, 4);
+    assert_eq!(attached.sync.history.messages.len(), 2);
+    assert_eq!(
+        attached.sync.in_flight.completed_tools,
+        vec![later.clone(), failed.clone()]
+    );
+    let other = crate::ToolCompletion {
+        span_id: "tool-first".into(),
+        message_call_index: 0,
+        ..later.clone()
+    };
+    let script = [
+        completed(5, &later),
+        result(6, &other),
+        result(7, &later),
+        result(8, &failed),
+    ];
+    for item in &script[..2] {
+        subject.publish(item);
+    }
+    let unmatched = subject.attach().sync;
+    assert_eq!(unmatched.history.messages.len(), 3);
+    assert_eq!(
+        unmatched.in_flight.completed_tools,
+        vec![later, failed.clone()],
+        "same provider id on another span does not retire an outcome"
+    );
+    subject.publish(&script[2]);
+    let reconciled = subject.attach().sync;
+    assert_eq!(reconciled.history.messages.len(), 4);
+    assert_eq!(reconciled.in_flight.completed_tools, vec![failed]);
+    subject.publish(&script[3]);
+    let done = subject.attach().sync;
+    assert!(done.in_flight.completed_tools.is_empty());
+    assert_eq!(done.history.messages.len(), 5);
+    assert!(done.history.messages[4].is_error);
+    let mut tail = attached.tail;
+    assert_eq!(
+        take_items(&mut *tail, script.len(), attached.sync.as_of_seq),
+        script
+    );
 }
 
 /// Lag recovery (item 5): a subscriber that falls behind learns it via the
@@ -687,9 +1013,27 @@ macro_rules! client_protocol_tests {
             }
 
             #[test]
+            fn partial_approval_syncs_and_settles_in_original_order() {
+                let subject = ($factory)();
+                $crate::testing::partial_approval_syncs_and_settles_in_original_order(&subject);
+            }
+
+            #[test]
             fn attach_after_a_settled_approval_replays_it() {
                 let subject = ($factory)();
                 $crate::testing::attach_after_a_settled_approval_replays_it(&subject);
+            }
+
+            #[test]
+            fn approval_anchors_follow_seeded_history_across_turns() {
+                let subject = ($factory)();
+                $crate::testing::approval_anchors_follow_seeded_history_across_turns(&subject);
+            }
+
+            #[test]
+            fn buffered_tool_completions_sync_and_reconcile_by_span() {
+                let subject = ($factory)();
+                $crate::testing::buffered_tool_completions_sync_and_reconcile_by_span(&subject);
             }
 
             #[test]

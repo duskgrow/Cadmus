@@ -415,6 +415,7 @@ async fn loop_events_replay_to_the_run_state() {
         .map(|event| match &event.kind {
             EventKind::Command(Command::StartRun { .. }) => "start_run",
             EventKind::Command(Command::ResolveApproval { .. }) => "resolve_approval",
+            EventKind::Command(Command::ResolveApprovalCall { .. }) => "resolve_approval_call",
             EventKind::Command(Command::Steer { .. }) => "steer",
             EventKind::Command(Command::Interrupt { .. }) => "interrupt",
             EventKind::LlmRequest { .. } => "llm_request",

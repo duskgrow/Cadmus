@@ -50,7 +50,8 @@ pub struct LayoutInput {
     pub screen_rows: u16,
     /// The stream tail's live (unflushed) row count ([`crate::stream::Stream::live_row_count`]).
     pub stream_rows: u16,
-    /// The approval section's row count ([`crate::approval::section_rows`]).
+    /// The approval dialog's row count (`App::wrap_section` wrapping the
+    /// head dialog's cached lines).
     pub approval_rows: u16,
     /// The composer's desired row count ([`crate::composer::Composer::desired_rows`]).
     pub composer_rows: u16,

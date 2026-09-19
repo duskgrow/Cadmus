@@ -13,6 +13,8 @@ mod tool;
 mod trailer;
 
 #[cfg(test)]
+mod approval_tests;
+#[cfg(test)]
 mod fixtures;
 
 use std::collections::{BTreeMap, HashMap};

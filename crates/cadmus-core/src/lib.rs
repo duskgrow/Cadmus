@@ -29,4 +29,4 @@ pub use context::FrozenPrefix;
 pub use cadmus_contract::{FinishRecord, RunState, TurnOutcome};
 pub use eval::score_case;
 pub use replay::ReplayProvider;
-pub use trajectory::replay_trace;
+pub use trajectory::{latest_response_anchor, replay_trace};

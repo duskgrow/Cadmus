@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 /// One decision on a gated tool call.
 ///
-/// Batch approval: a turn's gated calls are presented together and each is
-/// decided independently; approved calls execute immediately. A decision
-/// may depend on the batch's contents but never on another gated call's
-/// *result* — results postdate the approval moment (the 2026-09-09
-/// amendment's accepted trade-off).
+/// A turn's gated calls are presented together and decided independently.
+/// A recorded approval makes a call ready to execute without waiting for
+/// undecided siblings; concurrency declarations still prohibit unsafe overlap.
+/// A later decision can observe a completed sibling's result (ADR-0008's
+/// 2026-09-09 evening amendment).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum Approval {

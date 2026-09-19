@@ -15,7 +15,7 @@
 //! snapshot's measurement can justify.
 //!
 //! Key handling is a minimal fixed map (chars, editing ops, Enter submits,
-//! Esc interrupts, Ctrl-C quits, y/n answer a pending approval) —
+//! Esc interrupts, Ctrl-C quits, Tab selects a call and y/n answer it) —
 //! ADR-0018 item 6's mode × key → command layer with keymap-as-data is its
 //! own slice, and the default bindings are decided in its binding-design
 //! task.
@@ -209,9 +209,9 @@ pub struct App<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> 
     feed: Option<mpsc::Receiver<FeedMsg>>,
     status: Status,
     command_seq: u64,
-    /// Approval requests awaiting the user's decision, FIFO — the band
-    /// renders the head and y/n answer it. One batch at a time is
-    /// deliberate: the gate presents one batch per turn and awaits it, so
+    /// Approval requests awaiting the user's decisions, FIFO — the band
+    /// renders the head, Tab selects a call and y/n answer that call.
+    /// The gate presents one batch per turn and awaits its decisions, so
     /// the queue holds a single request in practice; the FIFO covers an
     /// attach mid-wait (the sync baseline replays the pending list) and the
     /// protocol's general shape without a modal stack. Cleared when the run
@@ -222,12 +222,10 @@ pub struct App<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> 
 }
 
 /// One queued request plus its section's logical lines. The section is
-/// materialized once, at enqueue (and sync-reseed), not per frame: the
-/// diff is `O(content)`, and the render re-wraps at frame rate — caching
-/// the lines keeps the per-pump work bounded by the per-call budget
-/// (`approval::section_lines`' contract), not by the file being written.
+/// materialized on focus/decision changes, not per frame. The dialog caches
+/// each call's diff so navigation only copies already-budgeted lines.
 struct QueuedApproval {
-    request: PendingApproval,
+    dialog: approval::Dialog,
     section: Vec<ir::Line>,
 }
 
@@ -404,18 +402,36 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
     /// The minimal fixed keymap (module docs). Everything the composer can
     /// do is a plain method, so the item-6 keymap layer can rebind any of it.
     fn on_key(&mut self, key: KeyEvent) {
-        // The approval dialog's modal capture, explicit at the dispatch
-        // point (keymap-as-data is item 6's own slice): bare y/n answers
-        // the pending request; every other key — composer edits, Esc's
-        // interrupt, Ctrl-C's quit — falls through untouched.
-        if !self.approvals.is_empty()
-            && key.modifiers.is_empty()
-            && matches!(key.code, KeyCode::Char('y' | 'n'))
-        {
-            self.resolve_approval(matches!(key.code, KeyCode::Char('y')));
+        // Bare y/n answer the focused call; Tab/Shift-Tab move focus without
+        // stealing the composer's arrows. Esc and Ctrl-C still fall through.
+        if !self.approvals.is_empty() {
+            let backwards = match (key.code, key.modifiers) {
+                (KeyCode::Tab, KeyModifiers::NONE) => Some(false),
+                (KeyCode::BackTab, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                | (KeyCode::Tab, KeyModifiers::SHIFT) => Some(true),
+                _ => None,
+            };
+            if let Some(backwards) = backwards {
+                let queued = self.approvals.front_mut().expect("a pending dialog");
+                queued.dialog.move_focus(backwards);
+                queued.section = queued.dialog.lines();
+            } else if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('y' | 'n')) {
+                // No repeat filter here: `Dialog`'s arm-first rule is the
+                // held-key guard (a repeat needs a fresh Tab), and submission
+                // already disarms — so a terminal that reports the first
+                // keydown as Repeat cannot lose a deliberate answer.
+                self.resolve_approval(matches!(key.code, KeyCode::Char('y')));
+            } else {
+                self.edit_key(key);
+                return;
+            }
             self.requester.schedule_frame();
             return;
         }
+        self.edit_key(key);
+    }
+
+    fn edit_key(&mut self, key: KeyEvent) {
         let composer = &mut self.composer;
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match (key.code, key.modifiers) {
@@ -480,50 +496,83 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
         self.command_seq += 1;
     }
 
-    /// Queue a pending request: the section's logical lines are built here,
-    /// once per request ([`QueuedApproval`]'s contract).
     fn queue_approval(&mut self, pending: PendingApproval) {
-        let section = approval::section_lines(&pending);
-        self.approvals.push_back(QueuedApproval {
-            request: pending,
-            section,
-        });
+        let dialog = approval::Dialog::new(pending);
+        if dialog.complete() {
+            return;
+        }
+        let section = dialog.lines();
+        self.approvals.push_back(QueuedApproval { dialog, section });
     }
 
-    /// y/n on the pending request: one decision per presented call, sent
-    /// through the run's command sink — the same path as the interrupt (the
-    /// app is a client; commands are the only upstream, ADR-0013 item 6).
-    /// The decision is batch-wide for now: per-call decisions (and the
-    /// gate's per-call settlement) land with the rules-engine composition
-    /// slice. Typed rejection comments are a follow-up landing with the
-    /// keymap slice; `None` denies by the gate's conservative default. The
-    /// human-wait deny timeout (ADR-0008 item 4's pairing rule) is the
-    /// gate's mechanism: five minutes unanswered settles the batch as a
-    /// recorded rejection, which also clears this dialog (the app's feed
-    /// drops the settled request).
+    /// Submission is not settlement: suppress retries locally, but keep the
+    /// request until the recorded decisions arrive (including a racing deny).
     fn resolve_approval(&mut self, approved: bool) {
         let Some(run) = &self.run else { return };
-        let Some(queued) = self.approvals.pop_front() else {
+        let Some(queued) = self.approvals.front_mut() else {
             return;
         };
-        let pending = queued.request;
-        let decisions = pending
-            .calls
-            .iter()
-            .map(|_| {
-                if approved {
-                    Approval::Approved
-                } else {
-                    Approval::Rejected { comment: None }
-                }
-            })
-            .collect();
-        (run.commands)(Command::ResolveApproval {
+        let Some(call_index) = queued.dialog.submit() else {
+            return;
+        };
+        (run.commands)(Command::ResolveApprovalCall {
             command_id: format!("tui-{}", self.command_seq),
-            request_id: pending.request_id,
-            decisions,
+            request_id: queued.dialog.request.request_id.clone(),
+            call_index,
+            decision: if approved {
+                Approval::Approved
+            } else {
+                Approval::Rejected { comment: None }
+            },
         });
         self.command_seq += 1;
+        queued.section = queued.dialog.lines();
+    }
+
+    fn sync_approvals(&mut self, pending: &[PendingApproval]) {
+        let mut previous = std::mem::take(&mut self.approvals);
+        for request in pending {
+            if let Some(index) = previous
+                .iter()
+                .position(|queued| queued.dialog.request.request_id == request.request_id)
+            {
+                let mut queued = previous.remove(index).expect("matching request");
+                queued.dialog.resync(request.clone());
+                if !queued.dialog.complete() {
+                    queued.section = queued.dialog.lines();
+                    self.approvals.push_back(queued);
+                }
+            } else {
+                self.queue_approval(request.clone());
+            }
+        }
+    }
+
+    fn settle_approval(&mut self, kind: &EventKind) {
+        match kind {
+            EventKind::Command(Command::ResolveApproval { request_id, .. }) => {
+                self.approvals
+                    .retain(|queued| queued.dialog.request.request_id != *request_id);
+            }
+            EventKind::Command(Command::ResolveApprovalCall {
+                request_id,
+                call_index,
+                decision,
+                ..
+            }) => {
+                if let Some(queued) = self
+                    .approvals
+                    .iter_mut()
+                    .find(|queued| queued.dialog.request.request_id == *request_id)
+                {
+                    queued.dialog.settle(*call_index, decision);
+                    queued.section = queued.dialog.lines();
+                }
+                self.approvals.retain(|queued| !queued.dialog.complete());
+            }
+            EventKind::RunFinished { .. } => self.approvals.clear(),
+            _ => {}
+        }
     }
 
     fn on_feed(&mut self, msg: FeedMsg) -> io::Result<()> {
@@ -545,23 +594,17 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                     self.queue_approval(PendingApproval {
                         request_id: request_id.clone(),
                         turn: *turn,
+                        message_index: None,
                         calls: calls.clone(),
+                        decisions: vec![None; calls.len()],
                         wait_timeout: *wait_timeout,
                     });
                 }
-                // A resolution that settled elsewhere — the gate's deny
-                // timeout, a resolve that raced the dialog — drops the
-                // matching prompt: answering a settled request is a no-op
-                // at the gate, but the dialog must not linger. The client
-                // rule guards here too: a stale replay must not clear a
-                // dialog the attach baseline re-seeded.
-                if fresh
-                    && let LiveKind::Recorded { event } = &item.kind
-                    && let EventKind::Command(Command::ResolveApproval { request_id, .. }) =
-                        &event.kind
-                {
-                    self.approvals
-                        .retain(|queued| queued.request.request_id != *request_id);
+                // Recorded decisions, including remote answers and timeout,
+                // are authoritative. A stale replay cannot clear a re-seeded
+                // dialog; individual answers leave siblings available.
+                if fresh && let LiveKind::Recorded { event } = &item.kind {
+                    self.settle_approval(&event.kind);
                 }
                 self.status.note(light);
                 self.requester.schedule_frame();
@@ -577,10 +620,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
                 // as well: an attach mid-wait replays the pending request(s)
                 // (ADR-0013 item 3), a lag re-attach drops what settled in
                 // the hole.
-                self.approvals.clear();
-                for pending in &sync.in_flight.pending_approvals {
-                    self.queue_approval(pending.clone());
-                }
+                self.sync_approvals(&sync.in_flight.pending_approvals);
                 if resync {
                     // The hole marker: flushed directly, outside the block
                     // model, so replays never reorder it (transcript docs).
