@@ -238,26 +238,23 @@ fn grow_protocol_preserves_history_with_zero_residue() {
 }
 
 #[test]
-fn shrink_protocol_leaves_only_bounded_blank_rows() {
+fn shrink_protocol_parks_the_blank_buffer_below_the_band() {
     let world = World::new();
     let (mut app, expected) = boot_anchored(&world, 12, 2);
     app.shrink(5);
     assert_world(&world, &mut app, &expected);
     let visible = world.visible_rows();
-    // Exactly the vacated delta rows are blank — the bounded, self-healing
-    // residue class (consumed by later flushes); the band re-anchors at the
-    // bottom.
-    let blank_run = visible[..19]
-        .iter()
-        .rev()
-        .take_while(|row| row.is_empty())
-        .count();
-    assert_eq!(
-        blank_run, 7,
-        "the shrink residue is exactly the vacated rows"
+    // Top-anchored: the band keeps its old top edge and the vacated Δ rows
+    // sit BELOW it as a blank buffer — re-absorbed by later growth, never a
+    // gap inside the transcript above. The boot band is [12, 24): the
+    // shrunk band is [12, 17), the buffer [17, 24).
+    assert_eq!(visible[12], "STATUS·h5·t1");
+    assert_eq!(visible[16], "PROMPT·c1");
+    assert!(
+        visible[17..].iter().all(String::is_empty),
+        "the buffer below the band is exactly the vacated rows: {:?}",
+        &visible[17..]
     );
-    assert_eq!(visible[19], "STATUS·h5·t1");
-    assert_eq!(visible[23], "PROMPT·c1");
 }
 
 #[test]
@@ -431,6 +428,43 @@ fn width_shrink_replays_the_visible_tail_from_source() {
         expected_after_shrink(&mut app),
         "a second shrink re-materializes the same tail"
     );
+}
+
+/// The stale-width window: the terminal has already resized (vt100 knows)
+/// but the shell has not (the debounce holds the event) — a flush landing
+/// in that window must survive the later re-anchor. Regression pin for the
+/// `insert_before` cursor-restore underflow the shell repairs
+/// (`park_cursor_at_viewport_top`): the portable insert path's closing
+/// clear restores the cursor to its pre-insert position — a row the
+/// viewport slide pushed ABOVE the band — and the next resize's re-anchor
+/// read an offset that saturated to zero and pulled the viewport UP over
+/// the inserted rows, erasing them. Rows after the window and after a
+/// second stale-window pair must all land exactly once.
+#[test]
+fn a_flush_in_the_stale_width_window_survives_the_resize() {
+    let world = World::new();
+    let (mut app, mut expected) = boot_anchored(&world, 8, 2);
+
+    // The terminal resizes first; this flush lands in the stale-width
+    // window (the shell still thinks 80 columns).
+    world.resize(SCREEN_ROWS, 100);
+    let turn_rows = history_rows(app.turn + 1, 3);
+    app.flush_history(&turn_rows);
+    expected.extend(turn_rows);
+
+    // The debounced resize lands; the window's rows must all survive, and
+    // the transcript keeps its exact sequence afterwards.
+    app.on_resize(100, SCREEN_ROWS, |_, _| Vec::new());
+    assert_world(&world, &mut app, &expected);
+
+    // Once more at the new width: another stale-window pair (the terminal
+    // grows again while the shell still thinks 100), then its resize.
+    world.resize(SCREEN_ROWS, 120);
+    let turn_rows = history_rows(app.turn + 1, 2);
+    app.flush_history(&turn_rows);
+    expected.extend(turn_rows);
+    app.on_resize(120, SCREEN_ROWS, |_, _| Vec::new());
+    assert_world(&world, &mut app, &expected);
 }
 
 /// Spike discipline 3, locked: a CPR timeout inside `draw`'s autoresize is

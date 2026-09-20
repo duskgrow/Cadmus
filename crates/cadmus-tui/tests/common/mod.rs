@@ -206,9 +206,12 @@ impl World {
 
     pub fn visible_rows(&self) -> Vec<String> {
         let parser = self.backend.parser.borrow();
+        // Read at the screen's current width: a resize mid-session changes
+        // it, and a stale width would truncate (or pad) the rows.
+        let (_rows, cols) = parser.screen().size();
         parser
             .screen()
-            .rows(0, SCREEN_COLS)
+            .rows(0, cols)
             .map(|row| row.trim_end().to_string())
             .collect()
     }
@@ -221,6 +224,7 @@ impl World {
         // window by window or the newest rows silently fall off the read.
         screen.set_scrollback(usize::MAX);
         let depth = screen.scrollback();
+        let (_rows, cols) = screen.size();
         let mut rows = Vec::with_capacity(depth);
         let mut start = 0;
         while start < depth {
@@ -228,7 +232,7 @@ impl World {
             let take = (depth - start).min(usize::from(SCREEN_ROWS));
             rows.extend(
                 screen
-                    .rows(0, SCREEN_COLS)
+                    .rows(0, cols)
                     .take(take)
                     .map(|row| row.trim_end().to_string()),
             );

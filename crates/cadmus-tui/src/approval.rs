@@ -1,6 +1,6 @@
 //! The interactive approval surface (ADR-0018 item 8 / ADR-0011 item 3):
 //! while the run's gate awaits a decision, the band hosts the pending
-//! request between the stream tail and the composer — a header naming it,
+//! request above the run-status row and the composer — a header naming it,
 //! the wait's deadline, and the keys that answer it. Tab selects a call;
 //! y/n answer only that call. Its proposed change uses the `diff-*` slots
 //! (ADR-0017), and siblings retain their original batch positions.
@@ -137,11 +137,15 @@ impl Dialog {
             // The answer keys ride the hint, not the header: y/n need Tab
             // first (the held-key guard), and the prerequisite has to be read
             // in the same line or the header promises an inert key. Keeping it
-            // here also holds the header under an 80-column wrap.
+            // here also holds the header under an 80-column wrap. Esc is named
+            // too: it interrupts the run, and the gate's channel-drop rule
+            // denies the pending calls with it.
             (Some(_), true) => {
                 "Tab/Shift-Tab: next/previous call · y: approve · n: reject".to_string()
             }
-            (Some(_), false) => "Tab: arm selected call · y/n: answer it".to_string(),
+            (Some(_), false) => {
+                "Tab: arm selected call · y/n: answer it · Esc: interrupt".to_string()
+            }
         }));
         // Put the focused call ahead of its siblings: head clipping must
         // never leave y/n answering a call hidden behind another call's diff.
@@ -200,7 +204,7 @@ fn header(pending: &PendingApproval) -> ir::Line {
 
 /// The deadline's static name: whole minutes read as minutes, anything else
 /// as seconds. The carried value is the budget the request opened with, not
-/// a live countdown — that rides a later stream slice.
+/// a live countdown — a ticking form is deferred (no surface owns it yet).
 fn wait_name(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs.is_multiple_of(60) {
@@ -436,7 +440,7 @@ mod tests {
         dialog.move_focus(false);
         dialog.move_focus(false);
         let rows: Vec<_> = dialog.lines().iter().map(ir::Line::text).collect();
-        assert_eq!(rows[2], "> 2/2 → write_file second.rs");
+        assert_eq!(rows[2], "> 2/2 ▸ write_file second.rs");
         assert_eq!(rows[3], "+ second");
         assert!(!rows.iter().any(|row| row == "+ first"));
     }
@@ -490,8 +494,8 @@ mod tests {
             rows,
             vec![
                 "approve 1 call(s)  ·  unanswered denies after 5 min",
-                "Tab: arm selected call · y/n: answer it",
-                "> 1/1 → write_file src/main.rs",
+                "Tab: arm selected call · y/n: answer it · Esc: interrupt",
+                "> 1/1 ▸ write_file src/main.rs",
                 "+ fn main() {",
                 "+     run();",
                 "+ }",
@@ -525,8 +529,8 @@ mod tests {
             rows,
             vec![
                 "approve 1 call(s)  ·  unanswered denies after 5 min",
-                "Tab: arm selected call · y/n: answer it",
-                "> 1/1 → edit_file src/main.rs",
+                "Tab: arm selected call · y/n: answer it · Esc: interrupt",
+                "> 1/1 ▸ edit_file src/main.rs",
                 "- let a = 1;",
                 "+ let a = 2;",
                 "- fn old() {}",
@@ -604,8 +608,8 @@ mod tests {
             rows,
             vec![
                 "approve 1 call(s)  ·  unanswered denies after 5 min",
-                "Tab: arm selected call · y/n: answer it",
-                "> 1/1 → bash cargo test"
+                "Tab: arm selected call · y/n: answer it · Esc: interrupt",
+                "> 1/1 ▸ bash cargo test",
             ]
         );
         // Malformed write arguments contribute nothing either.
@@ -618,8 +622,8 @@ mod tests {
             rows,
             vec![
                 "approve 1 call(s)  ·  unanswered denies after 5 min",
-                "Tab: arm selected call · y/n: answer it",
-                "> 1/1 → write_file src/main.rs"
+                "Tab: arm selected call · y/n: answer it · Esc: interrupt",
+                "> 1/1 ▸ write_file src/main.rs"
             ]
         );
     }

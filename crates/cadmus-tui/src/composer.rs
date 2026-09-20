@@ -54,6 +54,24 @@ const MAX_UNDO_UNITS: usize = 64;
 /// the budget is still retained — undo must never silently die.
 const MAX_UNDO_BYTES: usize = 1024 * 1024;
 
+/// The prompt prefix rendered on the first line (2 display columns wide).
+const PROMPT_PREFIX: &str = "❯ ";
+
+/// The gutter rendered on continuation lines (2 display columns wide).
+const CONTINUATION_GUTTER: &str = "  ";
+
+/// Display width of the composer's prompt prefix and continuation gutter.
+const GUTTER_WIDTH: u16 = 2;
+
+/// Default placeholder text rendered when the composer buffer is empty
+/// (idle: no run's keys to name).
+pub(crate) const DEFAULT_PLACEHOLDER: &str = "Ask anything";
+
+/// The placeholder while a run is active — the truthfulness rule: it names
+/// only the keys that work mid-run (Esc interrupts; Enter stays inert until
+/// the steer slice wires it — see `App::submit`).
+pub(crate) const RUNNING_PLACEHOLDER: &str = "Esc to interrupt";
+
 /// A (line index, byte column) buffer position.
 type Pos = (usize, usize);
 
@@ -98,6 +116,8 @@ pub struct Composer {
     run: Option<Run>,
     /// First visible wrapped row; adjusted on every render.
     scroll: usize,
+    /// Placeholder text rendered when the buffer is empty.
+    placeholder: String,
 }
 
 impl Composer {
@@ -113,7 +133,19 @@ impl Composer {
             undo_bytes: 0,
             run: None,
             scroll: 0,
+            placeholder: String::from(DEFAULT_PLACEHOLDER),
         }
+    }
+
+    /// The placeholder text rendered when the buffer is empty.
+    #[must_use]
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+
+    /// Set the placeholder text rendered when the buffer is empty.
+    pub fn set_placeholder(&mut self, text: impl Into<String>) {
+        self.placeholder = text.into();
     }
 
     /// The whole buffer, lines joined with `\n`.
@@ -403,18 +435,31 @@ impl Composer {
     }
 
     /// The hard-wrapped row count at `width` (minimum 1) — feeds the band's
-    /// height function. Includes the cursor's continuation row when the
+    /// height function. Computed for the available width after subtracting
+    /// the 2-column gutter. Includes the cursor's continuation row when the
     /// cursor rests exactly at a full row's end (see `Layout::row_count`).
     #[must_use]
     pub fn desired_rows(&self, width: u16) -> u16 {
-        u16::try_from(self.layout(width).row_count()).unwrap_or(u16::MAX)
+        u16::try_from(self.layout(width).row_count())
+            .unwrap_or(u16::MAX)
+            .max(1)
     }
 
     /// Draw the visible window of wrapped rows into `area`, scrolling so the
-    /// cursor row stays visible. Selected cells get `selection` patched over
-    /// `base`; everything else gets `base`. The terminal cursor is placed at
-    /// the cursor's wrapped (x, y) inside `area`.
-    pub fn render(&mut self, area: Rect, frame: &mut Frame<'_>, base: Style, selection: Style) {
+    /// cursor row stays visible. Renders a prompt prefix on the first line
+    /// (in `prompt` — the theme's accent) and a blank continuation gutter on
+    /// subsequent lines. When empty, renders the placeholder. Selected cells
+    /// get `selection` patched over `base`; everything else gets `base`. The
+    /// terminal cursor is placed at `gutter_width + layout.cursor_x` inside
+    /// `area`.
+    pub fn render(
+        &mut self,
+        area: Rect,
+        frame: &mut Frame<'_>,
+        base: Style,
+        selection: Style,
+        prompt: Style,
+    ) {
         if area.is_empty() {
             return;
         }
@@ -430,25 +475,50 @@ impl Composer {
         frame.render_widget(Clear, area);
         let buf = frame.buffer_mut();
         buf.set_style(area, base);
+
+        let placeholder_style = base.patch(Style::default().dim());
         let sel = self.selection_range();
         for (y, row) in (area.top()..area.bottom()).zip(layout.rows.iter().skip(self.scroll)) {
             let mut x = area.left();
-            for (offset, grapheme) in UnicodeSegmentation::grapheme_indices(
-                &self.lines[row.line][row.start..row.end],
-                true,
-            ) {
-                let col = row.start + offset;
-                let style = match sel {
-                    Some((start, end)) if start <= (row.line, col) && (row.line, col) < end => {
-                        base.patch(selection)
-                    }
-                    _ => base,
-                };
+            let is_first_line = row.line == 0 && row.start == 0;
+            let (gutter, gutter_style) = if is_first_line {
+                (PROMPT_PREFIX, prompt)
+            } else {
+                (CONTINUATION_GUTTER, base)
+            };
+            let max_width = usize::from(area.right().saturating_sub(x));
+            x = buf.set_stringn(x, y, gutter, max_width, gutter_style).0;
+
+            if self.is_empty() {
                 let max_width = usize::from(area.right().saturating_sub(x));
-                x = buf.set_stringn(x, y, grapheme, max_width, style).0;
+                buf.set_stringn(x, y, &self.placeholder, max_width, placeholder_style);
+            } else {
+                for (offset, grapheme) in UnicodeSegmentation::grapheme_indices(
+                    &self.lines[row.line][row.start..row.end],
+                    true,
+                ) {
+                    let col = row.start + offset;
+                    let style = match sel {
+                        Some((start, end)) if start <= (row.line, col) && (row.line, col) < end => {
+                            base.patch(selection)
+                        }
+                        _ => base,
+                    };
+                    let max_width = usize::from(area.right().saturating_sub(x));
+                    x = buf.set_stringn(x, y, grapheme, max_width, style).0;
+                }
             }
         }
-        let cursor_x = u16::try_from(layout.cursor_x).unwrap_or_default();
+        if layout.cursor_y >= layout.rows.len() && layout.cursor_y >= self.scroll {
+            let cont_offset = layout.cursor_y - self.scroll;
+            if cont_offset < height {
+                let cont_y = area.top() + u16::try_from(cont_offset).unwrap_or_default();
+                let max_width = usize::from(area.right().saturating_sub(area.left()));
+                buf.set_stringn(area.left(), cont_y, CONTINUATION_GUTTER, max_width, base);
+            }
+        }
+        let cursor_x =
+            u16::try_from(usize::from(GUTTER_WIDTH) + layout.cursor_x).unwrap_or_default();
         let cursor_y = u16::try_from(layout.cursor_y - self.scroll).unwrap_or_default();
         frame.set_cursor_position((
             area.x.saturating_add(cursor_x),
@@ -619,11 +689,11 @@ impl Composer {
         self.pos_of_offset(target)
     }
 
-    /// The one layout truth: hard-wrap every line by display width and
-    /// locate the cursor's wrapped (x, y). Feeds both
+    /// The one layout truth: hard-wrap every line by display width (reduced by
+    /// the gutter) and locate the cursor's wrapped (x, y). Feeds both
     /// [`Composer::desired_rows`] and [`Composer::render`].
     fn layout(&self, width: u16) -> Layout {
-        let width = usize::from(width).max(1);
+        let width = usize::from(width.saturating_sub(GUTTER_WIDTH)).max(1);
         let mut rows = Vec::new();
         let mut cursor_x = 0;
         let mut cursor_y = 0;
@@ -857,7 +927,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
 
@@ -1138,39 +1208,39 @@ mod tests {
     #[test]
     fn desired_rows_counts_hard_wrapped_rows() {
         let mut composer = composer_with("abc");
-        assert_eq!(composer.desired_rows(4), 1);
+        assert_eq!(composer.desired_rows(6), 1);
         // Width 0 clamps to 1: three wrapped rows, plus the cursor's
         // continuation row (every row is exactly filled).
         assert_eq!(composer.desired_rows(0), 4);
         composer.move_home(false);
         assert_eq!(composer.desired_rows(0), 3);
         composer.insert_str("de");
-        assert_eq!(composer.desired_rows(4), 2);
+        assert_eq!(composer.desired_rows(6), 2);
         // Two logical lines each wrap independently; the cursor rests at a
         // full row's end here, so its continuation row is counted.
         let mut composer = composer_with("ab\ncd");
-        assert_eq!(composer.desired_rows(2), 3);
+        assert_eq!(composer.desired_rows(4), 3);
         composer.move_home(false);
-        assert_eq!(composer.desired_rows(2), 2);
+        assert_eq!(composer.desired_rows(4), 2);
         assert_eq!(Composer::new().desired_rows(10), 1);
     }
 
     #[test]
     fn a_full_row_end_grows_the_height_only_while_the_cursor_rests_there() {
         let mut composer = composer_with("abcd");
-        assert_eq!(composer.desired_rows(4), 2);
+        assert_eq!(composer.desired_rows(6), 2);
         composer.move_left(false);
-        assert_eq!(composer.desired_rows(4), 1);
+        assert_eq!(composer.desired_rows(6), 1);
     }
 
     #[test]
     fn wide_graphemes_move_to_the_next_row_whole() {
         // 好(2) + a(1) fills 3 of 4; the second 好 doesn't fit and wraps.
         let composer = composer_with("好a好");
-        assert_eq!(composer.desired_rows(4), 2);
+        assert_eq!(composer.desired_rows(6), 2);
         // An exact fill counts the cursor's continuation row.
         let composer = composer_with("好ab");
-        assert_eq!(composer.desired_rows(4), 2);
+        assert_eq!(composer.desired_rows(6), 2);
     }
 
     #[test]
@@ -1180,27 +1250,39 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                composer.render(frame.area(), frame, Style::default(), Style::default());
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default(),
+                );
             })
             .unwrap();
         // Rows 7..=9 are visible; the cursor sits at end of l9.
-        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(2, 2));
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(4, 2));
         terminal
             .backend()
-            .assert_buffer_lines(["l7      ", "l8      ", "l9      "]);
+            .assert_buffer_lines(["  l7    ", "  l8    ", "  l9    "]);
         // Scrolling back up follows the cursor.
         for _ in 0..9 {
             composer.move_up(false);
         }
         terminal
             .draw(|frame| {
-                composer.render(frame.area(), frame, Style::default(), Style::default());
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default(),
+                );
             })
             .unwrap();
-        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(2, 0));
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(4, 0));
         terminal
             .backend()
-            .assert_buffer_lines(["l0      ", "l1      ", "l2      "]);
+            .assert_buffer_lines(["❯ l0    ", "  l1    ", "  l2    "]);
     }
 
     #[test]
@@ -1210,7 +1292,7 @@ mod tests {
         composer.move_right(true);
         composer.move_right(true);
         composer.move_right(true);
-        let backend = TestBackend::new(5, 1);
+        let backend = TestBackend::new(7, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -1219,41 +1301,160 @@ mod tests {
                     frame,
                     Style::default(),
                     Style::default().bg(Color::Blue),
+                    Style::default(),
                 );
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        for x in 0..3 {
+        assert_eq!(buf.cell((0, 0)).unwrap().bg, Color::Reset);
+        assert_eq!(buf.cell((1, 0)).unwrap().bg, Color::Reset);
+        for x in 2..5 {
             assert_eq!(buf.cell((x, 0)).unwrap().bg, Color::Blue);
         }
-        assert_eq!(buf.cell((3, 0)).unwrap().bg, Color::Reset);
-        assert_eq!(buf.cell((4, 0)).unwrap().bg, Color::Reset);
+        assert_eq!(buf.cell((5, 0)).unwrap().bg, Color::Reset);
+        assert_eq!(buf.cell((6, 0)).unwrap().bg, Color::Reset);
     }
 
     #[test]
     fn render_places_the_cursor_inside_the_area_with_its_offset() {
-        // The exact-fill corner: "abcd" at width 4 wraps the cursor to the
-        // continuation row.
+        // The exact-fill corner: "abcd" at available width 4 wraps the cursor to the
+        // continuation row. Area width 6 accounts for the 2-column gutter.
         let mut composer = composer_with("abcd");
         let backend = TestBackend::new(10, 4);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 composer.render(
-                    Rect::new(2, 1, 4, 2),
+                    Rect::new(2, 1, 6, 2),
                     frame,
+                    Style::default(),
                     Style::default(),
                     Style::default(),
                 );
             })
             .unwrap();
-        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(2, 2));
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(4, 2));
         terminal.backend().assert_buffer_lines([
             "          ",
-            "  abcd    ",
+            "  ❯ abcd  ",
             "          ",
             "          ",
         ]);
+    }
+
+    #[test]
+    fn render_empty_composer_shows_prompt_and_placeholder() {
+        let mut composer = Composer::new();
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .unwrap();
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(2, 0));
+        let buf = terminal.backend().buffer();
+        let line: String = (0..40)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert_eq!(line, "❯ Ask anything                          ");
+        // The prompt prefix reads in the prompt style (the app's accent).
+        assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Cyan);
+        for x in 2..14 {
+            assert!(buf.cell((x, 0)).unwrap().modifier.contains(Modifier::DIM));
+        }
+    }
+
+    #[test]
+    fn custom_placeholder_and_clearing() {
+        let mut composer = Composer::new();
+        composer.set_placeholder("Type a prompt...");
+        assert_eq!(composer.placeholder(), "Type a prompt...");
+        let backend = TestBackend::new(20, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default(),
+                );
+            })
+            .unwrap();
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(2, 0));
+        let buf = terminal.backend().buffer();
+        let line: String = (0..20)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert_eq!(line, "❯ Type a prompt...  ");
+        for x in 2..18 {
+            assert!(buf.cell((x, 0)).unwrap().modifier.contains(Modifier::DIM));
+        }
+
+        composer.insert_str("hi");
+        terminal
+            .draw(|frame| {
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default(),
+                );
+            })
+            .unwrap();
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(4, 0));
+        terminal
+            .backend()
+            .assert_buffer_lines(["❯ hi                "]);
+
+        composer.clear();
+        terminal
+            .draw(|frame| {
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default(),
+                );
+            })
+            .unwrap();
+        assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(2, 0));
+        let buf = terminal.backend().buffer();
+        let line: String = (0..20)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert_eq!(line, "❯ Type a prompt...  ");
+    }
+
+    #[test]
+    fn multiline_gutter_alignment() {
+        let mut composer = composer_with("first line\nsecond line");
+        let backend = TestBackend::new(15, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                composer.render(
+                    frame.area(),
+                    frame,
+                    Style::default(),
+                    Style::default(),
+                    Style::default(),
+                );
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .assert_buffer_lines(["❯ first line   ", "  second line  "]);
     }
 
     #[test]

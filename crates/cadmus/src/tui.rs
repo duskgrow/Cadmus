@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cadmus_contract::{ChatRequest, Command, LiveSink, Message, Provider};
+use cadmus_core::context::StatusProbe;
 use cadmus_core::{AgentLoop, ClientProtocol, Telemetry};
 use cadmus_memory::JsonlLog;
 use cadmus_transport::{Broadcaster, command_channel};
@@ -30,6 +31,9 @@ pub async fn run_tui(config: &ChatConfig) -> Result<(), Error> {
     let max_tokens = config
         .max_tokens
         .unwrap_or(provider.capabilities().max_output);
+    // The floor's context-usage ratio needs the registry's declared window;
+    // the TUI crate sees contract data only, so it crosses as plain config.
+    let context_window = u64::from(provider.capabilities().max_context);
     let root = match &config.trace_root {
         Some(root) => root.clone(),
         None => default_trace_root().ok_or(Error::TraceRoot)?,
@@ -48,14 +52,46 @@ pub async fn run_tui(config: &ChatConfig) -> Result<(), Error> {
         log,
         root: cwd.clone(),
     };
+    let git_probe = context::GitProbe::new(cwd.clone());
+    let cwd_compact = compact_path(&cwd);
+    let provider_name = config.provider.clone();
+    let model = wire_model.clone();
+    // The floor label as a closure: the app re-invokes it at each run
+    // outcome, the cadence at which the agent's edits land — the git half
+    // (branch, dirty marker) goes stale over a run, provider/model/cwd do
+    // not. The probe's process IO stays here in the binary.
+    let floor_label = move || {
+        let git = git_probe.snapshot().map(|g| {
+            if g.dirty_count > 0 {
+                format!("(git:{})*", g.branch)
+            } else {
+                format!("(git:{})", g.branch)
+            }
+        });
+        match git {
+            Some(git) => format!("{provider_name}·{model}  {cwd_compact}  {git}"),
+            None => format!("{provider_name}·{model}  {cwd_compact}"),
+        }
+    };
     let config = AppConfig {
-        label: format!("{}·{wire_model}  {}", config.provider, cwd.display()),
+        label: floor_label(),
+        context_window,
+        refresh_label: Some(Box::new(floor_label)),
         theme: cadmus_ui::theme::Theme::ansi(),
         depth: cadmus_tui::style::detect_depth(),
     };
     cadmus_tui::app::run(Box::new(driver), config)
         .await
         .map_err(Error::Tui)
+}
+
+fn compact_path(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && let Ok(rel) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rel.display());
+    }
+    path.display().to_string()
 }
 
 /// The session boundary: every prompt spawns one run (trajectory, live

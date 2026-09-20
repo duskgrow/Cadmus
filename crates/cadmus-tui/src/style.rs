@@ -29,6 +29,16 @@ pub fn detect_depth() -> ColorDepth {
     ColorDepth::Ansi16
 }
 
+/// The motion-profile detection (the 2026-09-20 second amendment),
+/// app-boundary IO like [`detect_depth`]: `TERM=dumb` disables the paced
+/// typewriter (instant emission — a terminal that cannot move a cursor
+/// gets no animation), everything else paces. The full `full|reduced|none`
+/// profile lands with the item-7 TOML loader (docs/open-items.md).
+#[must_use]
+pub fn detect_paced() -> bool {
+    std::env::var("TERM").is_ok_and(|term| term != "dumb")
+}
+
 /// Resolve an IR style to a ratatui style under the theme and color depth.
 #[must_use]
 pub fn ir_style(style: &ir::Style, theme: &Theme, depth: ColorDepth) -> Style {

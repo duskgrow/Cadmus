@@ -21,9 +21,10 @@
 //! - [`approval`] — the interactive approval surface (ADR-0018 item 8): the
 //!   pending request's band section and the pure `ToolCall` → diff-lines
 //!   mapping, built from call arguments only.
-//! - [`stream`] — the stream widget: the band's live tail over `cadmus-ui`'s
-//!   markdown pipeline, owning the flush contract with the shell (ADR-0018
-//!   items 2 and 4).
+//! - [`stream`] — the stream widget: one assistant block's markdown
+//!   pipeline, owning the flush contract with the shell (ADR-0018 items 2
+//!   and 4). The unstable tail is never rendered; stable rows leave through
+//!   the app's paced emission drain (the 2026-09-20 second amendment).
 //! - [`style`] — the IR → ratatui style mapping, incl. color-depth
 //!   degradation (ADR-0017 item 5).
 //! - [`layout`] — the band's height function and widget split rules (the
@@ -35,9 +36,12 @@
 //!   quiesce seam for the `$EDITOR` handoff (ADR-0018 item 5).
 //! - [`debounce`] — resize-burst coalescing cadence (inline-spike
 //!   discipline 2).
+//! - [`clock`] — the run wall-clock (submit→run-end, paused across approval
+//!   waits), pure state over injected instants.
 //! - [`transcript`] — the view-model materialization (item 10): protocol
-//!   events in, widget-readable rows out; one snapshot per pump batch
-//!   drives flush, band render and layout.
+//!   events in, widget-readable rows out; one snapshot per pump appends the
+//!   newly stable rows to the emission queue, and the paced drain confirms
+//!   them into scrollback.
 //! - [`wrap`] — the one wrap implementation (ratatui's own word wrapper):
 //!   flush rows, band rows and height math can never disagree.
 //! - [`app`] — the event loop driving it all: one `select!` over input,
@@ -46,6 +50,7 @@
 
 pub mod app;
 pub mod approval;
+pub mod clock;
 pub mod composer;
 pub mod cursor;
 pub mod debounce;

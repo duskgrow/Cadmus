@@ -12,12 +12,29 @@
 //! other event seals the open block structurally before landing. Every
 //! block before the tail is therefore fully flushable at the next pump.
 //!
-//! The snapshot contract (the per-accessor re-render open item's consumer):
-//! one [`Transcript::snapshot`] per pump batch drives the flush, the band
-//! render and the layout input — a single pipeline render and a single wrap
-//! pass per block, never one per accessor.
+//! Tool-result display policy — the live path and the attach/replay rebuild
+//! render identical rows by construction. Every successful tool completion
+//! lands in history: a perception tool (`read_file`, `list_dir`, `grep`) leaves
+//! exactly one subtle line, `✓ name target` — no `▸` call marker (the
+//! run-status row carries the live signal), no preview (file contents are
+//! noise); an action tool renders `▸ name target` at call time, then
+//! `✓ name target` plus a bounded preview (up to four lines, then a
+//! truncation note) at completion. Failures keep their existing shapes: the
+//! one-line `✗ name target: detail`, plus the bounded preview where the
+//! provisional and approval-addressed paths already carried one.
+//!
+//! The snapshot/emission contract (the per-accessor re-render open item's
+//! consumer): one [`Transcript::snapshot`] per pump appends every newly
+//! stable row to the emission queue (a single pipeline render and a single
+//! wrap pass per block, never one per accessor). Rows leave the queue only
+//! through the app's paced drain, and a row is acked to the stream only
+//! after its *successful* shell insert — the ack contract is unchanged
+//! from the pre-queue model. The unstable tail is never rendered
+//! (ADR-0018's 2026-09-20 second amendment): the band's liveness signal is
+//! the `receiving…` row, fed by [`Snapshot::tail_live`] and the queue's
+//! depth.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use cadmus_contract::{
@@ -32,11 +49,18 @@ use ratatui::text::Line;
 use crate::stream::Stream;
 use crate::wrap::wrap_rows;
 
-/// One assistant block: the markdown pipeline plus the count of logical
-/// lines already in scrollback (the re-sync transfer's source).
+/// One assistant block: the markdown pipeline plus the scrollback/queue
+/// bookkeeping in logical lines (the re-sync transfer's source).
 struct Agent {
     stream: Stream,
+    /// Logical lines confirmed in scrollback (acked after a successful
+    /// shell insert — the drain owns this).
     acked: usize,
+    /// Logical lines already queued for emission, cumulative (the
+    /// snapshot's append cursor — the queued-but-undrained prefix of the
+    /// pipeline's live lines is `emitted - acked`, since acked lines drop
+    /// out of that list).
+    emitted: usize,
 }
 
 /// One transcript block; see the module docs.
@@ -47,6 +71,18 @@ enum Block {
     Agent(Agent),
 }
 
+/// Outstanding tool call tracking for live spans.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LiveCall {
+    pub(crate) name: String,
+    pub(crate) target: Option<String>,
+}
+
+/// Whether a tool is classified as a perception tool (read-only discovery/inspection).
+fn is_perception_tool(name: &str) -> bool {
+    matches!(name, "read_file" | "list_dir" | "grep")
+}
+
 /// What one applied item means for the status line (presentation only).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Light {
@@ -55,15 +91,30 @@ pub enum Light {
     /// Assistant output is streaming.
     Streaming,
     /// A tool is executing.
-    Tool(String),
+    Tool {
+        name: String,
+        target: Option<String>,
+    },
     /// The run finished cleanly.
     Idle,
     /// The run failed.
     Failed,
 }
 
+/// One queued slice of a block's stable output: the display rows plus the
+/// flush-plan step their successful insert confirms. The ack fires when the
+/// slice's LAST row lands; a zero-row slice (a block whose lines were all
+/// queued before it sealed — an open fence's body) fires on arrival at the
+/// queue's head. `drained` marks that rows already left (the rewind's
+/// keep-the-front test — see [`Transcript::rewind_queue`]).
+struct Emission {
+    rows: VecDeque<Line<'static>>,
+    ack: FlushAck,
+    drained: bool,
+}
+
 /// The per-block flush plan, aligned with the transcript's unflushed blocks
-/// in order. Produced by [`Transcript::snapshot`], consumed by
+/// in order. Produced by [`Transcript::drain`], consumed by
 /// [`Transcript::apply_flush`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlushAck {
@@ -75,31 +126,47 @@ pub enum FlushAck {
     AgentLines { lines: usize, completes: bool },
 }
 
-/// One materialization pass: the flush plan and rows plus the band's
-/// post-flush tail, from a single render/wrap sweep (module docs).
+/// One materialization pass over the not-yet-queued blocks: every newly
+/// stable row appended to the emission queue (module docs), plus the band's
+/// liveness input. The unstable tail is never rendered.
 #[derive(Debug)]
 pub struct Snapshot {
-    /// Rows that leave the band into scrollback on this pump, in order.
-    pub flush_rows: Vec<Line<'static>>,
-    /// The flush plan for [`Transcript::apply_flush`].
+    /// Live (unstable) lines remain past the flushable prefix — the
+    /// `receiving…` row's second disjunct (the queue's depth is the first).
+    pub tail_live: bool,
+}
+
+/// One paced drain's haul: the rows for `InlineShell::flush` and the flush
+/// plan confirming them after a successful insert.
+#[derive(Debug)]
+pub struct Drain {
+    /// Drained display rows, in order.
+    pub rows: Vec<Line<'static>>,
+    /// The flush plan for [`Transcript::apply_flush`] — covers exactly the
+    /// emissions whose rows ALL drained (a row is acked only after its
+    /// successful shell insert).
     pub acks: Vec<FlushAck>,
-    /// The band's post-flush stream-tail rows (bottom-anchored by the app).
-    pub live_rows: Vec<Line<'static>>,
 }
 
 /// The materialized view-model. See the module docs for the invariants.
 pub struct Transcript {
     blocks: Vec<Block>,
-    /// Leading blocks that have left the band into scrollback.
+    /// Leading blocks confirmed in scrollback (fully drained).
     flushed: usize,
+    /// Leading blocks fully queued for emission (`flushed` ≤ `queued`; the
+    /// snapshot's append cursor — block `queued` may be partially queued).
+    queued: usize,
+    /// The emission queue (ADR-0018's 2026-09-20 second amendment): stable
+    /// rows pending the paced drain, in block order.
+    queue: VecDeque<Emission>,
     /// The open assistant block's turn, when the tail is one.
     open_turn: Option<u32>,
     /// The client rule's position filter (ADR-0013 item 4): items with
     /// `seq ≤ as_of_seq` are dropped.
     as_of_seq: u64,
-    /// Outstanding live span → tool name. Provider ids can repeat even in
-    /// one batch; each result retires its span, including silent successes.
-    live_calls: HashMap<String, String>,
+    /// Outstanding live span → tool call info. Provider ids can repeat even in
+    /// one batch; each result retires its span.
+    live_calls: HashMap<String, LiveCall>,
     /// Original approval slots retain their indices; taking a name marks its
     /// decision rendered, so retries and batch fallback cannot render it twice.
     approvals: HashMap<String, Vec<Option<String>>>,
@@ -108,12 +175,24 @@ pub struct Transcript {
     completed_tools: HashSet<String>,
 }
 
+/// Push one block slice onto the emission queue (`rows` may be empty — the
+/// completing-ack-only case, see [`Transcript::snapshot`]).
+fn queue_emission(queue: &mut VecDeque<Emission>, rows: Vec<Line<'static>>, ack: FlushAck) {
+    queue.push_back(Emission {
+        rows: rows.into(),
+        ack,
+        drained: false,
+    });
+}
+
 impl Transcript {
     #[must_use]
     pub fn new() -> Self {
         Self {
             blocks: Vec::new(),
             flushed: 0,
+            queued: 0,
+            queue: VecDeque::new(),
             open_turn: None,
             as_of_seq: 0,
             live_calls: HashMap::new(),
@@ -130,11 +209,11 @@ impl Transcript {
         if !self.blocks.is_empty() {
             lines.push(ir::Line::default()); // separator from the prior run
         }
-        // The accent "> " marker is the user-voice cue; the prompt body
+        // The accent "❯ " marker is the user-voice cue; the prompt body
         // stays default (ADR-0017 slot wiring).
         lines.extend(text.lines().map(|line| {
             ir::Line::from_spans(vec![
-                ir::Span::slotted("> ", Slot::Accent),
+                ir::Span::slotted("❯ ", Slot::Accent),
                 ir::Span::plain(line),
             ])
         }));
@@ -150,6 +229,20 @@ impl Transcript {
         self.blocks.push(Block::Static(vec![error_line(format!(
             "run failed: {text}"
         ))]));
+    }
+
+    /// A static note block (the run-completion rows), complete at birth,
+    /// so always fully flushable — the same contract as prompts and markers.
+    pub fn push_note(&mut self, line: ir::Line) {
+        self.seal_open();
+        // A blank row separates the note from the run's tail, the same way
+        // `push_user` separates the prompt from the prior run.
+        let mut lines = Vec::new();
+        if !self.blocks.is_empty() {
+            lines.push(ir::Line::default());
+        }
+        lines.push(line);
+        self.blocks.push(Block::Static(lines));
     }
 
     /// Apply one live item. Returns the status-light effect.
@@ -224,6 +317,11 @@ impl Transcript {
         };
         self.blocks.clear();
         self.flushed = 0;
+        self.queued = 0;
+        // The app's pre-sync pump drained the queue (replayed history must
+        // not re-type — and the transfer below counts acked lines, so
+        // undrained rows would be lost here); the rebuild starts it clean.
+        self.queue.clear();
         self.open_turn = None;
         self.live_calls.clear();
         self.approvals.clear();
@@ -262,7 +360,7 @@ impl Transcript {
                 message,
                 &settled,
                 &mut history_calls,
-                pending_results.get(&index).copied(),
+                pending_results.get(&index).map(String::as_str),
             );
         }
         for settled in unplaced {
@@ -278,6 +376,7 @@ impl Transcript {
         // block by block through the normal pump.
         if resync {
             self.flushed = self.blocks.len();
+            self.queued = self.blocks.len();
         }
         self.sync_completions(&sync.in_flight.completed_tools, resync);
         if let Some(open) = &sync.in_flight.open_turn {
@@ -288,6 +387,7 @@ impl Transcript {
                     stream
                 },
                 acked: 0,
+                emitted: 0,
             }));
             self.open_turn = Some(open.turn);
             if let Some((turn, acked)) = transfer
@@ -306,6 +406,9 @@ impl Transcript {
                 let lines = acked.min(flushable);
                 agent.stream.ack_flushed(lines);
                 agent.acked = lines;
+                // The transferred prefix is in scrollback already: it must
+                // never re-queue.
+                agent.emitted = lines;
             }
         }
         // The attach baseline seeds the approval names too: an attach
@@ -335,9 +438,34 @@ impl Transcript {
         if !self.completed_tools.insert(completion.span_id.clone()) {
             return;
         }
+        // The live span supplies the target (the same lookup the error path
+        // always made); after an attach the spans are gone and the label
+        // falls back to the bare name.
+        let target = self
+            .live_calls
+            .get(&completion.span_id)
+            .and_then(|call| call.target.clone());
+        let label = match &target {
+            Some(target) => format!("{} {target}", completion.name),
+            None => completion.name.clone(),
+        };
         self.seal_open();
-        self.blocks
-            .push(Block::Static(completion_lines(completion)));
+        if is_perception_tool(&completion.name) {
+            if let Some(error) = &completion.error {
+                let detail = error.message.lines().next().unwrap_or("failed");
+                self.blocks.push(Block::Static(vec![error_line(format!(
+                    "✗ {label}: {detail}"
+                ))]));
+            } else {
+                self.blocks
+                    .push(Block::Static(vec![perception_success_line(&label)]));
+            }
+        } else {
+            self.blocks.push(Block::Static(completion_lines(
+                completion,
+                target.as_deref(),
+            )));
+        }
     }
 
     fn sync_completions(&mut self, completions: &[ToolCompletion], resync: bool) {
@@ -353,6 +481,7 @@ impl Transcript {
                 self.push_completion(completion);
             }
             self.flushed = self.blocks.len();
+            self.queued = self.blocks.len();
         }
         for completion in completions {
             self.push_completion(completion);
@@ -367,8 +496,11 @@ impl Transcript {
         self.as_of_seq
     }
 
-    /// One materialization pass over the unflushed blocks: the flush plan
-    /// and rows plus the post-flush live tail. See the module docs.
+    /// One materialization pass: append every newly stable row to the
+    /// emission queue (the module docs own the contract). The walk resumes
+    /// at the `queued` cursor; the open tail holds it (nothing may queue
+    /// past an uncompleted block), and a sealed block's completing emission
+    /// advances it.
     pub fn snapshot(
         &mut self,
         width: u16,
@@ -377,15 +509,14 @@ impl Transcript {
         depth: ColorDepth,
     ) -> Snapshot {
         let tail = self.blocks.len().saturating_sub(1);
-        let mut flush_rows = Vec::new();
-        let mut live_rows = Vec::new();
-        let mut acks = Vec::new();
-        for (offset, block) in self.blocks[self.flushed..].iter_mut().enumerate() {
-            let index = self.flushed + offset;
-            match block {
+        let mut tail_live = false;
+        while self.queued < self.blocks.len() {
+            let index = self.queued;
+            match &mut self.blocks[index] {
                 Block::Static(lines) => {
-                    flush_rows.extend(wrap_rows(lines, width, theme, depth));
-                    acks.push(FlushAck::WholeBlock);
+                    let rows = wrap_rows(lines, width, theme, depth);
+                    queue_emission(&mut self.queue, rows, FlushAck::WholeBlock);
+                    self.queued += 1;
                 }
                 Block::Agent(agent) => {
                     let render = agent.stream.render(width, highlighter);
@@ -393,27 +524,141 @@ impl Transcript {
                     let flushable = render.flushable_len();
                     let sealed = self.open_turn.is_none() || index != tail;
                     let completes = sealed && flushable == live.len();
-                    // Per-line wrap independence: the prefix's rows are a row
-                    // prefix of the whole — two disjoint wraps cost one.
-                    flush_rows.extend(wrap_rows(&live[..flushable], width, theme, depth));
-                    live_rows.extend(wrap_rows(&live[flushable..], width, theme, depth));
-                    if flushable > 0 || completes {
-                        acks.push(FlushAck::AgentLines {
-                            lines: flushable,
-                            completes,
-                        });
+                    tail_live = tail_live || flushable < live.len();
+                    // The append cursor WITHIN the live lines: acked lines
+                    // drop out of the pipeline's live list, so the
+                    // queued-but-undrained prefix is the cumulative
+                    // `emitted` minus `acked`. Per-line wrap independence:
+                    // the prefix's rows are a row prefix of the whole — two
+                    // disjoint wraps cost one.
+                    let pending = agent.emitted - agent.acked;
+                    let newly = flushable - pending;
+                    agent.emitted = agent.acked + flushable;
+                    if newly > 0 {
+                        let rows = wrap_rows(&live[pending..flushable], width, theme, depth);
+                        queue_emission(
+                            &mut self.queue,
+                            rows,
+                            FlushAck::AgentLines {
+                                lines: newly,
+                                completes,
+                            },
+                        );
+                    } else if completes {
+                        // The seal completed a block whose lines were all
+                        // queued already (an open fence's body): the
+                        // completing ack rides a zero-row emission.
+                        queue_emission(
+                            &mut self.queue,
+                            Vec::new(),
+                            FlushAck::AgentLines {
+                                lines: 0,
+                                completes: true,
+                            },
+                        );
+                    }
+                    if completes {
+                        self.queued += 1;
+                    } else {
+                        // The open tail holds the walk: nothing follows it.
+                        break;
                     }
                 }
             }
         }
-        Snapshot {
-            flush_rows,
-            acks,
-            live_rows,
+        Snapshot { tail_live }
+    }
+
+    /// The queue's pending display rows — the pacing budget's depth input
+    /// and the `receiving…` row's first disjunct.
+    #[must_use]
+    pub fn queued_len(&self) -> usize {
+        self.queue.iter().map(|emission| emission.rows.len()).sum()
+    }
+
+    /// Pop up to `budget` display rows from the queue (the paced drain).
+    /// The returned acks cover exactly the emissions whose rows ALL left —
+    /// the caller confirms them after a successful shell insert
+    /// ([`Transcript::apply_flush`]), so a budget spent mid-emission holds
+    /// its ack for the next drain.
+    pub fn drain(&mut self, budget: usize) -> Drain {
+        let mut rows = Vec::new();
+        let mut acks = Vec::new();
+        while rows.len() < budget {
+            let Some(front) = self.queue.front_mut() else {
+                break;
+            };
+            while rows.len() < budget
+                && let Some(row) = front.rows.pop_front()
+            {
+                rows.push(row);
+                front.drained = true;
+            }
+            if front.rows.is_empty() {
+                acks.push(self.queue.pop_front().expect("the front emission").ack);
+            }
+        }
+        Drain { rows, acks }
+    }
+
+    /// The width-change rewind: queued rows carry the old width's wrap, so
+    /// the queue folds back into its blocks and the next snapshot re-queues
+    /// at the new width. Sound because nothing queued is acked yet (the
+    /// drain owns the ack contract) — what already drained stays in
+    /// scrollback.
+    ///
+    /// The one exception is a partially drained front emission: its
+    /// already-inserted prefix is scrollback stock ratatui cannot delete,
+    /// so its remaining rows KEEP the old wrap (re-queuing them would
+    /// duplicate that prefix) — the accepted, bounded, cosmetic cost. The
+    /// front belongs to block `flushed` (a block completes only with its
+    /// last emission, so every earlier block is fully drained); its ack
+    /// says how many of the block's queued lines the kept slice covers —
+    /// the rest of the block's queued lines fold back (later emissions of
+    /// the SAME block included), and the cursor skips the block exactly
+    /// when the kept slice finishes it (a static block, or an agent block
+    /// whose completing ack the kept slice carries). Otherwise the
+    /// snapshot re-evaluates it, so a completing ack re-queues if the
+    /// block sealed since.
+    pub fn rewind_queue(&mut self) {
+        // The first block whose append cursor folds back wholesale: every
+        // block after the kept slice's.
+        let first = if self.queue.front().is_some_and(|front| front.drained) {
+            let front = self.queue.pop_front().expect("the front emission");
+            self.queue.clear();
+            self.queued = match front.ack {
+                // A static block's kept rows are its remainder: the cursor
+                // skips it.
+                FlushAck::WholeBlock => self.flushed + 1,
+                FlushAck::AgentLines { lines, completes } => {
+                    // The kept slice covers `lines` of this block's queued
+                    // prefix; the rest of its queued lines fold back.
+                    let Block::Agent(agent) = &mut self.blocks[self.flushed] else {
+                        unreachable!("an agent ack implies an agent block");
+                    };
+                    agent.emitted = agent.acked + lines;
+                    if completes {
+                        self.flushed + 1
+                    } else {
+                        self.flushed
+                    }
+                }
+            };
+            self.queue.push_back(front);
+            self.flushed + 1
+        } else {
+            self.queue.clear();
+            self.queued = self.flushed;
+            self.flushed
+        };
+        for block in &mut self.blocks[first..] {
+            if let Block::Agent(agent) = block {
+                agent.emitted = agent.acked;
+            }
         }
     }
 
-    /// Confirm the snapshot's flush plan (a successful shell flush).
+    /// Confirm a drain's flush plan (a successful shell insert).
     pub fn apply_flush(&mut self, acks: &[FlushAck]) {
         let mut index = self.flushed;
         for ack in acks {
@@ -476,21 +721,6 @@ impl Transcript {
         rows
     }
 
-    /// Every unflushed row (flushable prefix + open tail) at `width` — the
-    /// band content a resize repaint needs before the next pump's flush.
-    pub fn unflushed_rows(
-        &mut self,
-        width: u16,
-        highlighter: &Highlighter,
-        theme: &Theme,
-        depth: ColorDepth,
-    ) -> Vec<Line<'static>> {
-        let snapshot = self.snapshot(width, highlighter, theme, depth);
-        let mut rows = snapshot.flush_rows;
-        rows.extend(snapshot.live_rows);
-        rows
-    }
-
     /// The turn's assistant block, creating it on the turn's first delta;
     /// a different open turn is sealed structurally first (module docs).
     fn agent_block(&mut self, turn: u32) -> &mut Agent {
@@ -499,6 +729,7 @@ impl Transcript {
             self.blocks.push(Block::Agent(Agent {
                 stream: Stream::new(),
                 acked: 0,
+                emitted: 0,
             }));
             self.open_turn = Some(turn);
         }
@@ -517,6 +748,28 @@ impl Transcript {
         {
             let source = agent.stream.source().to_string();
             agent.stream.finalize(&source);
+        }
+    }
+
+    fn apply_tool_call(&mut self, event: &Event, call: &cadmus_contract::ToolCall) -> Light {
+        self.seal_open();
+        let target = tool_target(call);
+        self.live_calls.insert(
+            event.span_id.clone(),
+            LiveCall {
+                name: call.name.clone(),
+                target: target.clone(),
+            },
+        );
+        // Perception calls render no marker: the run-status row carries the
+        // live signal, and a success leaves its one quiet line at completion
+        // (the module docs own the policy).
+        if !is_perception_tool(&call.name) {
+            self.blocks.push(Block::Static(vec![tool_call_line(call)]));
+        }
+        Light::Tool {
+            name: call.name.clone(),
+            target,
         }
     }
 
@@ -543,18 +796,12 @@ impl Transcript {
                             stream
                         },
                         acked: 0,
+                        emitted: 0,
                     }));
                 }
                 Light::Streaming
             }
-            EventKind::ToolCall { call } => {
-                self.seal_open();
-                self.live_calls
-                    .insert(event.span_id.clone(), call.name.clone());
-                self.blocks
-                    .push(Block::Static(vec![subtle_line(tool_marker(call))]));
-                Light::Tool(call.name.clone())
-            }
+            EventKind::ToolCall { call } => self.apply_tool_call(event, call),
             EventKind::ToolResult { call_id, result } => {
                 let text = result.as_str();
                 let display: &dyn std::fmt::Display = match &text {
@@ -569,17 +816,14 @@ impl Transcript {
                 // open Agent, or the next delta for the same turn would land
                 // after this one and hit `agent_block`'s unreachable arm.
                 self.seal_open();
-                self.blocks.push(Block::Static(vec![subtle_line(format!(
-                    "+ instructions: {path}"
-                ))]));
+                self.blocks
+                    .push(Block::Static(vec![instruction_line(path)]));
                 Light::None
             }
             EventKind::Fold { folded, .. } => {
                 self.seal_open();
-                self.blocks.push(Block::Static(vec![subtle_line(format!(
-                    "⑃ context folded: {} result(s) compressed",
-                    folded.len()
-                ))]));
+                self.blocks
+                    .push(Block::Static(vec![fold_line(folded.len())]));
                 Light::None
             }
             EventKind::Command(Command::Steer { text, .. }) => {
@@ -629,41 +873,39 @@ impl Transcript {
     }
 
     fn push_result(&mut self, event: &Event, call_id: &str, result: &dyn std::fmt::Display) {
-        let name = self.live_calls.remove(&event.span_id);
+        let call_info = self.live_calls.remove(&event.span_id);
         if self.completed_tools.remove(&event.span_id) {
             return;
         }
         // Attach may have missed the opening span. A provider id alone cannot
         // verify a successful result's label; legacy errors retain their fallback.
-        if name.is_none() && event.status != Status::Error {
+        if call_info.is_none() && event.status != Status::Error {
             return;
         }
-        let tool = name.as_deref().unwrap_or(call_id);
-        if self
-            .approvals
-            .values()
-            .any(|slots| slots.iter().any(Option::is_some))
-        {
-            // In-order results are already durable, but still inform a human
-            // deciding a sibling. No full-batch index exists on this event.
-            let lines = outcome_lines(
-                &truncate_cells(tool, 48),
-                result,
-                event.error.as_ref(),
-                event.status == Status::Error,
-            );
-            self.seal_open();
-            self.blocks.push(Block::Static(lines));
-        } else if event.status == Status::Error {
+        let (tool_name, tool_target) = match &call_info {
+            Some(info) => (info.name.as_str(), info.target.as_deref()),
+            None => (call_id, None),
+        };
+        let label = match tool_target {
+            Some(target) => format!("{tool_name} {target}"),
+            None => tool_name.to_string(),
+        };
+        self.seal_open();
+        if event.status == Status::Error {
             let detail = event
                 .error
                 .as_ref()
                 .and_then(|error| error.message.lines().next())
                 .unwrap_or("failed");
-            self.seal_open();
             self.blocks.push(Block::Static(vec![error_line(format!(
-                "✗ {tool}: {detail}"
+                "✗ {label}: {detail}"
             ))]));
+        } else if is_perception_tool(tool_name) {
+            self.blocks
+                .push(Block::Static(vec![perception_success_line(&label)]));
+        } else {
+            self.blocks
+                .push(Block::Static(outcome_lines(&label, result, None, false)));
         }
     }
 
@@ -723,7 +965,7 @@ impl Transcript {
         &mut self,
         message: &Message,
         settled: &[&SettledApproval],
-        history_calls: &mut HashMap<String, String>,
+        history_calls: &mut HashMap<String, HistoryCall>,
         preview_tool: Option<&str>,
     ) {
         match message.role {
@@ -739,6 +981,7 @@ impl Transcript {
                             stream
                         },
                         acked: 0,
+                        emitted: 0,
                     }));
                 }
                 for settled in settled {
@@ -748,32 +991,75 @@ impl Transcript {
                         .push(Block::Static(resolution_lines(&names, &settled.decisions)));
                 }
                 for call in message.tool_calls() {
-                    history_calls.insert(call.id.clone(), call.name.clone());
-                    self.blocks
-                        .push(Block::Static(vec![subtle_line(tool_marker(call))]));
+                    let label = match tool_target(call) {
+                        Some(target) => format!("{} {target}", call.name),
+                        None => call.name.clone(),
+                    };
+                    history_calls.insert(
+                        call.id.clone(),
+                        HistoryCall {
+                            label,
+                            perception: is_perception_tool(&call.name),
+                        },
+                    );
+
+                    if !is_perception_tool(&call.name) {
+                        self.blocks.push(Block::Static(vec![tool_call_line(call)]));
+                    }
                 }
             }
             Role::Tool => {
                 if let Some(tool) = preview_tool {
                     self.blocks.push(Block::Static(outcome_lines(
-                        &truncate_cells(tool, 48),
+                        tool,
                         &HistoryResult(message),
                         None,
                         message.is_error,
                     )));
                 } else if message.is_error {
                     let call_id = message.tool_call_id.as_deref().unwrap_or("?");
-                    let tool = history_calls.get(call_id).map_or(call_id, String::as_str);
+                    let tool = history_calls
+                        .get(call_id)
+                        .map_or(call_id, |call| call.label.as_str());
                     let detail = message.text_body();
                     let detail = detail.lines().next().unwrap_or("failed");
                     self.blocks.push(Block::Static(vec![error_line(format!(
                         "✗ {tool}: {detail}"
                     ))]));
+                } else {
+                    // Every durable success lands (the module docs own the
+                    // policy). The folded call's provider id is the only
+                    // attribution left; as in the live path, a success whose
+                    // label cannot be verified stays quiet.
+                    let call_id = message.tool_call_id.as_deref().unwrap_or("?");
+                    let Some(call) = history_calls.get(call_id) else {
+                        return;
+                    };
+                    if call.perception {
+                        self.blocks
+                            .push(Block::Static(vec![perception_success_line(&call.label)]));
+                    } else {
+                        self.blocks.push(Block::Static(outcome_lines(
+                            &call.label,
+                            &HistoryResult(message),
+                            None,
+                            false,
+                        )));
+                    }
                 }
             }
             Role::System => {}
         }
     }
+}
+
+/// A folded call's display facts, keyed by provider id in the history
+/// rebuild: the marker label (name plus target when known) and whether the
+/// call is a perception tool, whose success renders one quiet line, never a
+/// preview.
+struct HistoryCall {
+    label: String,
+    perception: bool,
 }
 
 /// Match `Message::text_body` without copying an entire result before the
@@ -795,9 +1081,10 @@ impl std::fmt::Display for HistoryResult<'_> {
 }
 
 /// Interrupt can skip unanswered leading calls before recording later results.
-/// Only the durable approval address verifies a name; neither result order nor
-/// provider ids can. The request's anchor confines it to the originating turn.
-fn pending_result_names(sync: &Sync) -> HashMap<usize, &str> {
+/// Only the durable approval address verifies a result's label; neither result
+/// order nor provider ids can. The request's anchor confines it to the
+/// originating turn.
+fn pending_result_names(sync: &Sync) -> HashMap<usize, String> {
     let mut names = HashMap::new();
     let messages = &sync.history.messages;
     for pending in &sync.in_flight.pending_approvals {
@@ -832,23 +1119,23 @@ fn pending_result_names(sync: &Sync) -> HashMap<usize, &str> {
                 continue;
             }
             if let Some(call) = pending.calls.get(result.call_index) {
-                names.insert(result.message_index, call.name.as_str());
+                let label = match tool_target(call) {
+                    Some(target) => format!("{} {target}", call.name),
+                    None => call.name.clone(),
+                };
+                names.insert(result.message_index, label);
             }
         }
     }
     names
 }
 
-fn completion_lines(completion: &ToolCompletion) -> Vec<ir::Line> {
+fn completion_lines(completion: &ToolCompletion, target: Option<&str>) -> Vec<ir::Line> {
     let name = truncate_cells(&completion.name, 48);
-    // The index is the call's position in the assistant message, not in the
-    // approval batch — labelled "tool call" so it never reads as the dialog's
-    // "M/N", which numbers the gated subset.
-    let label = format!(
-        "{name} (turn {}, tool call {})",
-        completion.turn,
-        completion.message_call_index.saturating_add(1)
-    );
+    let label = match target {
+        Some(target) => format!("{name} {target}"),
+        None => name,
+    };
     let text = completion.result.as_str();
     let display: &dyn std::fmt::Display = match &text {
         Some(text) => text,
@@ -862,6 +1149,16 @@ fn completion_lines(completion: &ToolCompletion) -> Vec<ir::Line> {
     )
 }
 
+/// The one history line a successful perception call leaves: the check names
+/// what was inspected; the content itself stays out (the module docs own the
+/// policy).
+fn perception_success_line(label: &str) -> ir::Line {
+    ir::Line::from_spans(vec![
+        ir::Span::slotted("✓ ", Slot::Success),
+        ir::Span::slotted(label, Slot::TextSubtle),
+    ])
+}
+
 /// Both early and durable results share the same bounded preview. A durable
 /// result lacks a full-batch index, so its caller supplies only a tool label.
 fn outcome_lines(
@@ -870,11 +1167,18 @@ fn outcome_lines(
     error: Option<&EventError>,
     failed: bool,
 ) -> Vec<ir::Line> {
-    let mut lines = vec![if failed {
-        error_line(format!("✗ failed {label}"))
+    let header = if failed {
+        ir::Line::from_spans(vec![
+            ir::Span::slotted("✗ ", Slot::Error),
+            ir::Span::slotted(label, Slot::Error),
+        ])
     } else {
-        subtle_line(format!("✓ completed {label}"))
-    }];
+        ir::Line::from_spans(vec![
+            ir::Span::slotted("✓ ", Slot::Success),
+            ir::Span::slotted(label, Slot::Text),
+        ])
+    };
+    let mut lines = vec![header];
     let mut preview = CompletionPreview::default();
     if let Some(error) = error {
         let _ = writeln!(preview, "{}: {}", error.kind, error.message);
@@ -886,13 +1190,24 @@ fn outcome_lines(
         .chars()
         .filter(|ch| !ch.is_control() || *ch == '\n')
         .collect();
-    lines.extend(
-        text.lines()
-            .take(4)
-            .map(|line| subtle_line(format!("  {}", truncate_cells(line, 120)))),
-    );
-    if preview.truncated || text.lines().count() > 4 {
-        lines.push(subtle_line("  ⋯ result preview truncated"));
+    let total_lines = text.lines().count();
+    lines.extend(text.lines().take(4).map(|line| {
+        ir::Line::from_spans(vec![
+            ir::Span::slotted("│ ", Slot::TextSubtle),
+            ir::Span::slotted(truncate_cells(line, 120), Slot::TextSubtle),
+        ])
+    }));
+    if total_lines > 4 {
+        let count = total_lines - 4;
+        lines.push(ir::Line::slotted(
+            format!("│ ⋯ {count} more lines truncated"),
+            Slot::TextSubtle,
+        ));
+    } else if preview.truncated {
+        lines.push(ir::Line::slotted(
+            "│ ⋯ result preview truncated",
+            Slot::TextSubtle,
+        ));
     }
     lines
 }
@@ -957,6 +1272,20 @@ pub(crate) fn subtle_line(text: impl Into<String>) -> ir::Line {
     ir::Line::from_spans(vec![ir::Span::slotted(text, Slot::TextSubtle)])
 }
 
+/// The run-completion note: `Worked for {elapsed}` — a run's wall-clock
+/// cost as a permanent quiet row in scrollback (Codex's
+/// `FinalMessageSeparator` precedent), the band run-status row's durable
+/// twin. The app formats `elapsed` (its `format_elapsed` is the one home,
+/// shared with the band row); the wording and slot live here.
+pub(crate) fn worked_for_line(elapsed: &str) -> ir::Line {
+    subtle_line(format!("Worked for {elapsed}"))
+}
+
+/// The failure twin of [`worked_for_line`], in the error slot.
+pub(crate) fn failed_after_line(elapsed: &str) -> ir::Line {
+    error_line(format!("Failed after {elapsed}"))
+}
+
 /// The tool-activity marker: the name plus the call's primary target, so a
 /// run of same-name calls stays distinguishable (field report 2026-09-16:
 /// 23 bare `→ list_dir` rows read as duplicates). The marker is one quiet
@@ -965,9 +1294,21 @@ pub(crate) fn subtle_line(text: impl Into<String>) -> ir::Line {
 /// (one home per fact — the marker format lives here).
 pub(crate) fn tool_marker(call: &cadmus_contract::ToolCall) -> String {
     match tool_target(call) {
-        Some(target) => format!("→ {} {target}", call.name),
-        None => format!("→ {}", call.name),
+        Some(target) => format!("▸ {} {target}", call.name),
+        None => format!("▸ {}", call.name),
     }
+}
+
+/// A structured tool call line with semantic slot styling.
+pub(crate) fn tool_call_line(call: &cadmus_contract::ToolCall) -> ir::Line {
+    let mut spans = vec![
+        ir::Span::slotted("▸ ", Slot::Accent),
+        ir::Span::slotted(&call.name, Slot::Accent),
+    ];
+    if let Some(target) = tool_target(call) {
+        spans.push(ir::Span::slotted(format!(" {target}"), Slot::TextSubtle));
+    }
+    ir::Line::from_spans(spans)
 }
 
 /// The marker's target: the first non-empty string among the keys the coding
@@ -987,8 +1328,9 @@ fn tool_target(call: &cadmus_contract::ToolCall) -> Option<String> {
 }
 
 /// Grapheme-wise truncation to a display-cell budget, ellipsis on cut — the
-/// marker never wraps a target across rows.
-fn truncate_cells(text: &str, max: usize) -> String {
+/// marker never wraps a target across rows. `pub(crate)`: the band's
+/// run-status row truncates its tool target by the same rule (one home).
+pub(crate) fn truncate_cells(text: &str, max: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     use unicode_width::UnicodeWidthStr;
     let mut kept = String::new();
@@ -1004,14 +1346,31 @@ fn truncate_cells(text: &str, max: usize) -> String {
     kept
 }
 
+fn instruction_line(path: &str) -> ir::Line {
+    ir::Line::from_spans(vec![
+        ir::Span::slotted("ℹ ", Slot::Info),
+        ir::Span::slotted(format!("instructions: {path}"), Slot::TextSubtle),
+    ])
+}
+
+fn fold_line(count: usize) -> ir::Line {
+    ir::Line::from_spans(vec![
+        ir::Span::slotted("⑃ ", Slot::Info),
+        ir::Span::slotted(
+            format!("context folded: {count} result(s) compressed"),
+            Slot::TextSubtle,
+        ),
+    ])
+}
+
 /// A failure marker line.
 fn error_line(text: impl Into<String>) -> ir::Line {
     ir::Line::from_spans(vec![ir::Span::slotted(text, Slot::Error)])
 }
 
 /// The resolution's display lines, shared by the live path and the attach
-/// rebuild: approved calls quiet, rejected calls in the error slot. A
-/// missing decision is a denial (the gate's short-reply rule), so it reads
+/// rebuild: approved calls in the success slot, rejected calls in the error slot.
+/// A missing decision is a denial (the gate's short-reply rule), so it reads
 /// as a rejection.
 fn resolution_lines(names: &[String], decisions: &[Approval]) -> Vec<ir::Line> {
     let mut approved = Vec::new();
@@ -1024,10 +1383,16 @@ fn resolution_lines(names: &[String], decisions: &[Approval]) -> Vec<ir::Line> {
     }
     let mut lines = Vec::new();
     if !approved.is_empty() {
-        lines.push(subtle_line(format!("✓ approved {}", approved.join(", "))));
+        lines.push(ir::Line::slotted(
+            format!("✓ approved: {}", approved.join(", ")),
+            Slot::Success,
+        ));
     }
     if !rejected.is_empty() {
-        lines.push(error_line(format!("✗ rejected {}", rejected.join(", "))));
+        lines.push(ir::Line::slotted(
+            format!("✗ rejected: {}", rejected.join(", ")),
+            Slot::Error,
+        ));
     }
     lines
 }
@@ -1118,20 +1483,32 @@ mod tests {
         transcript.snapshot(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor)
     }
 
-    /// One pump: snapshot, ack, return (flushed, live) as plain text.
-    fn pump(transcript: &mut Transcript) -> (Vec<String>, Vec<String>) {
+    /// One pump: queue the newly-stable rows, drain them all (pacing is the
+    /// app's — the transcript's tests drain instantly), ack, and return the
+    /// drained rows as text plus the liveness flag (the unstable tail's
+    /// existence — the tail itself is never rendered).
+    fn pump(transcript: &mut Transcript) -> (Vec<String>, bool) {
         let snapshot = snapshot(transcript);
-        transcript.apply_flush(&snapshot.acks);
-        (texts(&snapshot.flush_rows), texts(&snapshot.live_rows))
+        let drain = transcript.drain(usize::MAX);
+        transcript.apply_flush(&drain.acks);
+        (texts(&drain.rows), snapshot.tail_live)
+    }
+
+    /// Queue and drain everything, returning the rows with styles kept.
+    fn drained_rows(transcript: &mut Transcript) -> Vec<Line<'static>> {
+        snapshot(transcript);
+        let drain = transcript.drain(usize::MAX);
+        transcript.apply_flush(&drain.acks);
+        drain.rows
     }
 
     #[test]
     fn the_user_prompt_marker_uses_the_accent_slot() {
         let mut transcript = Transcript::new();
         transcript.push_user("hi");
-        let snapshot = snapshot(&mut transcript);
-        let row = &snapshot.flush_rows[0];
-        assert_eq!(row.spans[0].content, "> ");
+        let rows = drained_rows(&mut transcript);
+        let row = &rows[0];
+        assert_eq!(row.spans[0].content, "❯ ");
         assert_eq!(
             row.spans[0].style.fg,
             Some(ratatui::style::Color::Blue),
@@ -1148,26 +1525,27 @@ mod tests {
             Light::Streaming
         );
         transcript.apply_item(&llm_response(2, 1, "done\n"));
-        let (flushed, live) = pump(&mut transcript);
-        assert_eq!(flushed, vec!["> fix the bug", "", "done"]);
-        assert_eq!(live, Vec::<String>::new());
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["❯ fix the bug", "", "done"]);
+        assert!(!tail_live);
         // Nothing left: a second pump flushes nothing.
-        let (flushed, live) = pump(&mut transcript);
-        assert_eq!((flushed, live), (Vec::new(), Vec::new()));
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert!(flushed.is_empty() && !tail_live);
     }
 
     #[test]
     fn the_open_tail_holds_its_incomplete_rows() {
         let mut transcript = Transcript::new();
         transcript.apply_item(&delta(1, 1, "one\n\ntwo\n"));
-        let (flushed, live) = pump(&mut transcript);
+        let (flushed, tail_live) = pump(&mut transcript);
         assert_eq!(flushed, vec!["one", ""]);
-        assert_eq!(live, vec!["two"]);
+        // The held row stays unstable — never rendered, only signaled.
+        assert!(tail_live);
         // The held row flushes once the response seals the turn.
         transcript.apply_item(&llm_response(2, 1, "one\n\ntwo\n"));
-        let (flushed, live) = pump(&mut transcript);
+        let (flushed, tail_live) = pump(&mut transcript);
         assert_eq!(flushed, vec!["two"]);
-        assert_eq!(live, Vec::<String>::new());
+        assert!(!tail_live);
     }
 
     #[test]
@@ -1177,12 +1555,15 @@ mod tests {
         transcript.apply_item(&llm_response(2, 1, "reading\n"));
         let call = ToolCall {
             id: "c1".into(),
-            name: "read_file".into(),
+            name: "write_file".into(),
             arguments: serde_json::json!({}),
         };
         assert_eq!(
             transcript.apply_item(&recorded(3, 1, EventKind::ToolCall { call: call.clone() })),
-            Light::Tool("read_file".into())
+            Light::Tool {
+                name: "write_file".into(),
+                target: None,
+            }
         );
         transcript.apply_item(&recorded(
             4,
@@ -1193,9 +1574,12 @@ mod tests {
             },
         ));
         transcript.apply_item(&delta(5, 2, "found it\n"));
-        let (flushed, live) = pump(&mut transcript);
-        assert_eq!(flushed, vec!["reading", "→ read_file"]);
-        assert_eq!(live, vec!["found it"]);
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert_eq!(
+            flushed,
+            vec!["reading", "▸ write_file", "✓ write_file", "│ boom"]
+        );
+        assert!(tail_live);
     }
 
     #[test]
@@ -1225,16 +1609,297 @@ mod tests {
         {
             transcript.apply_item(&recorded(seq, 1, EventKind::ToolCall { call }));
         }
-        let (flushed, live) = pump(&mut transcript);
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert!(
+            flushed.is_empty(),
+            "perception tools stay in dynamic status only"
+        );
+        assert!(!tail_live);
+    }
+
+    #[test]
+    fn the_action_tool_marker_names_its_target() {
+        let mut transcript = Transcript::new();
+        for (seq, call) in [
+            ToolCall {
+                id: "c1".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "src/cursor.rs", "content": "test"}),
+            },
+            ToolCall {
+                id: "c2".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "cargo check"}),
+            },
+            ToolCall {
+                id: "c3".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({"path": "crates/lib.rs"}),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, call)| (index as u64 + 1, call))
+        {
+            transcript.apply_item(&recorded(seq, 1, EventKind::ToolCall { call }));
+        }
+        let (flushed, tail_live) = pump(&mut transcript);
         assert_eq!(
             flushed,
             vec![
-                "→ read_file src/cursor.rs",
-                "→ grep max_tokens",
-                "→ list_dir",
+                "▸ write_file src/cursor.rs",
+                "▸ bash cargo check",
+                "▸ edit_file crates/lib.rs",
             ]
         );
-        assert_eq!(live, Vec::<String>::new());
+        assert!(!tail_live);
+    }
+
+    #[test]
+    fn exploratory_turn_perception_calls_render_no_markers() {
+        let mut transcript = Transcript::new();
+        let mut calls = Vec::new();
+        // 5 files read
+        for i in 1..=5 {
+            calls.push(ToolCall {
+                id: format!("rf{i}"),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": format!("file_{i}.rs")}),
+            });
+        }
+        // 2 directories listed
+        for i in 1..=2 {
+            calls.push(ToolCall {
+                id: format!("ld{i}"),
+                name: "list_dir".into(),
+                arguments: serde_json::json!({"path": format!("dir_{i}")}),
+            });
+        }
+        // 1 search
+        calls.push(ToolCall {
+            id: "gr1".into(),
+            name: "grep".into(),
+            arguments: serde_json::json!({"pattern": "fn main"}),
+        });
+
+        for (index, call) in calls.into_iter().enumerate() {
+            transcript.apply_item(&recorded(index as u64 + 1, 1, EventKind::ToolCall { call }));
+        }
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert!(
+            flushed.is_empty(),
+            "perception calls render no marker lines (the run-status row carries them)"
+        );
+        assert!(!tail_live);
+    }
+
+    #[test]
+    fn failed_perception_tool_emits_explicit_error_line() {
+        let mut transcript = Transcript::new();
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "list_dir".into(),
+            arguments: serde_json::json!({"path": ".git/opencode"}),
+        };
+        transcript.apply_item(&recorded(1, 1, EventKind::ToolCall { call }));
+        let mut item = recorded(
+            2,
+            1,
+            EventKind::ToolResult {
+                call_id: "c1".into(),
+                result: serde_json::json!("failed"),
+            },
+        );
+        if let LiveKind::Recorded { event } = &mut item.kind {
+            event.status = Status::Error;
+            event.error = Some(EventError {
+                kind: "fs".into(),
+                message: "Not a directory".into(),
+            });
+        }
+        transcript.apply_item(&item);
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["✗ list_dir .git/opencode: Not a directory"]);
+        for row in &flushed {
+            assert!(!row.contains("turn"));
+            assert!(!row.contains("tool call"));
+        }
+    }
+
+    #[test]
+    fn perception_outcomes_each_render_exactly_one_line() {
+        let mut transcript = Transcript::new();
+        // 2 successful read_file calls: one subtle line each, no marker, no preview.
+        for (seq, path) in [(1_u64, "src/1.rs"), (3, "src/2.rs")] {
+            transcript.apply_item(&tool_started(
+                seq,
+                &format!("sp-{seq}"),
+                ToolCall {
+                    id: format!("rf{seq}"),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": path}),
+                },
+            ));
+            let mut done = completion(&format!("sp-{seq}"));
+            done.name = "read_file".into();
+            done.result = serde_json::json!("file contents");
+            transcript.apply_item(&durable_completion(seq + 1, &done));
+        }
+        // 1 list_dir that fails: the unchanged one-line error.
+        transcript.apply_item(&tool_started(
+            5,
+            "sp-5",
+            ToolCall {
+                id: "c_fail".into(),
+                name: "list_dir".into(),
+                arguments: serde_json::json!({"path": ".git/opencode"}),
+            },
+        ));
+        let mut item = recorded(
+            6,
+            1,
+            EventKind::ToolResult {
+                call_id: "c_fail".into(),
+                result: serde_json::json!("failed"),
+            },
+        );
+        if let LiveKind::Recorded { event } = &mut item.kind {
+            event.span_id = "sp-5".into();
+            event.status = Status::Error;
+            event.error = Some(EventError {
+                kind: "fs".into(),
+                message: "Not a directory".into(),
+            });
+        }
+        transcript.apply_item(&item);
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(
+            flushed,
+            vec![
+                "✓ read_file src/1.rs",
+                "✓ read_file src/2.rs",
+                "✗ list_dir .git/opencode: Not a directory",
+            ]
+        );
+    }
+
+    #[test]
+    fn interleaved_action_and_perception_tools() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&recorded(
+            1,
+            1,
+            EventKind::ToolCall {
+                call: ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            },
+        ));
+        transcript.apply_item(&recorded(
+            2,
+            1,
+            EventKind::ToolCall {
+                call: ToolCall {
+                    id: "c2".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({"path": "src/out.rs"}),
+                },
+            },
+        ));
+        transcript.apply_item(&recorded(
+            3,
+            1,
+            EventKind::ToolCall {
+                call: ToolCall {
+                    id: "c3".into(),
+                    name: "list_dir".into(),
+                    arguments: serde_json::json!({"path": "src"}),
+                },
+            },
+        ));
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["▸ write_file src/out.rs",]);
+    }
+
+    #[test]
+    fn history_rebuild_renders_no_markers_for_perception_calls() {
+        let calls = [
+            ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            },
+            ToolCall {
+                id: "c2".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "src/lib.rs"}),
+            },
+            ToolCall {
+                id: "c3".into(),
+                name: "list_dir".into(),
+                arguments: serde_json::json!({"path": "crates"}),
+            },
+            ToolCall {
+                id: "c4".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "src/out.rs"}),
+            },
+        ];
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                cadmus_contract::ContentPart::Text {
+                    text: "exploring".into(),
+                },
+                cadmus_contract::ContentPart::ToolCall {
+                    call: calls[0].clone(),
+                },
+                cadmus_contract::ContentPart::ToolCall {
+                    call: calls[1].clone(),
+                },
+                cadmus_contract::ContentPart::ToolCall {
+                    call: calls[2].clone(),
+                },
+                cadmus_contract::ContentPart::ToolCall {
+                    call: calls[3].clone(),
+                },
+            ],
+            tool_call_id: None,
+            is_error: false,
+            opaque: None,
+        };
+        let sync = sync_with(
+            vec![Message::user("find and update"), assistant],
+            Vec::new(),
+        );
+        let mut transcript = Transcript::new();
+        transcript.apply_sync(&sync, 80, highlighter(), false);
+        let rows = pump(&mut transcript).0;
+        assert_eq!(
+            rows,
+            vec![
+                "❯ find and update",
+                "",
+                "exploring",
+                "▸ write_file src/out.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn perception_tool_completion_error_emits_error_line() {
+        let mut transcript = Transcript::new();
+        let mut failed = completion("span-fail");
+        failed.name = "list_dir".into();
+        failed.error = Some(EventError {
+            kind: "fs".into(),
+            message: "Not a directory".into(),
+        });
+        transcript.apply_item(&completed(1, failed));
+        let (flushed, _) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["✗ list_dir: Not a directory"]);
     }
 
     #[test]
@@ -1281,7 +1946,7 @@ mod tests {
         let (flushed, _) = pump(&mut transcript);
         assert_eq!(
             flushed,
-            vec!["→ write_file", "✗ write_file: denied by the operator"]
+            vec!["▸ write_file", "✗ write_file: denied by the operator"]
         );
     }
 
@@ -1347,10 +2012,10 @@ mod tests {
         assert_eq!(
             pump(&mut transcript).0,
             [
-                "✓ approved write_file",
-                "→ write_file",
-                "✓ completed write_file",
-                "  updated file",
+                "✓ approved: write_file",
+                "▸ write_file",
+                "✓ write_file",
+                "│ updated file",
             ]
         );
         assert!(
@@ -1369,8 +2034,13 @@ mod tests {
         transcript.apply_item(&durable_completion(7, &second));
         assert_eq!(
             pump(&mut transcript).0,
-            ["✓ approved edit_file", "→ edit_file"],
-            "settled approvals do not broaden ordinary success output"
+            [
+                "✓ approved: edit_file",
+                "▸ edit_file",
+                "✓ edit_file",
+                "│ updated file",
+            ],
+            "a settled sibling changes nothing: every success renders the same way"
         );
         assert!(transcript.live_calls.is_empty());
     }
@@ -1403,25 +2073,13 @@ mod tests {
             failed.result = serde_json::json!({"retry": false});
             transcript.apply_item(&durable_completion(6, &failed));
             let rows = pump(&mut transcript).0;
-            if approval_open {
-                assert_eq!(
-                    rows,
-                    [
-                        "→ write_file",
-                        "→ edit_file",
-                        "✗ failed write_file",
-                        "  tool: write failed",
-                        "  {\"retry\":false}"
-                    ]
-                );
-            } else {
-                assert_eq!(
-                    rows,
-                    ["→ write_file", "→ edit_file", "✗ write_file: write failed"]
-                );
-            }
+            assert_eq!(
+                rows,
+                ["▸ write_file", "▸ edit_file", "✗ write_file: write failed"],
+                "approval state changes nothing: failures keep the one-line shape"
+            );
             assert_eq!(transcript.live_calls.len(), 1);
-            assert_eq!(transcript.live_calls["second"], "edit_file");
+            assert_eq!(transcript.live_calls["second"].name, "edit_file");
             failed.span_id = "second".into();
             failed.error.as_mut().unwrap().message = "edit failed".into();
             transcript.apply_item(&durable_completion(7, &failed));
@@ -1454,11 +2112,182 @@ mod tests {
     }
 
     #[test]
-    fn an_unobserved_live_success_stays_quiet_during_a_pending_approval() {
+    fn an_unobserved_live_success_stays_quiet() {
+        // The span was never observed, so the provider id alone cannot verify
+        // the label — pending approval or not, nothing renders.
         let mut transcript = Transcript::new();
         transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
         transcript.apply_item(&durable_completion(2, &completion("unseen-span")));
         assert!(pump(&mut transcript).0.is_empty());
+    }
+
+    #[test]
+    fn a_live_action_success_renders_marker_outcome_and_preview_without_approvals() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&tool_started(
+            1,
+            "sp-1",
+            ToolCall {
+                id: "c1".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "src/out.rs"}),
+            },
+        ));
+        let mut done = completion("sp-1");
+        done.result = serde_json::json!("wrote 3 lines\n+fn main() {}\n+}\ndone");
+        transcript.apply_item(&completed(2, done.clone()));
+        assert_eq!(
+            pump(&mut transcript).0,
+            [
+                "▸ write_file src/out.rs",
+                "✓ write_file src/out.rs",
+                "│ wrote 3 lines",
+                "│ +fn main() {}",
+                "│ +}",
+                "│ done",
+            ],
+            "the provisional completion renders with no approval pending"
+        );
+        // The durable echo rides the same span: no double render.
+        transcript.apply_item(&durable_completion(3, &done));
+        assert!(pump(&mut transcript).0.is_empty());
+    }
+
+    /// The divergence regression lock: one session rendered live and rebuilt
+    /// from an attach baseline produces the same rows.
+    #[test]
+    fn a_live_success_and_its_attach_replay_render_the_same_rows() {
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": "src/out.rs"}),
+        };
+        let mut live = Transcript::new();
+        live.apply_item(&tool_started(1, "sp-1", call.clone()));
+        let mut done = completion("sp-1");
+        done.result = serde_json::json!("wrote src/out.rs");
+        live.apply_item(&durable_completion(2, &done));
+        let live_rows = pump(&mut live).0;
+        // The same session folded into an attach baseline.
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![cadmus_contract::ContentPart::ToolCall { call }],
+            tool_call_id: None,
+            is_error: false,
+            opaque: None,
+        };
+        let sync = sync_with(
+            vec![
+                assistant,
+                Message::tool_result("c1", serde_json::json!("wrote src/out.rs")),
+            ],
+            Vec::new(),
+        );
+        let mut replayed = Transcript::new();
+        replayed.apply_sync(&sync, 80, highlighter(), false);
+        let replay_rows = pump(&mut replayed).0;
+        assert_eq!(
+            live_rows,
+            [
+                "▸ write_file src/out.rs",
+                "✓ write_file src/out.rs",
+                "│ wrote src/out.rs",
+            ]
+        );
+        assert_eq!(replay_rows, live_rows, "live ≡ replay");
+    }
+
+    #[test]
+    fn a_perception_success_leaves_exactly_one_subtle_line() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&tool_started(
+            1,
+            "sp-1",
+            ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            },
+        ));
+        let mut done = completion("sp-1");
+        done.name = "read_file".into();
+        done.result = serde_json::json!("fn main() {}\n// many more lines".repeat(20));
+        transcript.apply_item(&durable_completion(2, &done));
+        let rows = drained_rows(&mut transcript);
+        assert_eq!(
+            texts(&rows),
+            ["✓ read_file src/main.rs"],
+            "no marker, no preview"
+        );
+        let row = &rows[0];
+        assert_eq!(row.spans[0].content, "✓ ");
+        assert_eq!(
+            row.spans[0].style.fg,
+            Some(ratatui::style::Color::Green),
+            "the check rides the success slot"
+        );
+        assert_eq!(row.spans[1].content, "read_file src/main.rs");
+        assert_eq!(
+            row.spans[1].style.fg,
+            Some(ratatui::style::Color::DarkGray),
+            "the label stays subtle"
+        );
+    }
+
+    /// The gate is gone: a pending approval changes no result rows.
+    #[test]
+    fn an_approval_wait_changes_no_result_rows() {
+        let run_rows = |with_approval: bool| {
+            let mut transcript = Transcript::new();
+            if with_approval {
+                transcript.apply_item(&approval_request(1, "ap1", gated_calls()));
+            }
+            transcript.apply_item(&tool_started(
+                2,
+                "sp-success",
+                ToolCall {
+                    id: "c1".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({"path": "src/out.rs"}),
+                },
+            ));
+            let mut done = completion("sp-success");
+            done.result = serde_json::json!("wrote src/out.rs");
+            transcript.apply_item(&durable_completion(3, &done));
+            transcript.apply_item(&tool_started(
+                4,
+                "sp-failure",
+                ToolCall {
+                    id: "c2".into(),
+                    name: "edit_file".into(),
+                    arguments: serde_json::json!({"path": "src/lib.rs"}),
+                },
+            ));
+            let mut failed = completion("sp-failure");
+            failed.call_id = "c2".into();
+            failed.error = Some(EventError {
+                kind: "tool".into(),
+                message: "edit failed".into(),
+            });
+            transcript.apply_item(&durable_completion(5, &failed));
+            pump(&mut transcript).0
+        };
+        let without_approval = run_rows(false);
+        assert_eq!(
+            without_approval,
+            [
+                "▸ write_file src/out.rs",
+                "✓ write_file src/out.rs",
+                "│ wrote src/out.rs",
+                "▸ edit_file src/lib.rs",
+                "✗ edit_file src/lib.rs: edit failed",
+            ]
+        );
+        assert_eq!(
+            run_rows(true),
+            without_approval,
+            "approval-pending output is byte-identical"
+        );
     }
 
     #[test]
@@ -1481,10 +2310,10 @@ mod tests {
         assert_eq!(
             pump(&mut transcript).0,
             [
-                "✓ approved edit_file",
-                "→ write_file",
-                "✓ completed write_file (turn 1, tool call 2)",
-                "  updated file",
+                "✓ approved: edit_file",
+                "▸ write_file",
+                "✓ write_file",
+                "│ updated file",
             ]
         );
         assert!(transcript.approvals["ap1"][0].is_some());
@@ -1508,9 +2337,9 @@ mod tests {
         assert_eq!(
             rows,
             [
-                "✗ failed write_file (turn 1, tool call 2)",
-                "  tool: write failed",
-                "  {\"retry\":false}"
+                "✗ write_file",
+                "│ tool: write failed",
+                "│ {\"retry\":false}"
             ]
         );
         let mut sibling = failed.clone();
@@ -1540,10 +2369,7 @@ mod tests {
         transcript.apply_sync(&sync, 80, highlighter(), true);
         assert_eq!(
             pump(&mut transcript).0,
-            [
-                "✓ completed write_file (turn 1, tool call 3)",
-                "  another update"
-            ]
+            ["✓ write_file", "│ another update"]
         );
         transcript.apply_sync(&sync, 80, highlighter(), true);
         assert!(pump(&mut transcript).0.is_empty());
@@ -1557,7 +2383,7 @@ mod tests {
         assert_eq!(
             replay
                 .iter()
-                .filter(|row| row.contains("✓ completed"))
+                .filter(|row| row.contains("✓ write_file"))
                 .count(),
             2
         );
@@ -1576,12 +2402,93 @@ mod tests {
             serde_json::json!({"data": "界".repeat(10000)}),
         ] {
             completion.result = result;
-            let lines = completion_lines(&completion);
+            let lines = completion_lines(&completion, None);
             assert!(lines.len() <= 6);
             assert!(lines.iter().map(|line| line.text().len()).sum::<usize>() < 1024);
             assert!(lines.last().unwrap().text().contains("truncated"));
             assert!(lines.iter().all(|line| !line.text().contains('\x1b')));
         }
+    }
+
+    #[test]
+    fn the_rewind_requeues_pending_rows_at_the_new_width() {
+        // A closed block queues at 80; one row drains (the front is
+        // partially drained). The rewind keeps the front's remaining rows
+        // at the old wrap — re-queuing them would duplicate the inserted
+        // prefix — and the seal's rows come out at the new width. No row
+        // is lost, none duplicated.
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&delta(1, 1, &format!("{long}\n\nx\n")));
+        let at_80 = |transcript: &mut Transcript| {
+            transcript.snapshot(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor)
+        };
+        let at_40 = |transcript: &mut Transcript| {
+            transcript.snapshot(40, highlighter(), &Theme::ansi(), ColorDepth::Truecolor)
+        };
+        at_80(&mut transcript);
+        let drain = transcript.drain(1);
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(texts(&drain.rows).len(), 1, "one row out at 80");
+        let first_row = texts(&drain.rows);
+
+        transcript.rewind_queue();
+        // The re-snapshot queues nothing new (the kept front still covers
+        // the queued prefix); the kept rows drain unchanged.
+        at_40(&mut transcript);
+        let drain = transcript.drain(usize::MAX);
+        transcript.apply_flush(&drain.acks);
+        let mut emitted = first_row;
+        emitted.extend(texts(&drain.rows));
+        assert_eq!(
+            emitted,
+            texts(&wrap_rows(
+                &[ir::Line::plain(long), ir::Line::default()],
+                80,
+                &Theme::ansi(),
+                ColorDepth::Truecolor
+            )),
+            "the kept front completed the block's 80-column rows, once"
+        );
+
+        // The seal's rows queue at the new width.
+        transcript.apply_item(&llm_response(2, 1, &format!("{long}\n\nx\n")));
+        at_40(&mut transcript);
+        let drain = transcript.drain(usize::MAX);
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(
+            texts(&drain.rows),
+            texts(&wrap_rows(
+                &[ir::Line::plain("x")],
+                40,
+                &Theme::ansi(),
+                ColorDepth::Truecolor
+            )),
+            "the seal re-wrapped at the new width"
+        );
+    }
+
+    #[test]
+    fn the_rewind_with_an_untouched_queue_rewraps_everything() {
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&delta(1, 1, &format!("{long}\n\nx\n")));
+        transcript.snapshot(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        // Nothing drained: the full queue folds back and re-wraps.
+        transcript.rewind_queue();
+        transcript.snapshot(40, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        let drain = transcript.drain(usize::MAX);
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(
+            texts(&drain.rows),
+            texts(&wrap_rows(
+                &[ir::Line::plain(long), ir::Line::default()],
+                40,
+                &Theme::ansi(),
+                ColorDepth::Truecolor
+            )),
+            "the untouched queue re-wrapped wholesale at the new width"
+        );
     }
 
     #[test]
@@ -1633,19 +2540,20 @@ mod tests {
             as_of_seq: 4,
         };
         transcript.apply_sync(&sync, 80, highlighter(), true);
-        let (flushed, live) = pump(&mut transcript);
-        // The rebuilt tail re-shows only what never left (one paragraph —
-        // soft breaks join into one logical line), and nothing re-flushes.
+        let (flushed, tail_live) = pump(&mut transcript);
+        // The rebuilt tail re-shows nothing (one paragraph — soft breaks
+        // join into one logical line, still unstable), and nothing
+        // re-flushes.
         assert_eq!(flushed, Vec::<String>::new());
-        assert_eq!(live, vec!["beta more"]);
+        assert!(tail_live);
         // The transferred prefix replays, the live rows do not.
         let replay =
             transcript.replay_tail(10, 80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
         assert_eq!(texts(&replay), vec!["alpha", ""]);
         // Items at or below the baseline are dropped (the client rule).
         assert_eq!(transcript.apply_item(&delta(3, 1, "stale\n")), Light::None);
-        let (_, live) = pump(&mut transcript);
-        assert_eq!(live, vec!["beta more"]);
+        let (_, tail_live) = pump(&mut transcript);
+        assert!(tail_live);
     }
 
     #[test]
@@ -1661,7 +2569,7 @@ mod tests {
             }),
         ));
         let (flushed, _) = pump(&mut transcript);
-        assert_eq!(flushed, vec!["> also check tests", ""]);
+        assert_eq!(flushed, vec!["❯ also check tests", ""]);
     }
 
     fn approval_request(seq: u64, request_id: &str, calls: Vec<ToolCall>) -> LiveItem {
@@ -1706,9 +2614,9 @@ mod tests {
                 decisions: vec![Approval::Approved, Approval::Approved],
             }),
         ));
-        let (flushed, live) = pump(&mut transcript);
-        assert_eq!(flushed, vec!["✓ approved write_file, edit_file"]);
-        assert_eq!(live, Vec::<String>::new());
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert_eq!(flushed, vec!["✓ approved: write_file, edit_file"]);
+        assert!(!tail_live);
         // The settled request leaves the map: a duplicate resolve names the id.
         transcript.apply_item(&recorded(
             3,
@@ -1720,7 +2628,7 @@ mod tests {
             }),
         ));
         let (flushed, _) = pump(&mut transcript);
-        assert_eq!(flushed, vec!["✓ approved ap1"]);
+        assert_eq!(flushed, vec!["✓ approved: ap1"]);
     }
 
     fn call_resolution(
@@ -1756,7 +2664,7 @@ mod tests {
             1,
             Approval::Rejected { comment: None },
         ));
-        assert_eq!(pump(&mut transcript).0, ["✓ approved edit_file"]);
+        assert_eq!(pump(&mut transcript).0, ["✓ approved: edit_file"]);
         transcript.apply_item(&recorded(
             6,
             1,
@@ -1766,7 +2674,7 @@ mod tests {
                 decisions: Vec::new(),
             }),
         ));
-        assert_eq!(pump(&mut transcript).0, ["✗ rejected write_file"]);
+        assert_eq!(pump(&mut transcript).0, ["✗ rejected: write_file"]);
         transcript.apply_item(&call_resolution(7, "ap1", 0, Approval::Approved));
         assert!(pump(&mut transcript).0.is_empty());
     }
@@ -1781,7 +2689,7 @@ mod tests {
             0,
             Approval::Rejected { comment: None },
         ));
-        assert_eq!(pump(&mut transcript).0, ["✗ rejected write_file"]);
+        assert_eq!(pump(&mut transcript).0, ["✗ rejected: write_file"]);
         transcript.apply_item(&recorded(
             3,
             1,
@@ -1791,7 +2699,7 @@ mod tests {
                 decisions: vec![Approval::Rejected { comment: None }, Approval::Approved],
             }),
         ));
-        assert_eq!(pump(&mut transcript).0, ["✓ approved edit_file"]);
+        assert_eq!(pump(&mut transcript).0, ["✓ approved: edit_file"]);
     }
 
     #[test]
@@ -1808,7 +2716,7 @@ mod tests {
         });
         let mut transcript = Transcript::new();
         transcript.apply_sync(&sync, 80, highlighter(), false);
-        assert_eq!(pump(&mut transcript).0, ["✓ approved edit_file"]);
+        assert_eq!(pump(&mut transcript).0, ["✓ approved: edit_file"]);
         transcript.apply_sync(&sync, 80, highlighter(), true);
         assert!(
             pump(&mut transcript).0.is_empty(),
@@ -1831,7 +2739,7 @@ mod tests {
             0,
             Approval::Rejected { comment: None },
         ));
-        assert_eq!(pump(&mut transcript).0, ["✗ rejected write_file"]);
+        assert_eq!(pump(&mut transcript).0, ["✗ rejected: write_file"]);
         assert!(transcript.approvals.is_empty());
     }
 
@@ -1848,10 +2756,12 @@ mod tests {
                 decisions: vec![Approval::Approved, Approval::Rejected { comment: None }],
             }),
         ));
-        let snapshot = snapshot(&mut transcript);
-        let rows = texts(&snapshot.flush_rows);
-        assert_eq!(rows, vec!["✓ approved write_file", "✗ rejected edit_file"]);
-        let rejected = &snapshot.flush_rows[1];
+        let rows = drained_rows(&mut transcript);
+        assert_eq!(
+            texts(&rows),
+            vec!["✓ approved: write_file", "✗ rejected: edit_file"]
+        );
+        let rejected = &rows[1];
         assert_eq!(
             rejected.spans[0].style.fg,
             Some(ratatui::style::Color::Red),
@@ -1875,7 +2785,7 @@ mod tests {
         let (flushed, _) = pump(&mut transcript);
         assert_eq!(
             flushed,
-            vec!["✓ approved write_file", "✗ rejected edit_file"]
+            vec!["✓ approved: write_file", "✗ rejected: edit_file"]
         );
     }
 
@@ -1923,7 +2833,7 @@ mod tests {
             }),
         ));
         let (flushed, _) = pump(&mut transcript);
-        assert_eq!(flushed, vec!["✓ approved write_file, edit_file"]);
+        assert_eq!(flushed, vec!["✓ approved: write_file, edit_file"]);
     }
 
     /// The settle-before-attach replay: the settled batch rides the sync
@@ -1970,18 +2880,18 @@ mod tests {
         transcript.apply_sync(&sync, 80, highlighter(), false);
         // A first attach owns nothing of the baseline: the rebuild renders
         // through the normal pump, the settled record in the live order.
-        let (flushed, live) = pump(&mut transcript);
-        assert_eq!(live, Vec::<String>::new());
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert!(!tail_live);
         assert_eq!(
             flushed,
             vec![
-                "> change it",
+                "❯ change it",
                 "",
                 "will do",
-                "✓ approved write_file",
-                "✗ rejected edit_file",
-                "→ write_file",
-                "→ edit_file",
+                "✓ approved: write_file",
+                "✗ rejected: edit_file",
+                "▸ write_file",
+                "▸ edit_file",
                 "✗ edit_file: rejected by a human",
             ]
         );
@@ -2050,21 +2960,21 @@ mod tests {
         assert!(sync.in_flight.completed_tools.is_empty());
         let mut transcript = Transcript::new();
         transcript.apply_sync(&sync, 80, highlighter(), false);
-        let (rows, live) = pump(&mut transcript);
+        let (rows, tail_live) = pump(&mut transcript);
         assert_eq!(
             rows,
             [
-                "> change it",
+                "❯ change it",
                 "",
                 "current turn",
-                "✓ approved write_file",
-                "→ write_file",
-                "→ write_file",
-                "✓ completed write_file",
-                "  first change written"
+                "✓ approved: write_file",
+                "▸ write_file",
+                "▸ write_file",
+                "✓ write_file",
+                "│ first change written"
             ]
         );
-        assert!(live.is_empty());
+        assert!(!tail_live);
         assert!(transcript.approvals["ap1"][1].is_some());
         assert!(pump(&mut transcript).0.is_empty());
         transcript.apply_sync(&sync, 80, highlighter(), true);
@@ -2107,16 +3017,16 @@ mod tests {
         pending.calls = calls;
         pending.decisions = vec![None, Some(Approval::Approved)];
         assert!(sync.in_flight.completed_tools.is_empty());
-        assert_eq!(pending_result_names(&sync), HashMap::from([(2, "B")]));
+        assert_eq!(
+            pending_result_names(&sync),
+            HashMap::from([(2, "B".to_string())])
+        );
 
         let mut transcript = Transcript::new();
         transcript.apply_sync(&sync, 80, highlighter(), false);
         let rows = pump(&mut transcript).0;
-        assert!(
-            rows.windows(2)
-                .any(|rows| rows == ["✓ completed B", "  B completed"])
-        );
-        assert!(!rows.iter().any(|row| row == "✓ completed A"));
+        assert!(rows.windows(2).any(|rows| rows == ["✓ B", "│ B completed"]));
+        assert!(!rows.iter().any(|row| row == "✓ A"));
         assert!(transcript.approvals["ap1"][0].is_some());
     }
 
@@ -2169,20 +3079,31 @@ mod tests {
         }
         assert_eq!(
             pending_result_names(&sync),
-            HashMap::from([(5, "write_file")])
+            HashMap::from([(5, "write_file".to_string())])
         );
         let mut transcript = Transcript::new();
         transcript.apply_sync(&sync, 80, highlighter(), false);
         let rows = pump(&mut transcript).0;
-        assert!(!rows.iter().any(|row| row.contains("read result")));
+        // The anchored result keeps its approval-verified label…
         assert!(
             rows.windows(2)
-                .any(|rows| rows == ["✓ completed write_file", "  first change written"])
+                .any(|rows| rows == ["✓ write_file", "│ first change written"])
+        );
+        // …and every other durable success lands too: the policy renders
+        // successes everywhere. Provider ids deliberately repeat, so the
+        // unaddressed results attribute by id, last-wins — the perception
+        // result included; only an approval address verifies a label.
+        assert!(
+            rows.windows(2)
+                .any(|rows| rows == ["✓ write_file", "│ old success"])
         );
         assert!(
-            !rows
-                .iter()
-                .any(|row| row.contains("old success") || row.contains("later success"))
+            rows.windows(2)
+                .any(|rows| rows == ["✓ write_file", "│ read result"])
+        );
+        assert!(
+            rows.windows(2)
+                .any(|rows| rows == ["✓ write_file", "│ later success"])
         );
     }
 
@@ -2202,17 +3123,14 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.apply_sync(&sync, 80, highlighter(), false);
         let rows = pump(&mut transcript).0;
-        let at = rows
-            .iter()
-            .position(|row| row == "✗ failed write_file")
-            .unwrap();
-        assert_eq!(rows[at + 1], "  first error line");
-        assert_eq!(rows.last().unwrap(), "  ⋯ result preview truncated");
+        let at = rows.iter().position(|row| row == "✗ write_file").unwrap();
+        assert_eq!(rows[at + 1], "│ first error line");
+        assert_eq!(rows.last().unwrap(), "│ ⋯ 68 more lines truncated");
         assert_eq!(rows[at..].len(), 6);
     }
 
     #[test]
-    fn successful_history_stays_quiet_without_an_open_anchored_batch() {
+    fn successful_history_renders_without_an_open_anchored_batch() {
         let baseline = pending_durable_baseline();
         let mut no_pending = baseline.clone();
         no_pending.in_flight.pending_approvals.clear();
@@ -2251,10 +3169,9 @@ mod tests {
             transcript.apply_sync(&sync, 80, highlighter(), false);
             let rows = pump(&mut transcript).0;
             assert!(
-                !rows
-                    .iter()
-                    .any(|row| row.contains("first change written")
-                        || row.starts_with("✓ completed"))
+                rows.windows(2)
+                    .any(|rows| rows == ["✓ write_file", "│ first change written"]),
+                "the durable success renders; approval state only affects attribution"
             );
         }
     }
@@ -2300,8 +3217,8 @@ mod tests {
             .iter()
             .position(|row| row == "current turn two")
             .unwrap();
-        assert_eq!(rows[current + 1], "✓ approved write_file, edit_file");
-        assert_eq!(rows[next + 1], "✗ rejected edit_file");
+        assert_eq!(rows[current + 1], "✓ approved: write_file, edit_file");
+        assert_eq!(rows[next + 1], "✗ rejected: edit_file");
         assert!(
             !rows[..current]
                 .iter()
@@ -2324,7 +3241,7 @@ mod tests {
             let mut transcript = Transcript::new();
             transcript.apply_sync(&sync, 80, highlighter(), false);
             let rows = pump(&mut transcript).0;
-            assert_eq!(rows.last().unwrap(), "✓ approved write_file, edit_file");
+            assert_eq!(rows.last().unwrap(), "✓ approved: write_file, edit_file");
         }
     }
 
@@ -2344,15 +3261,15 @@ mod tests {
         );
         let mut transcript = Transcript::new();
         transcript.apply_sync(&sync, 80, highlighter(), false);
-        let (flushed, live) = pump(&mut transcript);
-        assert_eq!(live, Vec::<String>::new());
+        let (flushed, tail_live) = pump(&mut transcript);
+        assert!(!tail_live);
         assert_eq!(
             flushed,
             vec![
-                "> change it",
+                "❯ change it",
                 "",
-                "✓ approved write_file",
-                "✗ rejected edit_file",
+                "✓ approved: write_file",
+                "✗ rejected: edit_file",
             ]
         );
     }

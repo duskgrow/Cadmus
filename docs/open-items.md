@@ -284,31 +284,6 @@ selection/copy drift under a moving stream); and the evidence-gated
 behaviors — pause or batch inserts while the user is scrolled up, only if
 the matrix shows bottom-anchored terminals in the support set.
 
-## The turn-end band collapse leaves the residue mid-page
-
-Consumer: the layout-hardening slice (or the ratatui-bump decision below,
-whichever lands first).
-
-Forensics 2026-09-17 (vt100 rig, two-turn scripted session): the residue
-mechanism is confirmed and bounded — at turn end the band shrinks from its
-streaming height to composer+status, and the Δ vacated rows are the band's
-own blank stream-viewport rows relocating into the page above it. On a full
-screen that is one screen-height blank run per completed turn, sitting
-between the flushed history and the band; the existing tests plus the
-session verified the healthy parts (no phantom band rows, no missed shrink,
-flush ordering intact), so the blank runs in field captures come from this
-plus the CJK artifact, not from a pump defect.
-
-Eliminating the residue is structural to the portable insert path (the
-amendment's accepted cost): the shrink must move the band's top edge down
-across rows that only ever held viewport blanks. The recorded options:
-scroll-relocation (scroll_up(Δ) at the collapse so the blanks land at the
-old page top instead of next to the band — auto-scroll at idle makes this a
-quirk-matrix item, coupled to the scroll-while-streaming probes), holding
-the settled tail in-band across the collapse (a flush-contract change), or
-DEC row deletion (already rejected). Field severity decides; until then the
-residue stays the accepted cost the amendment records.
-
 ## The next ratatui bump moves the inline spike's accepted costs
 
 Consumer: the first ratatui version bump (0.30.3 or later).
@@ -330,10 +305,96 @@ priority. Separately, same day: the first interactive session died on
 stalled behind crossterm's parked event-reader thread (ratatui #2640's
 mechanism, reproduced on a pty). cadmus-tui now answers all post-boot
 cursor queries from tracked state (`src/cursor.rs`), so #2640 no longer
-reaches the shell; the tracker's seed query is the session's only CPR. Two of the spike verdict's accepted costs live
+reaches the shell; the tracker's seed query is the session's only CPR. Same area, one more upstream
+wrinkle found by the paced-emission work (2026-09-20): the portable
+`insert_before` path's closing `Terminal::clear` restores the cursor to
+its pre-insert position, a row the viewport slide pushed ABOVE the band —
+a resize reading that offset saturates it to zero and pulls the viewport
+UP over the inserted rows, erasing them. The shell parks the cursor inside
+the viewport after every insert (`InlineShell::park_cursor_at_viewport_top`);
+on the next bump, re-check whether upstream fixed the restore so the park
+can retire. Field sighting three, same day (real session, deepseek):
+ratatui #2527's nastier face — the spurious spaces inflate a CJK row's PHYSICAL
+width past the terminal width (logical 68 + 30 CJK = 98 on a ~95-col
+screen), the terminal soft-wraps the tail onto the next row, and the next
+write overwrites it: the final line lost ` 权限）。` to the `Worked for`
+insert and `举` vanished mid-paragraph at the wrap boundary — both exactly
+at the physical-width edge, content verified intact in the trajectory.
+If the bump keeps slipping, the recorded alternative is porting codex's
+`insert_history.rs` (own the flush-write path: DECSTBM scroll regions +
+per-line writes that never touch continuation cells, cursor-position
+neutral — ports to stock ratatui 0.30.2 with a ~30-line shim, verified
+against their source 2026-09-20). Two of the spike verdict's accepted costs live
 exactly here: resize residue and the shrink clear+replay. On the
 next bump, before merging: re-run the inline-spike harness matrix —
 the shrink replay may flip from necessary to harmful (inserting rows
 nothing lost) — plus the dynamic-height probe suite
 (`tests/dynamic_height_spike.rs`), and re-check the ADR-0018
 amendment's evidence lines. MSRV holds at 1.88 through 0.30.2.
+
+## The stream emission's motion profile is a TERM=dumb switch until config lands
+
+Consumer: the TOML settings loader (ADR-0018 item 7).
+
+The paced typewriter drain (ADR-0018's 2026-09-20 second amendment) ships
+with a two-state motion profile: `TERM=dumb` disables pacing (instant
+emission), every other terminal gets the full profile — detected at the
+cadmus-tui terminal boundary (`style::detect_paced`, mirroring
+`detect_depth`), tests inject through `App::with_pacing`. The decided shape
+is `full|reduced|none` as a settings key over the same seam; it lands with
+the item-7 TOML loader, which owns the profile's naming, precedence and
+default.
+
+## Own the flush-write path: port codex's insert_history
+
+Consumer: the next slice after the PR split (approved by the maintainer,
+2026-09-20).
+
+ratatui #2527 has now bitten three times in the field (CJK spurious
+spaces, wrap-boundary grapheme loss, soft-wrap tail-eating — see the
+ratatui-bump item), and the bump is gated on upstream. The alternative
+that fixes it NOW: replace `shell.flush`'s `insert_before` with our own
+history insertion, ported from codex's `codex-rs/tui/src/insert_history.rs`
+(read 2026-09-20): DECSTBM partial scroll regions + per-line writes that
+never touch wide-grapheme continuation cells, cursor-position-neutral,
+with the closing `clear_after_position` + full-repaint invalidation as
+~30 lines of shim on stock ratatui 0.30.2 (`viewport_area()`/
+`set_viewport_area` are public; we already track the cursor in
+`src/cursor.rs`). Port their `ScrollbackStrategy::detect` fallback
+too — their comments record DECSTBM quirks (CSI S discards departing
+rows in QTermWidget/xterm.js; partial regions misbehave in Windows
+Terminal), so the detect matrix is part of the port, not optional. The
+vt100 rig is the proof harness; the port also retires the
+`park_cursor_at_viewport_top` workaround and the CJK artifacts the
+ratatui-bump item tracks, and is the substrate for any later
+drain/scroll-policy work (codex solves the same residue class here).
+
+## The typewriter drain emits in arrival-sized bursts, not a smooth rhythm
+
+Consumer: a pacing-refinement pass (no driver yet — accepted as later
+optimization by the maintainer, 2026-09-20).
+
+Field note from the first real sessions with the paced drain: the emission
+FEELS like chunks, not a typewriter. The mechanism is structural, not a
+constant to tune: prose rows become stable in paragraph-sized bursts (a
+paragraph is unstable until it closes), so the queue alternates between
+burst arrivals and empty stretches, and the drain visibly follows that
+rhythm even at 1–2 rows per 33 ms tick. Ideas for the pass, cheapest
+first: a slower base rate that lets a backlog smooth the rhythm across
+bursts (at the cost of display lag), sub-paragraph stability for prose
+(a wrap-stability proof, not a heuristic), character-grain pacing for the
+current row. Decide with a real-terminal A/B, not the vt100 rig.
+
+## The floor's session-cost field has no pricing source
+
+Consumer: the provider-metadata work — trigger-gated on a real consumer
+(the floor's cost field, a `/usage` cost view; ADR-0011 item 3).
+
+ADR-0011's floor is model, cwd+git, context-usage %, session cost. The
+usage ratio ships: the window is the registry's declared
+`Capabilities::max_context` (crates/cadmus-contract/src/capabilities.rs).
+Cost does not: nothing in the tree carries pricing — `Capabilities`
+declares limits, `Usage` counts tokens, and neither the registry
+dialects nor the wire carry rates. Do not invent a model→price lookup
+in the frontend; the consumer lands pricing as provider metadata and
+the floor renders it then.

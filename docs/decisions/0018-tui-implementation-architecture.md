@@ -380,3 +380,150 @@ owns the concrete bindings:
 The diff embedding is unchanged (item 8; the file-backed cumulative diff
 slice remains its consumer), and the dialog's keys remain subject to item
 6's binding-design task.
+
+## Amendment — 2026-09-20: grow-only band during a run — the high-water hold
+
+Field evidence (2026-09-20, vt100 end-to-end reproduction of a real
+session): the shrink residue fires **per block mid-stream**, not just at
+turn end — blank rows interleave with flushed content (one landed between
+tight-list items 2 and 3). The pump recomputed the desired height from the
+post-flush live tail every batch, so every block settle (a held paragraph
+flushing several rows at once) and every approval-dialog or composer
+appear/disappear shrank the band and left Δ vacated rows mid-page.
+**While a run is active the band's desired height never shrinks**: the app
+tracks the run's high-water floor — seeded at submit with the band's
+current height, BEFORE the composer clears, so the prompt flush and the
+composer collapse produce no residue either — raised by the content's own
+want (`desired = max(content, floor)`), and released at the run's outcome
+(interrupt rides the same path). The held slack pads the top of the
+bottom-anchored stream slice (`BandLayout::held_at`; its render already
+tails, so the padding is blank above the live tail). Idle-session behavior
+(the composer's own grow/shrink while typing) is unchanged; the floor is a
+desired-height concept, screen-clamped by the shell like any other, so the
+resize rules stand; back-to-back runs seed a fresh floor.
+
+The release collapses the band once to the idle height, and the collapse
+is **top-anchored**: the band keeps its top edge, so the Δ vacated rows
+sit BELOW the band as a blank buffer — never a gap inside the transcript.
+Later growth re-absorbs the buffer without scrolling (`grow_from`'s absorb
+phase); later inserts descend into it (the portable insert path re-anchors
+the viewport below the inserted rows and clamps its scroll at zero while
+room remains below). The pump order is flush-before-collapse, so the
+run's final batch lands before the buffer forms. Net effect: ZERO visible
+residue per run — the transcript carries exactly the markdown's own
+separators, and the dead rows sit where a CLI's trailing space naturally
+does. (Two earlier positions were field-rejected the same day: blanks
+interleaved mid-content — the pre-hold mechanism — and blanks wedged
+between the last content block and the completion note — the first
+shrink-before-flush cut of this amendment.) The recorded alternatives from
+the 2026-09-17 forensics (scroll-relocation, holding the settled tail
+in-band across the collapse, DEC row deletion) stay on the shelf: the hold
+removes the mid-stream corruption without a flush-contract change, and the
+top-anchored collapse removes the visible collapse residue with stock
+mechanics.
+
+Verified: the blank-preserving characterization suite (`tests/app_loop.rs`)
+— a two-paragraph-plus-tight-list turn streams through several settle
+cycles with zero blanks interleaved beyond the markdown's own single
+separators, the dialog/type-ahead and width-grow holds, the interrupt
+collapse, and back-to-back runs each leaving the buffer below the band,
+never in the transcript — plus the spike suite's flipped shrink protocol
+(`tests/dynamic_height_spike.rs`: the band keeps its top edge, the buffer
+hangs below) and the pre-existing vt100 suites green. Companion fix, same
+pass: between the terminal record and the outcome the run-status row's
+`Idle` light rendered a blank row while the run was still active; it now
+reads `Working · Ns` (the state-truthfulness rule).
+
+## Amendment — 2026-09-20 (2nd): paced emission — stable rows type out, the unstable tail is never rendered
+
+Field evidence (maintainer report, 2026-09-20): the live window renders the
+_unstable_ markdown tail — paragraphs re-wrap as they grow, fences
+re-highlight, tables pop in on close ("吐字一块一块地喷出来，喷出来马上又渲
+染，看起来非常凌乱"). The flush contract already knows exactly which rows
+are stable (`Render::flushable_len`); rendering anything past it was the
+mistake. **Rows are emitted only after they are stable, at a paced
+typewriter rhythm, and the unstable tail is completely hidden** — the
+design discussion's option (a), chosen over any raw-text preview so that no
+source of jumpiness survives. The reference precedent is codex's
+`streaming/commit_tick.rs` (stable content queues and drains at a paced
+rate, catching up under backlog), adapted to Cadmus's flush contract.
+
+Mechanism:
+
+1. **The emission queue lives transcript-side.** The snapshot no longer
+   returns rows for direct insertion; it appends every newly stable row to
+   a per-run FIFO of _emissions_ (one per block slice, carrying the flush
+   plan for that slice). Rows leave only through the app's paced drain,
+   and a row is acked to the stream only after its _successful_ shell
+   insert — the ack contract is unchanged from the pre-queue model.
+2. **The band loses its stream slice.** Slices are now: the `receiving…`
+   row, the approval section, the run-status row, the composer, the floor
+   line. `STREAM_MAX_ROWS` and the `↑ N more lines` overflow indicator die
+   with the slice (the feature is superseded); `Snapshot.live_rows` and the
+   transcript's live-tail plumbing die with it. The visible typewriter IS
+   the paced scrollback inserts: each drained row appears above the band,
+   the band slides down one row — smooth, no window.
+3. **Pacing is tick-driven, app-side.** While the queue is non-empty the
+   app self-reschedules a frame at 33 ms (the `schedule_frame_at` horizon
+   pattern the 1 Hz clock already uses; all timing stays injected at the
+   app's edges). The per-tick budget steps by queue depth: `< 8` rows → 1,
+   `8..24` → 2, `≥ 24` → 4, with a floor of 4 while a run is finishing
+   (constants in one place). Esc dumps the queue whole until the run's
+   drain completes. Attach/resync replay bypasses pacing entirely
+   (replayed history must not re-type). `TERM=dumb` disables pacing
+   (instant emission — the cadmus-tui terminal boundary detects it,
+   `style::detect_paced`, mirroring `detect_depth`); the full
+   `full|reduced|none` motion profile lands with the item-7 TOML loader
+   (recorded as an open item consumed by that work). Item 5's two-regime
+   hysteresis lands in this form — a depth-tiered budget over the tick;
+   the age dimension stays deferred for lack of evidence.
+4. **The `receiving…` row is the liveness signal** replacing the hidden
+   tail: one subtle row at the band's top, visible iff a run is active AND
+   (queue non-empty OR unstable tail non-empty), event-driven like every
+   other slice, gone by the time the run's drain completes.
+5. **End-of-run is an explicit state (`run_end`), not ordering luck.** At
+   the outcome the clock freezes as today; the run's remaining stable rows
+   AND the completion note go through the queue LAST, so the note types
+   out after the content by construction. The floor still releases at the
+   outcome (the band falls to the run's resting height — the receiving row
+   already gone); the run-status row rides its frozen clock until the
+   queue empties and the note is inserted, and ONLY THEN hides — the
+   band's final collapse is exactly that one row (3→2), so the end-of-run
+   composer jump dies. Interrupt: instant dump, then the note, then the
+   collapse.
+6. **Approvals are not a display gate**: emission continues while an
+   approval blocks the run; the dialog keeps band priority; the run clock
+   keeps pausing across the wait.
+7. **The high-water floor stays.** With no stream slice, mid-run band
+   oscillation is just the approval section and the receiving row — the
+   floor is cheap insurance over exactly those, unchanged (seeded at
+   submit, running max, released at the outcome).
+8. **Resize folds the queue back.** Queued rows carry the old width's
+   wrap, so a width change rewinds the queue into its blocks and the next
+   snapshot re-queues at the new width (sound because nothing queued is
+   acked yet). A partially drained front emission is the one exception:
+   its remaining rows keep the old wrap — their already-inserted prefix is
+   scrollback stock ratatui cannot delete, and re-queuing them would
+   duplicate it. Bounded to one emission, cosmetic, the same accepted cost
+   class as item 4's frozen-row styling.
+
+Verified: `tests/app_loop.rs` — the paused-clock pacing suite (33 ms →
+exactly the tier's budget, backlog batches), the unstable tail never
+rendered on any tick, the `receiving…` lifecycle, the end-of-run pin
+(content types, THEN the note, THEN the 3→2 collapse with Δ = 1), the
+interrupt's instant dump, the attach replay's instant insert, and the
+blank-structure characterization suites byte-identical to the pre-queue
+model (emission changes WHEN rows appear, never WHAT appears) — plus the
+transcript rewind unit tests, `tests/stream_flush.rs` (the flush oracle,
+now with the never-rendered property pinned at that level too), and the
+pre-existing suites.
+
+Companion fix, same pass: the vt100 suites exposed a latent ratatui bug
+that the constant insert cadence made reproducible — the portable
+`insert_before` path's closing `Terminal::clear` restores the cursor to
+its pre-insert position, a row the viewport slide just pushed ABOVE the
+band; a resize reading that cursor offset saturates it to zero and pulls
+the viewport UP over the inserted rows, erasing them (any resize within
+the debounce window after streaming inserts). The shell now parks the
+cursor inside the viewport after every insert (`tests/dynamic_height_spike.rs`
+locks it; recorded in the ratatui-bump open item as upstream evidence).

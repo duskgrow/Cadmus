@@ -161,6 +161,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
             shell.terminal.insert_before(height, |buf| {
                 Paragraph::new(rows.to_vec()).render(buf.area, buf);
             })?;
+            shell.park_cursor_at_viewport_top()?;
             shell.stats.inserts += 1;
             shell.stats.inserted_rows += rows.len();
             shell.tolerated_draw(render);
@@ -173,12 +174,16 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
     /// effective (screen-clamped) heights: both `desired` and the current
     /// height clamp to the screen before comparing, and equality no-ops —
     /// without the early no-op the grow math underflows when the band fills
-    /// the screen. Grow: insert Δ blanks above the band, park the cursor at
-    /// the future band top, recreate — the re-anchor's append lands exactly
-    /// at the bottom row (zero scroll, zero residue). Shrink: clear the old
-    /// band, park Δ rows lower, recreate — the vacated Δ rows are the bounded
-    /// blank residue, consumed by later flushes (ADR-0018's second 2026-09-14
-    /// amendment). One wrapper around insert/clear + recreate + draw.
+    /// the screen. Grow: the collapse's blank buffer below the band is
+    /// absorbed first (park + recreate, no scroll); only the overflow goes
+    /// through the insert path (insert Δ blanks above the band, park the
+    /// cursor at the future band top, recreate — the re-anchor's append
+    /// lands exactly at the bottom row, zero residue). Shrink: clear the old
+    /// band and recreate at the SAME top edge — the vacated Δ rows become a
+    /// blank buffer BELOW the band, never a gap inside the transcript above;
+    /// later growth re-absorbs the buffer and later inserts descend into it
+    /// (ADR-0018's 2026-09-20 amendment). One wrapper around insert/clear +
+    /// recreate + draw.
     pub fn set_height(
         &mut self,
         desired: u16,
@@ -235,6 +240,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
                     shell.terminal.insert_before(height, |buf| {
                         Paragraph::new(tail).render(buf.area, buf);
                     })?;
+                    shell.park_cursor_at_viewport_top()?;
                     shell.stats.inserts += 1;
                     shell.stats.inserted_rows += len;
                     shell.stats.shrink_replays += 1;
@@ -253,18 +259,39 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
     ) -> io::Result<()> {
         let delta = new_height - current;
         self.guarded(|shell| {
-            shell.terminal.insert_before(delta, |_buf| {})?;
-            let area_y = shell.terminal.get_frame().area().y;
-            debug_assert!(
-                area_y >= delta,
-                "grow invariant: a bottom-anchored band of {current} rows on a \
-                 clamped screen always has Δ={delta} rows of room above"
-            );
-            let new_top = area_y - delta;
-            shell
-                .terminal
-                .set_cursor_position(Position::new(0, new_top))?;
-            shell.recreate(new_height)?;
+            // The blank buffer below the band (a top-anchored shrink's Δ
+            // rows): growth extends into it first — a park + recreate, no
+            // scroll, no insert — and only the overflow goes through the
+            // bottom-anchored insert path.
+            let screen_rows = shell.terminal.size()?.height;
+            let top = shell.terminal.get_frame().area().y;
+            let buffer = screen_rows.saturating_sub(top + current);
+            let absorb = delta.min(buffer);
+            if absorb > 0 {
+                shell.terminal.set_cursor_position(Position::new(0, top))?;
+                // The insert path's clear, for the same reason: the coming
+                // draw is a cell diff, so a fresh blank glyph never
+                // overwrites a stale one — the old band rows must be wiped
+                // for the taller viewport to repaint clean.
+                shell.terminal.clear()?;
+                shell.recreate(current + absorb)?;
+            }
+            let overflow = delta - absorb;
+            if overflow > 0 {
+                shell.terminal.insert_before(overflow, |_buf| {})?;
+                let area_y = shell.terminal.get_frame().area().y;
+                debug_assert!(
+                    area_y >= overflow,
+                    "grow invariant: a bottom-anchored band of {} rows on a \
+                     clamped screen always has Δ={overflow} rows of room above",
+                    current + absorb,
+                );
+                let new_top = area_y - overflow;
+                shell
+                    .terminal
+                    .set_cursor_position(Position::new(0, new_top))?;
+                shell.recreate(new_height)?;
+            }
             shell.stats.grows += 1;
             shell.tolerated_draw(render);
             Ok(())
@@ -277,10 +304,15 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         current: u16,
         render: impl FnOnce(&mut Frame<'_>),
     ) -> io::Result<()> {
-        let delta = current - new_height;
+        debug_assert!(new_height < current);
         self.guarded(|shell| {
             shell.terminal.clear()?;
-            let new_top = shell.terminal.get_frame().area().y + delta;
+            // Top-anchored: the band keeps its top edge, so the vacated rows
+            // sit BELOW it as a blank buffer — the transcript above never
+            // sees a gap. `grow_from` re-absorbs the buffer without
+            // scrolling; `flush` inserts descend into it (the portable
+            // insert path re-anchors the viewport below the inserted rows).
+            let new_top = shell.terminal.get_frame().area().y;
             shell
                 .terminal
                 .set_cursor_position(Position::new(0, new_top))?;
@@ -309,6 +341,21 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         self.band_height = new_height;
         self.width = self.terminal.size()?.width;
         Ok(())
+    }
+
+    /// Repair the cursor after an `insert_before`: the portable insert
+    /// path's closing `Terminal::clear` restores the cursor to its
+    /// pre-insert position — a row the viewport slide just pushed ABOVE the
+    /// band. Left there, the next `resize`'s re-anchor computes a cursor
+    /// offset that saturates to zero and pulls the viewport UP over the
+    /// inserted rows, erasing them (upstream bug in
+    /// `insert_before_no_scrolling_regions`' restore; the re-anchor only
+    /// ever runs on resize, which is why the window stayed latent). Any
+    /// in-viewport row preserves the re-anchor's math; the band's next draw
+    /// repositions the cursor for display anyway.
+    fn park_cursor_at_viewport_top(&mut self) -> io::Result<()> {
+        let top = self.terminal.get_frame().area().y;
+        self.terminal.set_cursor_position(Position::new(0, top))
     }
 
     /// Draw, tolerating CPR-class failure (spike discipline 3).

@@ -1,8 +1,10 @@
-//! The stream widget: the band's live tail over `cadmus-ui`'s markdown
-//! pipeline (ADR-0018 items 2 and 4). The widget owns the pipeline's flush
-//! contract with the shell — completed content leaves the band into real
-//! scrollback continuously, never in one batch at turn end — and re-derives
-//! everything (resize replay included) from the source SSOT.
+//! The stream widget: one assistant block's markdown pipeline and the
+//! flush contract with the shell (ADR-0018 items 2 and 4). The pipeline's
+//! stable prefix is the emission queue's source — completed content leaves
+//! into real scrollback through the app's paced drain, never in one batch
+//! at turn end — and the unstable tail is never rendered (the 2026-09-20
+//! second amendment). Resize replay re-derives everything from the source
+//! SSOT.
 //!
 //! Wrapping discipline: [`crate::wrap`] is the single wrap implementation —
 //! flush rows, band rows and height math all come from it, so they can
@@ -12,12 +14,11 @@ use cadmus_ui::highlight::Highlighter;
 use cadmus_ui::markdown::{MarkdownStream, Render, render_document};
 use cadmus_ui::theme::{ColorDepth, Theme};
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::wrap::wrap_rows;
 
-/// The streaming transcript's live tail. See the module docs for the
-/// wrapping and flush contracts.
+/// The streaming transcript's markdown pipeline. See the module docs for
+/// the wrapping and flush contracts.
 pub struct Stream {
     pipeline: MarkdownStream,
 }
@@ -52,65 +53,17 @@ impl Stream {
         self.pipeline.render(width, highlighter)
     }
 
-    /// The flushable prefix, wrapped: the count of *logical* lines covered
-    /// (for [`Stream::ack_flushed`]) plus the display rows to hand
-    /// [`crate::shell::InlineShell::flush`]. Empty when nothing may flush.
-    pub fn flushable_rows(
-        &mut self,
-        width: u16,
-        highlighter: &Highlighter,
-        theme: &Theme,
-        depth: ColorDepth,
-    ) -> (usize, Vec<Line<'static>>) {
-        let render = self.pipeline.render(width, highlighter);
-        let flushable = render.flushable_len();
-        if flushable == 0 {
-            return (0, Vec::new());
-        }
-        let rows = wrap_rows(&render.live_lines()[..flushable], width, theme, depth);
-        (flushable, rows)
-    }
-
-    /// Confirm `lines` logical lines left the band (a successful shell
-    /// flush). They never reappear in the live tail.
+    /// Confirm `lines` logical lines left for scrollback (a successful
+    /// shell insert, confirmed by the drain). They never reappear in the
+    /// live lines.
     pub fn ack_flushed(&mut self, lines: usize) {
         self.pipeline.ack_flushed(lines);
     }
 
-    /// Every live (unflushed) row, wrapped — the band's stream-tail content.
-    pub fn live_rows(
-        &mut self,
-        width: u16,
-        highlighter: &Highlighter,
-        theme: &Theme,
-        depth: ColorDepth,
-    ) -> Vec<Line<'static>> {
-        let render = self.pipeline.render(width, highlighter);
-        wrap_rows(render.live_lines(), width, theme, depth)
-    }
-
-    /// The live tail's wrapped row count — the layout function's stream
-    /// input. Cheap: measured through the same wrapper, without a scratch
-    /// render, and styles never affect wrapping (they are zero-width), so
-    /// plain text is enough.
-    pub fn live_row_count(&mut self, width: u16, highlighter: &Highlighter) -> u16 {
-        let render = self.pipeline.render(width, highlighter);
-        if render.live_lines().is_empty() {
-            return 0;
-        }
-        let lines: Vec<Line<'static>> = render
-            .live_lines()
-            .iter()
-            .map(|line| Line::from(line.text()))
-            .collect();
-        let count = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .line_count(width.max(1));
-        u16::try_from(count).unwrap_or(u16::MAX)
-    }
-
-    /// The band's stream-tail slice: the live rows bottom-anchored into
-    /// `height` rows (newest content wins when the tail is taller).
+    /// A display-window helper: the rows bottom-anchored into `height`
+    /// rows (newest content wins when the rows are taller). The scrollback
+    /// replay's window; the band itself has no content window (the paced
+    /// drain's inserts are the visible stream).
     #[must_use]
     pub fn visible(rows: &[Line<'static>], height: u16) -> Vec<Line<'static>> {
         let skip = rows.len().saturating_sub(usize::from(height));
@@ -119,10 +72,11 @@ impl Stream {
 
     /// Resize replay (the shell's `on_resize` closure): the still-visible
     /// *flushed* history tail re-materialized from the source SSOT at the
-    /// new width — up to `max_rows` display rows, newest last. The live tail
-    /// is excluded: it comes back with the band's own repaint, and replaying
-    /// it here would duplicate it. Only the committed source replays (the
-    /// newline gate's partial trailing line has never been visible).
+    /// new width — up to `max_rows` display rows, newest last. The unstable
+    /// tail is excluded by construction: it is never rendered, and the
+    /// queued-but-undrained stable rows are still live in the pipeline
+    /// (the drain owns the ack contract), so replaying only the committed
+    /// source can never paint them into scrollback early.
     pub fn replay_tail(
         &mut self,
         max_rows: u16,
@@ -168,27 +122,14 @@ mod tests {
     fn a_paragraph_flushes_once_it_completes() {
         let mut stream = Stream::new();
         stream.push_delta("hello world\n\nnext\n");
-        let (logical, rows) =
-            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
         // The completed paragraph flushes with its separator (item 4).
-        assert_eq!(logical, 2);
-        assert_eq!(texts(&rows), vec!["hello world", ""]);
-        stream.ack_flushed(logical);
-        let live = stream.live_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
-        assert_eq!(texts(&live), vec!["next"]);
-        let (logical, _) =
-            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
-        assert_eq!(logical, 0);
-    }
-
-    #[test]
-    fn wrap_rows_and_live_row_count_agree() {
-        let mut stream = Stream::new();
-        stream.push_delta("alpha beta gamma delta epsilon zeta\n\n");
-        let rows = stream.live_rows(10, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
-        let count = stream.live_row_count(10, highlighter());
-        assert_eq!(usize::from(count), rows.len());
-        assert!(rows.len() > 1, "the long line wraps at width 10");
+        let flushable = stream.render(80, highlighter()).flushable_len();
+        assert_eq!(flushable, 2);
+        stream.ack_flushed(flushable);
+        let render = stream.render(80, highlighter());
+        assert_eq!(render.live_lines().len(), 1);
+        assert_eq!(render.live_lines()[0].text(), "next");
+        assert_eq!(render.flushable_len(), 0);
     }
 
     #[test]
@@ -212,10 +153,10 @@ mod tests {
     fn the_replay_tail_renders_from_source_at_the_new_width() {
         let mut stream = Stream::new();
         stream.push_delta("alpha beta gamma delta\n\nsecond part here\n");
-        let (logical, _rows) =
-            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
-        stream.ack_flushed(logical);
-        // Only the flushed paragraph replays; the open one stays with the band.
+        let flushable = stream.render(80, highlighter()).flushable_len();
+        stream.ack_flushed(flushable);
+        // Only the flushed paragraph replays; the open one stays out (the
+        // unstable tail is never rendered).
         let rows = stream.replay_tail(10, 8, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
         let texts = texts(&rows);
         assert!(texts.contains(&"alpha".to_string()), "{texts:?}");
@@ -230,16 +171,10 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_stream_has_no_rows() {
+    fn an_empty_stream_has_no_lines() {
         let mut stream = Stream::new();
-        assert!(
-            stream
-                .live_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor)
-                .is_empty()
-        );
-        assert_eq!(stream.live_row_count(80, highlighter()), 0);
-        let (logical, rows) =
-            stream.flushable_rows(80, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
-        assert_eq!((logical, rows.len()), (0, 0));
+        let render = stream.render(80, highlighter());
+        assert!(render.live_lines().is_empty());
+        assert_eq!(render.flushable_len(), 0);
     }
 }

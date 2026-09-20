@@ -1,14 +1,18 @@
 //! The app loop, locked end to end with vt100 (ADR-0018 items 5 and 10):
 //! keys drive the composer, Enter spawns a run through the scripted driver,
-//! the live feed streams into the band and out to scrollback, Esc sends the
-//! interrupt command, and the outcome folds back into the session history.
-//! The rig shares `tests/common`'s vt100 world; the strongest assertion is
-//! again the full non-blank row sequence (scrollback + screen, oldest
-//! first).
+//! stable rows type out of the emission queue into scrollback at the paced
+//! budget (the 2026-09-20 second amendment), the unstable tail is never
+//! rendered (the `receiving…` row carries the liveness signal), Esc sends
+//! the interrupt command and dumps the queue whole, and the outcome folds
+//! back into the session history. The rig shares `tests/common`'s vt100
+//! world; the strongest assertion is again the full non-blank row sequence
+//! (scrollback + screen, oldest first) — and for the run high-water hold
+//! (ADR-0018's 2026-09-20 amendment) its blank-preserving sibling, which
+//! pins exactly where every blank row is allowed to be.
 //!
-//! Time is tokio's paused clock (frame gate, debounce); the drainer thread
-//! is real-time but only forwards into a channel, so a few settle pumps
-//! always converge the world.
+//! Time is tokio's paused clock (frame gate, debounce, the pacing horizon);
+//! the drainer thread is real-time but only forwards into a channel, so a
+//! few settle pumps always converge the world.
 
 mod common;
 
@@ -44,6 +48,12 @@ fn has_row(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
 
+const COMPOSER_PLACEHOLDER: &str = "❯ Ask anything";
+
+/// The composer's placeholder while a run is active (Enter stays inert
+/// until the steer slice; Esc is the one key that works mid-run).
+const BUSY_PLACEHOLDER: &str = "❯ Esc to interrupt";
+
 fn call_decision(
     command_id: &str,
     request_id: &str,
@@ -71,6 +81,9 @@ struct ScriptDriver {
     /// carries them, scripting an attach after the settle (the rebuilt
     /// transcript's explicit record).
     settled: Arc<Mutex<Vec<SettledApproval>>>,
+    /// A full sync override for the started runs (a history-carrying
+    /// baseline for the replay tests); falls back to `sync_with_pending`.
+    baseline: Arc<Mutex<Option<Sync>>>,
     reattachment: Arc<Mutex<Option<Attachment>>>,
 }
 
@@ -82,6 +95,7 @@ impl ScriptDriver {
             runs: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             settled: Arc::new(Mutex::new(Vec::new())),
+            baseline: Arc::new(Mutex::new(None)),
             reattachment: Arc::new(Mutex::new(None)),
         }
     }
@@ -115,10 +129,11 @@ impl RunDriver for ScriptDriver {
         let commands = Arc::clone(&self.commands);
         let pending = self.pending.lock().expect("pending").clone();
         let settled = self.settled.lock().expect("settled").clone();
+        let baseline = self.baseline.lock().expect("baseline").clone();
         let reattachment = Arc::clone(&self.reattachment);
         RunHandle {
             attachment: Attachment {
-                sync: sync_with_pending(pending, settled),
+                sync: baseline.unwrap_or_else(|| sync_with_pending(pending, settled)),
                 tail: Box::new(live_rx.into_iter()),
             },
             reattach: Box::new(move || {
@@ -169,6 +184,11 @@ fn boot(world: &World) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig
     boot_with_pending(world, Vec::new())
 }
 
+fn boot_unpaced(world: &World) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
+    // The TERM=dumb motion profile: the paced typewriter is off.
+    boot_with_config(world, Vec::new(), Vec::new(), false)
+}
+
 fn boot_with_pending(
     world: &World,
     pending: Vec<PendingApproval>,
@@ -180,6 +200,15 @@ fn boot_with_baseline(
     world: &World,
     pending: Vec<PendingApproval>,
     settled: Vec<SettledApproval>,
+) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
+    boot_with_config(world, pending, settled, true)
+}
+
+fn boot_with_config(
+    world: &World,
+    pending: Vec<PendingApproval>,
+    settled: Vec<SettledApproval>,
+    paced: bool,
 ) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
     let (input_tx, input) = ScriptedInput::channel();
     let guard = GuardSink::default();
@@ -193,10 +222,13 @@ fn boot_with_baseline(
         Box::new(driver.clone_handles()),
         AppConfig {
             label: "kimi·k2".into(),
+            context_window: 128_000,
+            refresh_label: None,
             theme: Theme::ansi(),
             depth: ColorDepth::Truecolor,
         },
-    );
+    )
+    .with_pacing(paced);
     (
         app,
         Rig {
@@ -216,6 +248,7 @@ impl ScriptDriver {
             runs: Arc::clone(&self.runs),
             pending: Arc::clone(&self.pending),
             settled: Arc::clone(&self.settled),
+            baseline: Arc::clone(&self.baseline),
             reattachment: Arc::clone(&self.reattachment),
         }
     }
@@ -320,13 +353,82 @@ async fn settle_until(mut condition: impl FnMut() -> bool) {
     panic!("the world never reached the expected state");
 }
 
-/// The visible status row (the band anchors at the cursor, so find it by
-/// content): the label starts it, the run state rides the right edge.
+/// Pump the loop on real time only (no virtual advance): the drainer
+/// forwards, the app applies, and a demand frame fires if the frame gate
+/// is quiescent — but no pacing horizon can fire (the paused clock holds),
+/// so the paced drain stays frozen for exact tick counting.
+async fn flush_feed() {
+    for _ in 0..8 {
+        yield_now().await;
+        std::thread::sleep(Duration::from_millis(1));
+        yield_now().await;
+    }
+}
+
+/// The arrival pump, deterministically: the feed applies on real-time
+/// yields, the (possibly rate-gated) demand frame fires within 10 ms of
+/// virtual time, and the queue's first budget drains. The 33 ms pacing
+/// horizon is out of reach, so every 33 ms step after this is exactly one
+/// budget.
+async fn flush_arrival() {
+    flush_feed().await;
+    advance(Duration::from_millis(10)).await;
+    yield_now().await;
+    yield_now().await;
+}
+
+/// One pacing tick: the 33 ms horizon fires exactly one pump (one budget).
+async fn tick33() {
+    advance(Duration::from_millis(33)).await;
+    yield_now().await;
+    yield_now().await;
+}
+
+/// Whether the `receiving…` liveness row is up.
+fn receiving_row(world: &World) -> bool {
+    has_row(&world.visible_rows(), "receiving…")
+}
+
+/// Scrollback + screen, oldest first (the insertion-side view —
+/// `nonblank_rows` minus the blank filter).
+fn all_rows(world: &World) -> Vec<String> {
+    let mut rows = world.scrollback_rows();
+    rows.extend(world.visible_rows());
+    rows
+}
+
+/// The world's visible rows with the never-written tail (and the collapse
+/// buffer below the band) trimmed — band-suffix assertions read this.
+fn visible_content(world: &World) -> Vec<String> {
+    let mut rows = world.visible_rows();
+    while rows.last().is_some_and(String::is_empty) {
+        rows.pop();
+    }
+    rows
+}
+
+/// The visible floor status row (the band anchors at the cursor, so find
+/// it by content): the session label, left-aligned.
 fn status_row(world: &World) -> String {
     world
         .visible_rows()
         .into_iter()
         .find(|row| row.starts_with("kimi·k2"))
+        .unwrap_or_default()
+}
+
+/// The run-status row above the composer (left-aligned, found by its state
+/// word) — empty while idle, when the row is absent. The transcript's
+/// `Failed after …` note is filtered out by the `·`.
+fn run_status_row(world: &World) -> String {
+    world
+        .visible_rows()
+        .into_iter()
+        .find(|row| {
+            row.starts_with("Working ·")
+                || row.starts_with("Waiting for approval ·")
+                || row.starts_with("Failed ·")
+        })
         .unwrap_or_default()
 }
 
@@ -343,6 +445,59 @@ async fn quit_and_join(
         }
     }
     task.await.expect("the loop joins").expect("a clean exit");
+}
+
+/// The residue-sensitive assertion form: scrollback + screen, oldest first,
+/// WITH the blank rows (`nonblank_rows` filters the very rows the high-water
+/// hold is judged on), trimmed only of the never-written screen tail below
+/// the band. The allowed blanks: the markdown's own single separators, the
+/// band's slack padding at the band's TOP (the hold's design), and the ONE
+/// per-run collapse is top-anchored: its buffer hangs BELOW the band, so it
+/// is trimmed here with the never-written screen tail.
+fn rows_with_blanks(world: &World) -> Vec<String> {
+    let mut rows = world.scrollback_rows();
+    rows.extend(world.visible_rows());
+    let end = rows
+        .iter()
+        .rposition(|row| !row.is_empty())
+        .map_or(0, |index| index + 1);
+    rows.truncate(end);
+    rows
+}
+
+/// The completion row's clock is the virtual clock's walk through the
+/// test's own advances (the RunFinished-gap probe crosses whole seconds);
+/// the sequence asserts normalize it to a fixed marker.
+fn normalize_worked_for(rows: Vec<String>) -> Vec<String> {
+    rows.into_iter()
+        .map(|row| {
+            if row.starts_with("Worked for ") {
+                "Worked for …".to_string()
+            } else {
+                row
+            }
+        })
+        .collect()
+}
+
+/// The world's tokenNNNN words, in order (the wrap-agnostic
+/// no-loss/no-duplication pin).
+fn token_words(world: &World) -> Vec<String> {
+    all_rows(world)
+        .iter()
+        .flat_map(|row| row.split_whitespace().map(str::to_string))
+        .filter(|word| word.starts_with("token"))
+        .collect()
+}
+
+/// Fixed-width tokens: nine characters each, so an 80-column row wraps
+/// after exactly 8 and a 100-column row after exactly 10 — the wrapped
+/// rows the height math sees are computable in the test.
+fn tokens(from: usize, to: usize) -> String {
+    (from..=to)
+        .map(|i| format!("token{i:04}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[tokio::test(start_paused = true, flavor = "current_thread")]
@@ -378,7 +533,7 @@ async fn the_session_loop_end_to_end() {
             assert!(
                 world
                     .nonblank_rows()
-                    .contains(&"> fix the test".to_string()),
+                    .contains(&"❯ fix the test".to_string()),
                 "world: {:?}",
                 world.nonblank_rows()
             );
@@ -389,7 +544,8 @@ async fn the_session_loop_end_to_end() {
             );
 
             // The run streams: text lands in the band, completed content
-            // flushes continuously.
+            // flushes continuously. The run-status row works above the
+            // composer, its clock at 0s on the paused test clock.
             run.live
                 .send(delta(1, 1, "reading main.rs\n\n"))
                 .expect("feed");
@@ -399,7 +555,7 @@ async fn the_session_loop_end_to_end() {
                     .contains(&"reading main.rs".to_string())
             })
             .await;
-            assert!(status_row(&world).ends_with("streaming"));
+            assert!(run_status_row(&world).starts_with("Working · "));
 
             // Esc interrupts; the command rides the run's sink.
             rig.input.send(key(KeyCode::Esc)).expect("input");
@@ -440,16 +596,19 @@ async fn the_session_loop_end_to_end() {
             // order, the drainer's contract.
             drop(run.live);
             run.outcome.send(Ok(history.clone())).expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             // The strongest assertion form: the exact full row sequence —
-            // any lost, duplicated or marker-polluted row breaks it.
+            // any lost, duplicated or marker-polluted row breaks it. The
+            // completion row (Codex's FinalMessageSeparator precedent)
+            // records the run's cost; the run-status row is gone (idle).
             assert_eq!(
                 world.nonblank_rows(),
                 vec![
                     "$ cadmus chat",
-                    "> fix the test",
+                    "❯ fix the test",
                     "reading main.rs",
-                    "→ read_file",
+                    "Worked for 0s",
+                    COMPOSER_PLACEHOLDER,
                     "kimi·k2",
                 ],
                 "scrollback+screen sequence (visible: {:?}, scrollback: {:?})",
@@ -457,6 +616,7 @@ async fn the_session_loop_end_to_end() {
                 world.scrollback_rows()
             );
             assert_eq!(status_row(&world), "kimi·k2");
+            assert!(run_status_row(&world).is_empty());
 
             // The second run carries the first's history.
             type_text(&rig, "now fix it");
@@ -472,12 +632,6 @@ async fn the_session_loop_end_to_end() {
             quit_and_join(task, &rig.input).await;
         })
         .await;
-}
-
-/// The status row with the streaming state right-aligned at 80 columns —
-/// the exact full-sequence assertions pin padding, not just content.
-fn streaming_status_row() -> String {
-    format!("kimi·k2{:<64}streaming", "")
 }
 
 /// The gate's two-call request: a write and an edit of the same file.
@@ -520,15 +674,18 @@ fn approval_request(seq: u64, request_id: &str, calls: Vec<ToolCall>) -> LiveUpd
 /// The band shows the selected call's change and the other original slots.
 const APPROVAL_SECTION: [&str; 5] = [
     "approve 2 call(s)  ·  unanswered denies after 5 min",
-    "Tab: arm selected call · y/n: answer it",
-    "> 1/2 → write_file src/main.rs",
+    "Tab: arm selected call · y/n: answer it · Esc: interrupt",
+    "> 1/2 ▸ write_file src/main.rs",
     "+ fn main() {}",
-    "  2/2 → edit_file src/main.rs (pending)",
+    "  2/2 ▸ edit_file src/main.rs (pending)",
 ];
 
 /// A call can be answered ahead of its sibling, even with duplicated wire
 /// ids. Only the recorded answer settles it; focus advances independently.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
+// The full dialog narrative is the point of the test; splitting it would
+// only scatter the timeline.
+#[allow(clippy::too_many_lines)]
 async fn a_second_call_can_be_approved_before_the_first() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -549,21 +706,26 @@ async fn a_second_call_can_be_approved_before_the_first() {
                 .send(approval_request(1, "ap1", calls))
                 .expect("feed");
             settle_until(|| has_row(&world.visible_rows(), "approve 2 call(s)")).await;
+            // Band order: prompt, section, the (paused) run-status row, the
+            // busy composer, the floor line.
             assert_eq!(
                 world.nonblank_rows(),
                 [
-                    vec!["> change main".to_string()],
+                    vec!["❯ change main".to_string()],
                     APPROVAL_SECTION.map(String::from).to_vec(),
-                    vec![streaming_status_row()],
+                    vec![
+                        "Waiting for approval · 0s".to_string(),
+                        BUSY_PLACEHOLDER.to_string(),
+                        "kimi·k2".to_string(),
+                    ],
                 ]
                 .concat()
             );
-            assert!(status_row(&world).ends_with("streaming"));
 
             rig.input.send(key(KeyCode::Tab)).expect("arm first");
             rig.input.send(key(KeyCode::Tab)).expect("select second");
             settle().await;
-            assert!(has_row(&world.visible_rows(), "> 2/2 → edit_file"));
+            assert!(has_row(&world.visible_rows(), "> 2/2 ▸ edit_file"));
             assert!(has_row(&world.visible_rows(), "- let a = 1;"));
             rig.input.send(key(KeyCode::Char('y'))).expect("input");
             // Unix auto-repeat is indistinguishable from ordinary Press.
@@ -573,7 +735,7 @@ async fn a_second_call_can_be_approved_before_the_first() {
                 driver.commands(),
                 vec![call_decision("tui-0", "ap1", 1, Approval::Approved)]
             );
-            assert!(has_row(&world.visible_rows(), "> 1/2 → write_file"));
+            assert!(has_row(&world.visible_rows(), "> 1/2 ▸ write_file"));
             assert!(has_row(
                 &world.visible_rows(),
                 "edit_file src/main.rs (sent)"
@@ -581,13 +743,13 @@ async fn a_second_call_can_be_approved_before_the_first() {
             assert!(!has_row(&world.nonblank_rows(), "✓ approved"));
 
             run.record(2, EventKind::Command(driver.commands()[0].clone()));
-            settle_until(|| has_row(&world.nonblank_rows(), "✓ approved edit_file")).await;
+            settle_until(|| has_row(&world.nonblank_rows(), "✓ approved: edit_file")).await;
             rig.input
                 .send(key(KeyCode::Char('y')))
                 .expect("repeat after resolve");
             settle().await;
             assert_eq!(driver.commands().len(), 1);
-            assert!(has_row(&world.visible_rows(), "> 1/2 → write_file"));
+            assert!(has_row(&world.visible_rows(), "> 1/2 ▸ write_file"));
             // Focus cannot return to the settled second slot.
             rig.input.send(key(KeyCode::BackTab)).expect("input");
             rig.input.send(key(KeyCode::Char('n'))).expect("input");
@@ -619,14 +781,16 @@ async fn a_second_call_can_be_approved_before_the_first() {
                     Message::text(cadmus_contract::Role::Assistant, "done\n\n"),
                 ]))
                 .expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             assert_eq!(
                 world.nonblank_rows(),
                 vec![
-                    "> change main",
-                    "✓ approved edit_file",
-                    "✗ rejected write_file",
-                    "→ edit_file src/main.rs",
+                    "❯ change main",
+                    "✓ approved: edit_file",
+                    "✗ rejected: write_file",
+                    "▸ edit_file src/main.rs",
+                    "Worked for 0s",
+                    COMPOSER_PLACEHOLDER,
                     "kimi·k2",
                 ]
             );
@@ -705,7 +869,7 @@ async fn a_held_answer_cannot_cross_resync_or_a_new_prompt() {
             }
             tail.send(approval_request(4, "ap2", gated_batch()))
                 .expect("next prompt");
-            settle_until(|| has_row(&world.visible_rows(), "> 1/2 → write_file")).await;
+            settle_until(|| has_row(&world.visible_rows(), "> 1/2 ▸ write_file")).await;
             rig.input
                 .send(key(KeyCode::Char('y')))
                 .expect("held across new prompt");
@@ -714,7 +878,7 @@ async fn a_held_answer_cannot_cross_resync_or_a_new_prompt() {
             drop(tail);
             drop(run.live);
             run.outcome.send(Ok(Vec::new())).expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             quit_and_join(task, &rig.input).await;
         })
         .await;
@@ -761,11 +925,8 @@ async fn an_early_completion_is_visible_while_a_sibling_waits() {
                 .expect("completion");
             settle_until(|| has_row(&world.nonblank_rows(), "changed main.rs")).await;
             assert!(driver.commands().is_empty());
-            assert!(has_row(&world.visible_rows(), "> 1/2 → write_file"));
-            assert!(has_row(
-                &world.nonblank_rows(),
-                "✓ completed edit_file (turn 1, tool call 2)"
-            ));
+            assert!(has_row(&world.visible_rows(), "> 1/2 ▸ write_file"));
+            assert!(has_row(&world.nonblank_rows(), "✓ edit_file"));
             rig.input.send(key(KeyCode::Tab)).expect("arm sibling");
             rig.input
                 .send(key(KeyCode::Char('n')))
@@ -782,7 +943,7 @@ async fn an_early_completion_is_visible_while_a_sibling_waits() {
             run.record(6, EventKind::RunFinished { turns: 1 });
             drop(run.live);
             run.outcome.send(Ok(Vec::new())).expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             assert_eq!(
                 world
                     .nonblank_rows()
@@ -830,8 +991,8 @@ async fn an_in_order_result_is_visible_while_a_sibling_waits() {
             );
             settle_until(|| has_row(&world.nonblank_rows(), "created main.rs")).await;
             assert!(driver.commands().is_empty());
-            assert!(has_row(&world.visible_rows(), "> 2/2 → edit_file"));
-            assert!(has_row(&world.nonblank_rows(), "✓ completed write_file"));
+            assert!(has_row(&world.visible_rows(), "> 2/2 ▸ edit_file"));
+            assert!(has_row(&world.nonblank_rows(), "✓ write_file"));
             rig.input.send(key(KeyCode::Tab)).expect("arm sibling");
             rig.input
                 .send(key(KeyCode::Char('n')))
@@ -841,7 +1002,7 @@ async fn an_in_order_result_is_visible_while_a_sibling_waits() {
             run.record(6, EventKind::RunFinished { turns: 1 });
             drop(run.live);
             run.outcome.send(Ok(Vec::new())).expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             assert_eq!(
                 world
                     .nonblank_rows()
@@ -914,13 +1075,15 @@ async fn n_rejects_the_pending_request() {
             run.outcome
                 .send(Ok(vec![Message::user("change main")]))
                 .expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             assert_eq!(
                 world.nonblank_rows(),
                 vec![
-                    "> change main",
-                    "✗ rejected write_file",
-                    "✗ rejected edit_file",
+                    "❯ change main",
+                    "✗ rejected: write_file",
+                    "✗ rejected: edit_file",
+                    "Worked for 0s",
+                    COMPOSER_PLACEHOLDER,
                     "kimi·k2"
                 ]
             );
@@ -966,7 +1129,7 @@ async fn a_recorded_timeout_resolution_clears_the_dialog() {
             run.live.send(recorded(2, 1, EventKind::Command(Command::ResolveApprovalCall {
                 command_id: "remote".into(), request_id: "ap1".into(), call_index: 0, decision: Approval::Approved,
             }))).expect("feed");
-            settle_until(|| world.visible_rows().iter().any(|row| row.contains("> 2/2 → edit_file"))).await;
+            settle_until(|| world.visible_rows().iter().any(|row| row.contains("> 2/2 ▸ edit_file"))).await;
             run.live.send(recorded(3, 1, EventKind::Command(Command::ResolveApprovalCall {
                 command_id: "duplicate".into(), request_id: "ap1".into(), call_index: 0, decision: Approval::Rejected { comment: None },
             }))).expect("feed");
@@ -1002,9 +1165,9 @@ async fn a_recorded_timeout_resolution_clears_the_dialog() {
                 driver.commands()
             );
             let rows = world.nonblank_rows();
-            assert_eq!(rows.iter().filter(|row| row.contains("✓ approved write_file")).count(), 1);
-            assert!(rows.iter().any(|row| row.contains("✗ rejected edit_file")));
-            assert!(!rows.iter().any(|row| row.contains("✗ rejected write_file")));
+            assert_eq!(rows.iter().filter(|row| row.contains("✓ approved: write_file")).count(), 1);
+            assert!(rows.iter().any(|row| row.contains("✗ rejected: edit_file")));
+            assert!(!rows.iter().any(|row| row.contains("✗ rejected: write_file")));
 
             drop(run.live);
             run.outcome
@@ -1013,7 +1176,7 @@ async fn a_recorded_timeout_resolution_clears_the_dialog() {
                     Message::text(cadmus_contract::Role::Assistant, "done\n\n"),
                 ]))
                 .expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             quit_and_join(task, &rig.input).await;
         })
         .await;
@@ -1034,7 +1197,7 @@ async fn remote_answers_advance_focus_but_stale_or_invalid_records_do_not() {
             run.live
                 .send(approval_request(10, "ap1", gated_batch()))
                 .expect("feed");
-            settle_until(|| has_row(&world.visible_rows(), "> 1/2 → write_file")).await;
+            settle_until(|| has_row(&world.visible_rows(), "> 1/2 ▸ write_file")).await;
             run.record(
                 11,
                 EventKind::Command(Command::ResolveApprovalCall {
@@ -1044,7 +1207,7 @@ async fn remote_answers_advance_focus_but_stale_or_invalid_records_do_not() {
                     decision: Approval::Approved,
                 }),
             );
-            settle_until(|| has_row(&world.visible_rows(), "> 2/2 → edit_file")).await;
+            settle_until(|| has_row(&world.visible_rows(), "> 2/2 ▸ edit_file")).await;
             for (seq, request_id, call_index) in
                 [(10, "ap1", 1), (12, "ap1", usize::MAX), (13, "unknown", 1)]
             {
@@ -1059,7 +1222,7 @@ async fn remote_answers_advance_focus_but_stale_or_invalid_records_do_not() {
                 );
             }
             settle().await;
-            assert!(has_row(&world.visible_rows(), "> 2/2 → edit_file"));
+            assert!(has_row(&world.visible_rows(), "> 2/2 ▸ edit_file"));
             rig.input
                 .send(key(KeyCode::Char('y')))
                 .expect("unarmed press");
@@ -1085,7 +1248,7 @@ async fn remote_answers_advance_focus_but_stale_or_invalid_records_do_not() {
             rig.input.send(key(KeyCode::Char('y'))).expect("input");
             settle().await;
             assert_eq!(driver.commands().len(), 1);
-            assert!(!has_row(&world.nonblank_rows(), "✓ approved edit_file"));
+            assert!(!has_row(&world.nonblank_rows(), "✓ approved: edit_file"));
             drop(run.live);
             run.outcome.send(Ok(Vec::new())).expect("outcome");
             settle().await;
@@ -1153,7 +1316,7 @@ async fn an_attach_mid_wait_seeds_the_dialog_from_the_sync() {
                     Message::text(cadmus_contract::Role::Assistant, "done\n\n"),
                 ]))
                 .expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             quit_and_join(task, &rig.input).await;
         })
         .await;
@@ -1189,14 +1352,14 @@ async fn an_attach_after_a_settle_renders_the_resolution_record() {
                 world
                     .nonblank_rows()
                     .iter()
-                    .any(|row| row.contains("✓ approved write_file"))
+                    .any(|row| row.contains("✓ approved: write_file"))
             })
             .await;
             assert!(
                 world
                     .nonblank_rows()
                     .iter()
-                    .any(|row| row.contains("✗ rejected edit_file")),
+                    .any(|row| row.contains("✗ rejected: edit_file")),
                 "rows: {:?}",
                 world.nonblank_rows()
             );
@@ -1209,7 +1372,7 @@ async fn an_attach_after_a_settle_renders_the_resolution_record() {
                     Message::text(cadmus_contract::Role::Assistant, "done\n\n"),
                 ]))
                 .expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             quit_and_join(task, &rig.input).await;
         })
         .await;
@@ -1270,7 +1433,7 @@ async fn the_modal_leaves_esc_and_the_composer_untouched() {
             run.outcome
                 .send(Ok(vec![Message::user("change main")]))
                 .expect("outcome");
-            settle_until(|| status_row(&world) == "kimi·k2").await;
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             // The dialog died with the run.
             assert!(
                 world
@@ -1278,6 +1441,13 @@ async fn the_modal_leaves_esc_and_the_composer_untouched() {
                     .iter()
                     .all(|row| !row.contains("approve 2 call(s)")),
                 "world: {:?}",
+                world.nonblank_rows()
+            );
+            // The interrupt path lands the same completion row (its report
+            // is Ok — completed work is preserved).
+            assert!(
+                has_row(&world.nonblank_rows(), "Worked for 0s"),
+                "the interrupt lands the completion row too: {:?}",
                 world.nonblank_rows()
             );
 
@@ -1304,7 +1474,9 @@ async fn a_failed_run_marks_the_transcript() {
             run.outcome
                 .send(Err("provider call failed: auth".to_string()))
                 .expect("outcome");
-            settle_until(|| status_row(&world).ends_with("failed")).await;
+            // The failure marker and the note queue behind the drain — wait
+            // for the note (the queue's last row) before counting.
+            settle_until(|| has_row(&world.nonblank_rows(), "Failed after 0s")).await;
 
             let rows = world.nonblank_rows();
             // Exactly one failure marker — the outcome and the feed must
@@ -1314,11 +1486,1184 @@ async fn a_failed_run_marks_the_transcript() {
                 .filter(|row| row.as_str() == "run failed: provider call failed: auth")
                 .count();
             assert_eq!(markers, 1, "rows: {rows:?}");
-            // The state rides the right edge (padding is width-dependent).
-            let status = status_row(&world);
+            // The failure rides the run-status row on its frozen clock,
+            // and the completion note lands once, in the error slot.
+            assert_eq!(run_status_row(&world), "Failed · 0s");
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.as_str() == "Failed after 0s")
+                    .count(),
+                1,
+                "rows: {rows:?}"
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The run high-water hold, characterized under paced emission (ADR-0018's
+/// 2026-09-20 amendment + second amendment): a multi-block turn — two
+/// wrapped paragraphs and a tight list, settling at different times —
+/// streams through several queue+drain cycles. The unstable tail is NEVER
+/// rendered (the `receiving…` row stands in), the stable rows type out at
+/// the paced budget, and the blank-preserving sequence keeps EXACTLY the
+/// source's blank structure: the final scrollback is byte-identical to the
+/// pre-queue model's (emission changes WHEN rows appear, never WHAT
+/// appears).
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+// The full session narrative is the point of the test; splitting it would
+// only scatter the timeline.
+#[allow(clippy::too_many_lines)]
+async fn the_run_high_water_hold_leaves_no_mid_stream_blanks() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "explain the parser");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // 33 tokens wrap to 5 rows at 80 columns. A single trailing
+            // newline keeps the paragraph the open tail: UNSTABLE, so it
+            // renders nowhere — the receiving row carries the liveness
+            // signal, and the band holds at the run's floor (2 → 4).
+            let p1 = tokens(1, 33);
+            run.live
+                .send(delta(1, 1, &format!("{p1}\n")))
+                .expect("feed");
+            settle_until(|| receiving_row(&world)).await;
+            assert_eq!(run_status_row(&world), "Working · 0s");
             assert!(
-                status.starts_with("kimi·k2") && status.ends_with("failed"),
-                "status row: {status:?}"
+                !world
+                    .nonblank_rows()
+                    .iter()
+                    .any(|row| row.contains("token")),
+                "the unstable tail is never rendered: {:?}",
+                world.nonblank_rows()
+            );
+
+            // The blank line closes p1 — it and the new separator queue
+            // (6 rows) while the 2-row p2 holds open, unstable. The rows
+            // type out one per tick; the world then is exactly the flushed
+            // prefix plus the band (receiving on: p2 is live).
+            let p2 = tokens(41, 50);
+            run.live
+                .send(delta(2, 1, &format!("\n{p2}\n")))
+                .expect("feed");
+            settle_until(|| {
+                rows_with_blanks(&world)
+                    == vec![
+                        "❯ explain the parser".to_string(),
+                        String::new(),
+                        tokens(1, 8),
+                        tokens(9, 16),
+                        tokens(17, 24),
+                        tokens(25, 32),
+                        tokens(33, 33),
+                        String::new(), // the markdown separator, flushed with p1
+                        "receiving…".to_string(),
+                        "Working · 0s".to_string(),
+                        BUSY_PLACEHOLDER.to_string(),
+                        "kimi·k2".to_string(),
+                    ]
+            })
+            .await;
+            assert!(
+                !has_row(&world.nonblank_rows(), &tokens(41, 48)),
+                "p2 is still unstable — nowhere: {:?}",
+                world.nonblank_rows()
+            );
+
+            // Two more queue cycles: the list's items arrive in batches
+            // (the field's failing shape); completed items type out while
+            // the open item stays unrendered.
+            run.live
+                .send(delta(3, 1, "\n- one\n- two\n"))
+                .expect("feed");
+            settle_until(|| {
+                let rows = all_rows(&world);
+                has_row(&rows, "- one") && !has_row(&rows, "- two")
+            })
+            .await;
+            run.live.send(delta(4, 1, "- three\n")).expect("feed");
+            settle_until(|| {
+                let rows = all_rows(&world);
+                has_row(&rows, "- two") && !has_row(&rows, "- three")
+            })
+            .await;
+            let source = format!("{p1}\n\n{p2}\n\n- one\n- two\n- three\n");
+            run.live.send(llm_response(5, 1, &source)).expect("feed");
+            settle_until(|| has_row(&all_rows(&world), "- three")).await;
+
+            // The settling-gap wart: the terminal record's Idle light while
+            // the run is still active must read Working across the 1 Hz
+            // tick, never a blank row (the state-truthfulness rule).
+            run.live
+                .send(recorded(6, 1, EventKind::RunFinished { turns: 1 }))
+                .expect("feed");
+            settle_until(|| run_status_row(&world) == "Working · 1s").await;
+
+            // The outcome: the note queues LAST and types out at the
+            // accelerated floor, then the run-status row releases and the
+            // band's last collapse is exactly its one row. The final
+            // scrollback is byte-identical to the pre-queue model's.
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("explain the parser"),
+                    Message::text(cadmus_contract::Role::Assistant, &source),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            assert_eq!(
+                normalize_worked_for(rows_with_blanks(&world)),
+                vec![
+                    "❯ explain the parser".to_string(),
+                    String::new(),
+                    tokens(1, 8),
+                    tokens(9, 16),
+                    tokens(17, 24),
+                    tokens(25, 32),
+                    tokens(33, 33),
+                    String::new(),
+                    tokens(41, 48),
+                    tokens(49, 50),
+                    String::new(),
+                    "- one".to_string(),
+                    "- two".to_string(),
+                    "- three".to_string(),
+                    String::new(), // the completion note's own separator
+                    "Worked for …".to_string(),
+                    COMPOSER_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string(),
+                ],
+                "the outcome: exactly the source's blanks, byte-identical to \
+                 the pre-queue model (visible: {:?}, scrollback: {:?})",
+                world.visible_rows(),
+                world.scrollback_rows()
+            );
+
+            // Back to back: the second run seeds a fresh floor at the
+            // collapsed height (2), grows with its liveness row, and
+            // collapses the same way — the accepted cost is per-run, never
+            // per-block.
+            type_text(&rig, "and the config");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run2 = driver.take_run();
+            run2.live.send(delta(1, 1, "done\n")).expect("feed");
+            settle_until(|| receiving_row(&world)).await;
+            run2.live.send(llm_response(2, 1, "done\n")).expect("feed");
+            run2.live
+                .send(recorded(3, 1, EventKind::RunFinished { turns: 1 }))
+                .expect("feed");
+            // The sealed row types out at the held height; the band shows
+            // one slack row atop it (the floor held at the receiving era's
+            // 4) while the note still waits on the outcome.
+            settle_until(|| {
+                rows_with_blanks(&world).ends_with(&[
+                    "done".to_string(),
+                    String::new(),
+                    "Working · 0s".to_string(),
+                    BUSY_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string(),
+                ])
+            })
+            .await;
+            drop(run2.live);
+            run2.outcome
+                .send(Ok(vec![
+                    Message::user("explain the parser"),
+                    Message::text(cadmus_contract::Role::Assistant, &source),
+                    Message::user("and the config"),
+                    Message::text(cadmus_contract::Role::Assistant, "done\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| {
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .filter(|row| row.starts_with("Worked for"))
+                    .count()
+                    == 2
+            })
+            .await;
+            let mut expected = vec![
+                "❯ explain the parser".to_string(),
+                String::new(),
+                tokens(1, 8),
+                tokens(9, 16),
+                tokens(17, 24),
+                tokens(25, 32),
+                tokens(33, 33),
+                String::new(),
+                tokens(41, 48),
+                tokens(49, 50),
+                String::new(),
+                "- one".to_string(),
+                "- two".to_string(),
+                "- three".to_string(),
+            ];
+            expected.extend([
+                String::new(), // run 1's note separator
+                "Worked for …".to_string(),
+                String::new(), // the second prompt's leading separator
+                "❯ and the config".to_string(),
+                String::new(),
+                "done".to_string(),
+                String::new(), // run 2's note separator
+                "Worked for …".to_string(),
+                COMPOSER_PLACEHOLDER.to_string(),
+                "kimi·k2".to_string(),
+            ]);
+            assert_eq!(
+                normalize_worked_for(rows_with_blanks(&world)),
+                expected,
+                "back to back: zero mid-stream blanks, each run's final \
+                 scrollback byte-identical (visible: {:?}, scrollback: {:?})",
+                world.visible_rows(),
+                world.scrollback_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The hold's two mid-run shrink traps (ADR-0018's 2026-09-20 amendment):
+/// the approval dialog's appear/disappear and a type-ahead composer's
+/// grow/clear. Both raise the content's own want — the floor follows
+/// honestly — and neither may shrink the band when they unwind: the rows
+/// they claimed stay as slack padding inside the band until the outcome's
+/// one collapse, whose Δ accounts for the peak.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
+async fn a_dismissed_dialog_and_a_cleared_type_ahead_never_shrink_the_band() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // The held paragraph (NO trailing blank, so it stays the open
+            // tail) renders nowhere — the receiving row stands in, and the
+            // floor's peak will account for the liveness row.
+            run.live
+                .send(delta(1, 1, "reading main.rs\n"))
+                .expect("feed");
+            settle_until(|| receiving_row(&world)).await;
+
+            // The dialog appears (+its section rows), then the user types
+            // ahead two extra composer rows: the floor rises with both.
+            run.live
+                .send(approval_request(
+                    2,
+                    "ap1",
+                    vec![ToolCall {
+                        id: "c1".into(),
+                        name: "write_file".into(),
+                        arguments: serde_json::json!({
+                            "path": "src/main.rs",
+                            "content": "fn main() {}\n",
+                        }),
+                    }],
+                ))
+                .expect("feed");
+            settle_until(|| has_row(&world.visible_rows(), "approve 1 call(s)")).await;
+            rig.input.send(ctrl('j')).expect("newline");
+            rig.input.send(ctrl('j')).expect("newline");
+            type_text(&rig, "draft");
+            settle().await;
+            // …and unwinds both: the type-ahead is deleted, the decision is
+            // answered and recorded. Neither shrinks the band.
+            for _ in 0..7 {
+                rig.input.send(key(KeyCode::Backspace)).expect("erase");
+            }
+            settle().await;
+            rig.input.send(key(KeyCode::Tab)).expect("arm");
+            rig.input.send(key(KeyCode::Char('y'))).expect("answer");
+            settle().await;
+            assert_eq!(
+                driver.commands(),
+                vec![call_decision("tui-0", "ap1", 0, Approval::Approved)]
+            );
+            run.record(3, EventKind::Command(driver.commands()[0].clone()));
+            settle_until(|| has_row(&world.nonblank_rows(), "✓ approved: write_file")).await;
+
+            // Mid-run: the dialog's and the composer's claimed rows are
+            // slack padding INSIDE the band (above the run-status row) —
+            // not one blank landed above the flushed content.
+            let rows = rows_with_blanks(&world);
+            let content_end = rows
+                .iter()
+                .position(|row| row.starts_with("✓ approved"))
+                .expect("the resolution marker");
+            assert!(
+                rows[..=content_end]
+                    .iter()
+                    .filter(|row| row.is_empty())
+                    .count()
+                    <= 2,
+                "only the markdown separators may be blank above the band: {rows:?}"
+            );
+            let working = rows
+                .iter()
+                .position(|row| row == "Working · 0s")
+                .expect("the run-status row");
+            assert!(
+                rows[content_end + 1..working].iter().all(String::is_empty),
+                "the held slack is one blank run inside the band: {rows:?}"
+            );
+            assert!(
+                working - content_end > 3,
+                "the floor kept the peak: {rows:?}"
+            );
+
+            // The outcome: the floor releases, the band falls from the peak
+            // (10) to the run's resting height (3); the note types out and
+            // the last collapse is the run-status row's one row (3 → 2).
+            run.record(4, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("change main"),
+                    Message::text(cadmus_contract::Role::Assistant, "reading main.rs\n\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            let mut expected = vec![
+                "❯ change main".to_string(),
+                String::new(),
+                "reading main.rs".to_string(),
+                // The resolution marker attaches to the run's tail with no
+                // separator of its own.
+                "✓ approved: write_file".to_string(),
+            ];
+            expected.extend([
+                String::new(), // the note's own separator
+                "Worked for …".to_string(),
+                // No residue: the peak's buffer sits below the band.
+                COMPOSER_PLACEHOLDER.to_string(),
+                "kimi·k2".to_string(),
+            ]);
+            assert_eq!(
+                normalize_worked_for(rows_with_blanks(&world)),
+                expected,
+                "one collapse over the dialog+type-ahead peak, no mid-run \
+                 blanks (visible: {:?}, scrollback: {:?})",
+                world.visible_rows(),
+                world.scrollback_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// A width grow mid-run: the queue's pending rows fold back and re-wrap at
+/// the new width while the typewriter keeps pace — and across the whole
+/// resize+drain, no row is lost and none duplicated (the wrap-agnostic
+/// pin; the exact keep-the-front re-wrap semantics are the transcript unit
+/// tests'). The band holds its height and collapses as ever.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn a_width_grow_mid_run_loses_no_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "refactor the wrap");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // Content streaming: one closed paragraph typing out, a second
+            // closed behind it, a third held open.
+            let p1 = tokens(1, 33);
+            let p2 = tokens(41, 57);
+            let p3 = tokens(61, 77);
+            run.live
+                .send(delta(1, 1, &format!("{p1}\n\n")))
+                .expect("feed");
+            flush_arrival().await;
+            run.live
+                .send(delta(2, 1, &format!("{p2}\n\n{p3}\n")))
+                .expect("feed");
+            flush_arrival().await;
+
+            // The resize lands mid-drain: the queue's pending rows fold
+            // back and re-wrap at 100 columns as they type out.
+            world.resize(24, 100);
+            rig.input
+                .send(Event::Resize(100, 24))
+                .expect("resize event");
+            settle().await;
+
+            let source = format!("{p1}\n\n{p2}\n\n{p3}\n");
+            run.live.send(llm_response(3, 1, &source)).expect("feed");
+            run.record(4, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("refactor the wrap"),
+                    Message::text(cadmus_contract::Role::Assistant, &source),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+
+            // The wrap-agnostic pin: every token landed exactly once, in
+            // order, whatever width its row was wrapped at.
+            let expected: Vec<String> = (1..=33)
+                .chain(41..=57)
+                .chain(61..=77)
+                .map(|i| format!("token{i:04}"))
+                .collect();
+            assert_eq!(
+                token_words(&world),
+                expected,
+                "no row lost, none duplicated across the resize"
+            );
+            // The note types last; the band collapsed to idle.
+            let rows = world.nonblank_rows();
+            let note = rows
+                .iter()
+                .rposition(|row| row.starts_with("Worked for"))
+                .unwrap();
+            let last_token = rows
+                .iter()
+                .rposition(|row| row.contains("token0077"))
+                .unwrap();
+            assert!(note > last_token, "the note typed last: {rows:?}");
+            let visible = visible_content(&world);
+            assert_eq!(
+                visible[visible.len() - 2..],
+                [COMPOSER_PLACEHOLDER.to_string(), "kimi·k2".to_string()],
+                "collapsed to idle: {visible:?}"
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The floor engages before the composer clears: a multi-line prompt's
+/// composer collapse at submit produces no residue either — the band's
+/// claimed rows become the run's floor and the run's slices re-fill them.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn a_multi_line_prompts_composer_collapse_leaves_no_residue() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            // Three composer lines while typing (the idle grow is
+            // unchanged): the band claims 3 + 1 = 4 rows before Enter.
+            type_text(&rig, "line one");
+            rig.input.send(ctrl('j')).expect("newline");
+            type_text(&rig, "line two");
+            rig.input.send(ctrl('j')).expect("newline");
+            type_text(&rig, "line three");
+            settle().await;
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // The submit sequence: the composer collapsed back to one row
+            // but the band held its 4; the prompt block types out at the
+            // paced budget, then the band rests with one slack row atop it.
+            settle_until(|| {
+                rows_with_blanks(&world)
+                    == vec![
+                        "❯ line one".to_string(),
+                        "❯ line two".to_string(),
+                        "❯ line three".to_string(),
+                        String::new(), // the prompt block's own separator
+                        String::new(), // the held slack
+                        "Working · 0s".to_string(),
+                        BUSY_PLACEHOLDER.to_string(),
+                        "kimi·k2".to_string(),
+                    ]
+            })
+            .await;
+
+            // The held paragraph (NO trailing blank) stays the open tail:
+            // the receiving row stands in until the completion note's own
+            // push seals it (a clean RunFinished does not seal), then tail
+            // + note type out and the band collapses.
+            run.live.send(delta(1, 1, "ok\n")).expect("feed");
+            settle_until(|| receiving_row(&world)).await;
+            run.record(2, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("line one\nline two\nline three"),
+                    Message::text(cadmus_contract::Role::Assistant, "ok\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            assert_eq!(
+                normalize_worked_for(rows_with_blanks(&world)),
+                vec![
+                    "❯ line one".to_string(),
+                    "❯ line two".to_string(),
+                    "❯ line three".to_string(),
+                    String::new(),
+                    "ok".to_string(),
+                    String::new(), // the note's own separator
+                    "Worked for …".to_string(),
+                    // No residue: each collapse top-anchors, its buffer
+                    // sits below the band (trimmed with the screen tail).
+                    COMPOSER_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string(),
+                ],
+                "the composer-peak floor's collapses leave no residue \
+                 (visible: {:?})",
+                world.visible_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// Esc releases the floor through the same outcome path: the interrupt's
+/// report is `Ok`, so the band collapses once at the report — no special
+/// case, no extra residue.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn an_interrupt_collapses_the_band_through_the_same_outcome_path() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "stop it");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            // The held paragraph (NO trailing blank) stays the open tail:
+            // it renders nowhere — the receiving row stands in.
+            run.live.send(delta(1, 1, "working hard\n")).expect("feed");
+            settle_until(|| receiving_row(&world)).await;
+            assert!(
+                !has_row(&world.nonblank_rows(), "working hard"),
+                "the unstable tail is never rendered: {:?}",
+                world.nonblank_rows()
+            );
+
+            rig.input.send(key(KeyCode::Esc)).expect("interrupt");
+            settle().await;
+            assert!(
+                matches!(driver.commands().as_slice(), [Command::Interrupt { .. }]),
+                "commands: {:?}",
+                driver.commands()
+            );
+
+            run.record(2, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("stop it"),
+                    Message::text(cadmus_contract::Role::Assistant, "working hard\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            // The tail stays live until the completion note's own push
+            // seals it (a clean RunFinished does not seal), so the
+            // outcome's pump flushes tail + note together; the Δ = 2 buffer
+            // then forms below the band.
+            assert_eq!(
+                normalize_worked_for(rows_with_blanks(&world)),
+                vec![
+                    "❯ stop it".to_string(),
+                    String::new(),
+                    "working hard".to_string(),
+                    String::new(), // the note's own separator
+                    "Worked for …".to_string(),
+                    // No residue: the Δ = 2 buffer sits below the band.
+                    COMPOSER_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string(),
+                ],
+                "the interrupt collapses once, through the outcome path \
+                 (visible: {:?}, scrollback: {:?})",
+                world.visible_rows(),
+                world.scrollback_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The ADR-0011 floor row: the context-usage ratio lands right-aligned
+/// once the first response's usage is known (before that the right side
+/// stays empty), and the binary's label refresh fires at the run outcome —
+/// the cadence the agent's edits land on, never mid-run.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_floor_shows_context_usage_and_refreshes_the_git_label_at_the_outcome() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            // Boot by hand: the refresh closure is the seam under test. The
+            // dirty marker `*` is what the refresh adds.
+            let (input_tx, input) = ScriptedInput::channel();
+            let shell = InlineShell::new(world.backend.clone(), GuardSink::default(), 2)
+                .expect("boot shell");
+            let driver = ScriptDriver::new();
+            let refreshes = Arc::new(Mutex::new(0usize));
+            let refresh = {
+                let refreshes = Arc::clone(&refreshes);
+                move || {
+                    *refreshes.lock().expect("refreshes") += 1;
+                    "kimi·k2 (git:main)*".to_string()
+                }
+            };
+            let mut app = App::new(
+                shell,
+                input,
+                Box::new(driver.clone_handles()),
+                AppConfig {
+                    label: "kimi·k2 (git:main)".into(),
+                    context_window: 128_000,
+                    refresh_label: Some(Box::new(refresh)),
+                    theme: Theme::ansi(),
+                    depth: ColorDepth::Truecolor,
+                },
+            );
+            let rig = Rig {
+                driver,
+                input: input_tx,
+            };
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+            // Nothing known yet: the right side stays empty.
+            assert_eq!(status_row(&world), "kimi·k2 (git:main)");
+
+            type_text(&rig, "hi");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            // 45_000 input + 200 cache-read tokens of a 128k window.
+            run.live
+                .send(recorded(
+                    1,
+                    1,
+                    EventKind::LlmResponse {
+                        message: Message::text(cadmus_contract::Role::Assistant, "hi\n"),
+                        usage: Some(cadmus_contract::Usage {
+                            input: 45_000,
+                            cache_read: 200,
+                            ..Default::default()
+                        }),
+                        finish: cadmus_contract::FinishReason::Stop,
+                        outcome: cadmus_contract::TurnOutcome::Content,
+                        warnings: Vec::new(),
+                    },
+                ))
+                .expect("feed");
+            settle_until(|| status_row(&world).ends_with("45.2k/128k (35%)")).await;
+            let row = status_row(&world);
+            assert!(
+                row.starts_with("kimi·k2 (git:main)"),
+                "the label is unrefreshed mid-run: {row}"
+            );
+            assert_eq!(
+                *refreshes.lock().expect("refreshes"),
+                0,
+                "no refresh before the outcome"
+            );
+
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("hi"),
+                    Message::text(cadmus_contract::Role::Assistant, "hi\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| status_row(&world).starts_with("kimi·k2 (git:main)*")).await;
+            let row = status_row(&world);
+            assert!(row.ends_with("45.2k/128k (35%)"), "usage survives: {row}");
+            assert_eq!(*refreshes.lock().expect("refreshes"), 1);
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The paced typewriter's policy, tick by tick under the paused clock: a
+/// queued block emits at the depth-tiered budget — 4 rows/tick in a
+/// backlog, 2 mid-range, 1 at a trickle — and nothing between ticks.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_typewriter_emits_at_the_paced_rate() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "go");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // An open fence's 30 body lines are stable rows: they queue
+            // whole and drain at the policy's budget. The arrival pump
+            // takes the depth-30 slice (4); each 33 ms tick after takes the
+            // tier's budget — 4, then 2s down to the shallow tier, then 1s.
+            let fence = (1..=30).fold(String::new(), |acc, i| acc + &format!("line {i:02}\n"));
+            run.live
+                .send(delta(1, 1, &format!("```\n{fence}")))
+                .expect("feed");
+            flush_arrival().await;
+            let body_rows = || {
+                all_rows(&world)
+                    .iter()
+                    .filter(|row| row.starts_with("line "))
+                    .count()
+            };
+            let schedule = [4, 8, 10, 12, 14, 16, 18, 20, 22, 24, 25, 26, 27, 28, 29, 30];
+            assert_eq!(
+                body_rows(),
+                schedule[0],
+                "the arrival pump takes the depth-30 budget"
+            );
+            for &expected in &schedule[1..] {
+                tick33().await;
+                assert_eq!(body_rows(), expected, "one tick at the tier's budget");
+            }
+            // The queue is empty: another tick emits nothing.
+            tick33().await;
+            assert_eq!(body_rows(), 30, "drained: the typewriter rests");
+
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle().await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The unstable tail is NEVER rendered: mid-paragraph (no closing blank
+/// yet) the scrollback and the band hold only previously stable rows and
+/// the `receiving…` row — no partial paragraph anywhere, on any tick.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_unstable_tail_is_never_rendered() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "explain");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // A single trailing newline: the paragraph is the open tail.
+            run.live
+                .send(delta(1, 1, "half formed thought\n"))
+                .expect("feed");
+            flush_arrival().await;
+            let rows = world.nonblank_rows();
+            assert!(
+                !has_row(&rows, "half formed"),
+                "the unstable tail is never rendered: {rows:?}"
+            );
+            assert!(
+                receiving_row(&world),
+                "the liveness row stands in: {:?}",
+                world.visible_rows()
+            );
+            assert!(run_status_row(&world).starts_with("Working · "));
+            // Ticks pass: nothing becomes stable, nothing appears.
+            for _ in 0..3 {
+                tick33().await;
+            }
+            assert!(
+                !has_row(&world.nonblank_rows(), "half formed"),
+                "still unstable, still nowhere: {:?}",
+                world.nonblank_rows()
+            );
+
+            // The closing blank makes it stable: it types out at the pace.
+            run.live.send(delta(2, 1, "\n")).expect("feed");
+            flush_arrival().await;
+            assert!(
+                has_row(&world.nonblank_rows(), "half formed thought"),
+                "stable now, typed out: {:?}",
+                world.nonblank_rows()
+            );
+
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle().await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The `receiving…` row's lifecycle: off while a run has nothing pending,
+/// on with the first unstable content, held across the drain (queue
+/// non-empty), gone with the last row.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_receiving_row_lives_and_dies_with_the_drain() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "go");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            // Run active, nothing pending: the row is off.
+            assert!(
+                !receiving_row(&world),
+                "nothing pending: {:?}",
+                world.visible_rows()
+            );
+
+            // An unstable tail turns it on.
+            run.live.send(delta(1, 1, "forming\n")).expect("feed");
+            flush_arrival().await;
+            assert!(receiving_row(&world));
+
+            // The closing blank queues the paragraph (its separator is
+            // lazy — it comes with the NEXT block); the first budget
+            // drains it — the row holds while the queue is non-empty.
+            run.live.send(delta(2, 1, "\nsecond\n\n")).expect("feed");
+            flush_arrival().await;
+            assert!(
+                has_row(&all_rows(&world), "forming"),
+                "the stable row typed out"
+            );
+            assert!(receiving_row(&world), "the separator is still queued");
+
+            // The separator drains: queue empty, but "second" is the open
+            // tail — the row holds on the unstable tail alone.
+            tick33().await;
+            assert!(
+                receiving_row(&world),
+                "the open tail still holds it: {:?}",
+                world.visible_rows()
+            );
+
+            // Closing "second" queues it; the last drain empties the queue
+            // and no tail remains — the row is gone.
+            run.live.send(delta(3, 1, "\n")).expect("feed");
+            flush_arrival().await;
+            assert!(
+                !receiving_row(&world),
+                "drained: the row is gone: {:?}",
+                world.visible_rows()
+            );
+
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle().await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// End-of-run sequencing, pinned: the run's remaining stable rows type out
+/// at the accelerated floor, THEN `Worked for Ns` (the note queues LAST),
+/// and only then does the band collapse — by exactly the run-status row's
+/// one row (3 → 2: the end-of-run composer jump is dead).
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_note_types_last_and_the_band_collapses_by_one_row() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "work it");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // 20 tokens: 3 rows at 80 columns, held as the unstable tail
+            // (a single trailing newline). The arrival pump heats the
+            // frame gate, so the outcome below lands before any drain.
+            let text = tokens(1, 20);
+            run.live
+                .send(delta(1, 1, &format!("{text}\n")))
+                .expect("feed");
+            flush_feed().await;
+            assert!(receiving_row(&world));
+
+            // The seal, the terminal record and the report land together —
+            // real-time yields only: the frame gate is still hot, so no
+            // pump can fire and the whole burst applies before the first
+            // budget does.
+            run.live
+                .send(llm_response(2, 1, &format!("{text}\n")))
+                .expect("feed");
+            run.record(3, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("work it"),
+                    Message::text(cadmus_contract::Role::Assistant, format!("{text}\n")),
+                ]))
+                .expect("outcome");
+            flush_feed().await;
+            advance(Duration::from_millis(10)).await;
+            yield_now().await;
+            yield_now().await;
+
+            // The accelerated budget (4): the 3 content rows typed, the
+            // note's separator too — but the note's TEXT is still queued.
+            let rows = world.nonblank_rows();
+            assert!(has_row(&rows, &tokens(17, 20)), "content typed: {rows:?}");
+            assert!(
+                !has_row(&rows, "Worked for"),
+                "the note types LAST: {rows:?}"
+            );
+            assert!(
+                !receiving_row(&world),
+                "the liveness row is gone with the run"
+            );
+            assert_eq!(run_status_row(&world), "Working · 0s");
+            let visible = visible_content(&world);
+            assert_eq!(
+                visible[visible.len() - 3..],
+                [
+                    "Working · 0s".to_string(),
+                    COMPOSER_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string()
+                ],
+                "the band holds the run's resting height (3): {visible:?}"
+            );
+
+            // The last tick: the note lands, and ONLY THEN the band
+            // collapses — by exactly the run-status row's one row (3 → 2).
+            tick33().await;
+            let rows = world.nonblank_rows();
+            assert!(has_row(&rows, "Worked for 0s"), "the note landed: {rows:?}");
+            assert_eq!(run_status_row(&world), "", "the row released");
+            let visible = visible_content(&world);
+            assert_eq!(
+                visible[visible.len() - 2..],
+                [COMPOSER_PLACEHOLDER.to_string(), "kimi·k2".to_string()],
+                "the collapse was exactly one row (3 → 2): {visible:?}"
+            );
+            assert_eq!(
+                rows_with_blanks(&world),
+                vec![
+                    "❯ work it".to_string(),
+                    String::new(),
+                    tokens(1, 8),
+                    tokens(9, 16),
+                    tokens(17, 20),
+                    String::new(), // the note's own separator
+                    "Worked for 0s".to_string(),
+                    COMPOSER_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string(),
+                ],
+                "byte-identical to the pre-queue model: {:?}",
+                rows_with_blanks(&world)
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// Esc's impatient path: the queued backlog dumps whole at the next pump —
+/// no 33 ms tick waits — then the note lands right behind it and the band
+/// collapses.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn an_interrupt_dumps_the_queue_instantly() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "stop it");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // 12 stable rows queue (an open fence's body); the arrival
+            // pump takes 2 (the depth-12 budget), 10 wait on the cadence.
+            let fence = (1..=12).fold(String::new(), |acc, i| acc + &format!("line {i:02}\n"));
+            run.live
+                .send(delta(1, 1, &format!("```\n{fence}")))
+                .expect("feed");
+            flush_arrival().await;
+            let body_rows = || {
+                all_rows(&world)
+                    .iter()
+                    .filter(|row| row.starts_with("line "))
+                    .count()
+            };
+            assert_eq!(body_rows(), 2, "the paced arrival budget");
+
+            // Esc: everything dumps whole — a 10 ms demand frame, NOT a
+            // 33 ms tick, puts all 12 rows out.
+            rig.input.send(key(KeyCode::Esc)).expect("interrupt");
+            flush_arrival().await;
+            assert_eq!(body_rows(), 12, "the backlog dumped instantly");
+            assert!(
+                matches!(driver.commands().as_slice(), [Command::Interrupt { .. }]),
+                "commands: {:?}",
+                driver.commands()
+            );
+
+            // The note lands right behind it (the dump rides the run_end
+            // too), then the collapse — again with no 33 ms tick waited.
+            run.record(2, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![Message::user("stop it")]))
+                .expect("outcome");
+            flush_arrival().await;
+            assert!(
+                has_row(&world.nonblank_rows(), "Worked for 0s"),
+                "the note landed instantly: {:?}",
+                world.nonblank_rows()
+            );
+            let visible = visible_content(&world);
+            assert_eq!(
+                visible[visible.len() - 2..],
+                [COMPOSER_PLACEHOLDER.to_string(), "kimi·k2".to_string()],
+                "collapsed: {visible:?}"
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// A first attach's replayed history bypasses the pacing entirely: the
+/// rebuild's rows insert whole in the sync handler — zero virtual time
+/// passes, so the paced drain never got a tick.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn an_attach_replay_bypasses_the_pacing() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            // The attach baseline carries a 3-row assistant message (20
+            // tokens at 80 columns) from a previous session.
+            let mut sync = sync_with_pending(Vec::new(), Vec::new());
+            sync.history.messages = vec![Message::text(
+                cadmus_contract::Role::Assistant,
+                tokens(1, 20),
+            )];
+            *driver.baseline.lock().expect("baseline") = Some(sync);
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "replay me");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            // Real-time yields only — NOT a virtual millisecond: the whole
+            // replay is already there (paced emission would have put out
+            // one budget at most).
+            flush_feed().await;
+            assert_eq!(
+                world.nonblank_rows(),
+                vec![
+                    "❯ replay me".to_string(),
+                    tokens(1, 8),
+                    tokens(9, 16),
+                    tokens(17, 20),
+                    "Working · 0s".to_string(),
+                    BUSY_PLACEHOLDER.to_string(),
+                    "kimi·k2".to_string(),
+                ],
+                "the replay inserted whole, no pacing tick: {:?}",
+                world.nonblank_rows()
+            );
+
+            let run = driver.take_run();
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle().await;
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The TERM=dumb motion profile (`paced: false`): every pump drains the
+/// whole queue — the typewriter is off, emission is instant.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_dumb_terminal_profile_emits_instantly() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot_unpaced(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "go");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // 10 stable rows queue; the arrival pump drains them ALL — no
+            // 33 ms tick involved.
+            let fence = (1..=10).fold(String::new(), |acc, i| acc + &format!("line {i:02}\n"));
+            run.live
+                .send(delta(1, 1, &format!("```\n{fence}")))
+                .expect("feed");
+            flush_arrival().await;
+            let body_rows = all_rows(&world)
+                .iter()
+                .filter(|row| row.starts_with("line "))
+                .count();
+            assert_eq!(body_rows, 10, "unpaced: instant emission");
+
+            run.live
+                .send(llm_response(2, 1, &format!("```\n{fence}```\n")))
+                .expect("feed");
+            run.record(3, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            let visible = visible_content(&world);
+            assert_eq!(
+                visible[visible.len() - 2..],
+                [COMPOSER_PLACEHOLDER.to_string(), "kimi·k2".to_string()],
+                "collapsed: {visible:?}"
             );
 
             quit_and_join(task, &rig.input).await;
