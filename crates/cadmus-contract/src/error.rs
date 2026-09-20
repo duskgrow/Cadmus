@@ -9,9 +9,15 @@ pub enum ModelError {
     #[error("rate limited{}", retry_after.map(|d| format!(" (retry after {d:?})")).unwrap_or_default())]
     RateLimited { retry_after: Option<Duration> },
     /// 5xx and gateway failures; `retriable` distinguishes "try again" from
-    /// "this request will never succeed".
-    #[error("provider server error (HTTP {status})")]
-    Server { status: u16, retriable: bool },
+    /// "this request will never succeed". `detail` carries the provider's own
+    /// reason (the `error.message` of the JSON error body, or a bounded raw
+    /// excerpt) — the status code alone never tells overload from outage.
+    #[error("provider server error (HTTP {status}){}", detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
+    Server {
+        status: u16,
+        retriable: bool,
+        detail: Option<String>,
+    },
     #[error("network error: {0}")]
     Network(String),
     /// The wire did not conform to the OpenAI-compatible dialect — a strong

@@ -62,12 +62,32 @@ fn classify_http(status: u16, body: &str) -> ModelError {
         _ if status >= 500 => ModelError::Server {
             status,
             retriable: true,
+            detail: detail(body),
         },
         _ => ModelError::Server {
             status,
             retriable: false,
+            detail: detail(body),
         },
     }
+}
+
+/// The provider's own reason for a failed request: the `error.message` of
+/// the JSON error body when there is one (the OpenAI-compatible error
+/// shape), else a bounded raw excerpt — gateways answer HTML. `None` for an
+/// empty body (the status line then says everything there is to say).
+fn detail(body: &str) -> Option<String> {
+    if body.trim().is_empty() {
+        return None;
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(|message| message.as_str().map(str::to_string))
+        });
+    Some(parsed.map_or_else(|| excerpt(body), |message| excerpt(&message)))
 }
 
 fn classify_stream_error(body: &serde_json::Value) -> ModelError {
@@ -99,7 +119,8 @@ mod tests {
             classify_http(500, "boom"),
             ModelError::Server {
                 status: 500,
-                retriable: true
+                retriable: true,
+                ..
             }
         ));
         assert!(matches!(
@@ -110,5 +131,35 @@ mod tests {
             classify_http(400, "bad json"),
             ModelError::InvalidRequest(_)
         ));
+    }
+
+    #[test]
+    fn server_errors_carry_the_providers_reason() {
+        // The OpenAI-compatible error shape: the message field wins.
+        let body =
+            r#"{"error":{"message":"Service is too busy.","type":"service_unavailable_error"}}"#;
+        let ModelError::Server { detail, .. } = classify_http(503, body) else {
+            panic!("a 503 classifies as Server")
+        };
+        assert_eq!(detail.as_deref(), Some("Service is too busy."));
+        assert_eq!(
+            classify_http(503, body).to_string(),
+            "provider server error (HTTP 503): Service is too busy."
+        );
+        // A gateway's HTML error page degrades to the bounded raw excerpt.
+        let ModelError::Server { detail, .. } = classify_http(502, "<html>Bad Gateway</html>")
+        else {
+            panic!("a 502 classifies as Server")
+        };
+        assert_eq!(detail.as_deref(), Some("<html>Bad Gateway</html>"));
+        // An empty body leaves the status line to speak for itself.
+        let ModelError::Server { detail, .. } = classify_http(500, "") else {
+            panic!("a 500 classifies as Server")
+        };
+        assert_eq!(detail, None);
+        assert_eq!(
+            classify_http(500, "").to_string(),
+            "provider server error (HTTP 500)"
+        );
     }
 }
