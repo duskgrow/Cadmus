@@ -501,6 +501,67 @@ expression: "render_document(source, 60, highlighter())"
     Line {
         spans: [
             Span {
+                text: "-----",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: " | ",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+            Span {
+                text: "-----",
+                style: Style {
+                    fg: Some(
+                        Slot(
+                            TextSubtle,
+                        ),
+                    ),
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
+        ],
+    },
+    Line {
+        spans: [
+            Span {
                 text: "alpha",
                 style: Style {
                     fg: None,

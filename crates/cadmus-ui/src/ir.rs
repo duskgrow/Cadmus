@@ -114,6 +114,13 @@ impl Line {
         }
     }
 
+    /// A single-span line styled with a semantic slot.
+    pub fn slotted(text: impl Into<String>, slot: Slot) -> Self {
+        Self {
+            spans: vec![Span::slotted(text, slot)],
+        }
+    }
+
     /// The display width of the line's text (styles are zero-width).
     #[must_use]
     pub fn width(&self) -> usize {
@@ -127,5 +134,25 @@ impl Line {
     #[must_use]
     pub fn text(&self) -> String {
         self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    /// Whether the line contains no text (all spans are empty, or spans is empty).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spans.iter().all(|span| span.text.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_is_empty() {
+        assert!(Line::default().is_empty());
+        assert!(Line::plain("").is_empty());
+        assert!(Line::slotted("", Slot::TextSubtle).is_empty());
+        assert!(!Line::plain("hello").is_empty());
+        assert!(!Line::plain(" ").is_empty());
     }
 }

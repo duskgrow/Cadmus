@@ -124,6 +124,67 @@ expression: "(render.flushable_len(), render.live_lines())"
         Line {
             spans: [
                 Span {
+                    text: "-",
+                    style: Style {
+                        fg: Some(
+                            Slot(
+                                TextSubtle,
+                            ),
+                        ),
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: " | ",
+                    style: Style {
+                        fg: Some(
+                            Slot(
+                                TextSubtle,
+                            ),
+                        ),
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+                Span {
+                    text: "-",
+                    style: Style {
+                        fg: Some(
+                            Slot(
+                                TextSubtle,
+                            ),
+                        ),
+                        bg: None,
+                        mods: Modifiers {
+                            bold: false,
+                            dim: false,
+                            italic: false,
+                            underline: false,
+                            inverse: false,
+                            strikethrough: false,
+                        },
+                    },
+                },
+            ],
+        },
+        Line {
+            spans: [
+                Span {
                     text: "1",
                     style: Style {
                         fg: None,

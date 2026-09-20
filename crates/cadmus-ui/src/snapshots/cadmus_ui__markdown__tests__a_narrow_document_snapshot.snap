@@ -1,5 +1,6 @@
 ---
 source: crates/cadmus-ui/src/markdown.rs
+assertion_line: 2217
 expression: "render_document(source, 12, highlighter())"
 ---
 [
@@ -58,6 +59,21 @@ expression: "render_document(source, 12, highlighter())"
     },
     Line {
         spans: [
+            Span {
+                text: "  ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
             Span {
                 text: "value",
                 style: Style {
@@ -164,6 +180,21 @@ expression: "render_document(source, 12, highlighter())"
     },
     Line {
         spans: [
+            Span {
+                text: "  ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    mods: Modifiers {
+                        bold: false,
+                        dim: false,
+                        italic: false,
+                        underline: false,
+                        inverse: false,
+                        strikethrough: false,
+                    },
+                },
+            },
             Span {
                 text: "value",
                 style: Style {

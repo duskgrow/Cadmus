@@ -37,6 +37,22 @@
 //! line by line (except a trailing maybe-closing fence line, which could
 //! still turn out to be the zero-row closer); headings and thematic breaks
 //! are stable the moment they parse. Everything flushes at `finalize`.
+//!
+//! Blank lines between blocks are LAZY SEPARATORS, never eager: a block
+//! prepends exactly one empty line to its rendered lines when it first
+//! yields content while earlier output exists — where "earlier output"
+//! counts a block's flushed lines too (fully flushed blocks stay as extent
+//! anchors, and a block re-rendered behind them still gets its separator).
+//! Duplicates are never created, so no collapsing pass exists. Non-fence
+//! renders drop structural leading/trailing blanks at assembly (spacing
+//! between blocks is owned exclusively by the separator; internal blanks
+//! stay verbatim); fence bodies are fully verbatim — a blank line inside a
+//! code fence is content, including a trailing one. Consequence: a fence
+//! whose body ends blank, followed by another block, honestly renders two
+//! consecutive empty lines (the fence's content blank plus the separator).
+//! The separator belongs to the later block: it sits at position 0 of that
+//! block's lines, materializes with the block's first content line, and
+//! once materialized never un-materializes (the flush prefix counts on it).
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -397,8 +413,12 @@ struct Block {
     end: usize,
     kind: Kind,
     closed: bool,
-    /// A separator line precedes the content (every block but the first).
-    /// It flushes with the earlier block (item 4.6).
+    /// The lazy separator: true once this block's conceptual lines begin
+    /// with the one blank line separating it from earlier output. It
+    /// materializes when the block first yields content while earlier
+    /// output exists (never eagerly, never at the output start), and once
+    /// materialized it never un-materializes — it is line 0 of `lines` and
+    /// counts toward `flushed`, so the flush prefix depends on it staying.
     sep: bool,
     /// Lines flushed out of this block since `start` (monotonic): the live
     /// `lines` are the conceptual render minus its leading `flushed` lines,
@@ -414,6 +434,25 @@ struct Block {
     open_flushable: usize,
     /// Open-fence fast-path state (item 4.3).
     fence: Option<FenceState>,
+}
+
+impl Block {
+    /// Materialize the lazy separator when the block first yields content
+    /// while earlier output exists. No-op once materialized. A block with
+    /// `flushed > 0` yielded lines before, so an un-materialized separator
+    /// then would mean earlier output appeared above an existing block —
+    /// unreachable (earlier blocks are closed and only drain); emit
+    /// without a separator rather than rewrite the flushed prefix.
+    fn materialize_sep(&mut self, prev_nonempty: bool, has_content: bool) {
+        if self.sep || !prev_nonempty || !has_content {
+            return;
+        }
+        debug_assert_eq!(
+            self.flushed, 0,
+            "a separator materializing after flushed lines would rewrite the flush prefix"
+        );
+        self.sep = self.flushed == 0;
+    }
 }
 
 /// Incremental state of one open fence.
@@ -446,19 +485,49 @@ impl Content {
 /// Assemble a block's live lines from a full content render, realigning to
 /// the flushed prefix: the regenerated leading `flushed` lines are dropped
 /// again so already-flushed rows never reappear (item 4.7).
+///
+/// The blank-line contract (module docs): unless `verbatim` (fence bodies),
+/// leading and trailing empty lines are structural and dropped — spacing
+/// between blocks is owned exclusively by the lazy separator, so a block's
+/// lines never end empty and never open empty; internal blanks stay as the
+/// renderer emitted them. Fences pass `verbatim = true`: blank body lines
+/// are content, trailing ones included. The separator prepends only when
+/// the block actually yields content — an empty render emits no dangling
+/// blank. The separator counts as flushable: it flushes ahead of the
+/// block's held content as soon as the prefix reaches it (item 4.6).
 fn assemble(
     sep: bool,
     mut content: Vec<Line>,
     open_flushable: usize,
     flushed: usize,
+    verbatim: bool,
 ) -> (Vec<Line>, usize) {
-    if sep {
-        content.insert(0, Line::default());
+    let mut open_flushable = open_flushable;
+    if !verbatim {
+        let first = content.iter().position(|line| !line.is_empty());
+        match first {
+            None => {
+                content.clear();
+                open_flushable = 0;
+            }
+            Some(first) => {
+                let last = content
+                    .iter()
+                    .rposition(|line| !line.is_empty())
+                    .unwrap_or(first);
+                content.truncate(last + 1);
+                content.drain(..first);
+                open_flushable = open_flushable.saturating_sub(first).min(content.len());
+            }
+        }
     }
-    let conceptual = usize::from(sep) + open_flushable;
+    if sep && !content.is_empty() {
+        content.insert(0, Line::default());
+        open_flushable += 1;
+    }
     let drop = flushed.min(content.len());
     content.drain(..drop);
-    (content, conceptual.saturating_sub(drop))
+    (content, open_flushable.saturating_sub(drop))
 }
 
 /// Reconcile the cache with a fresh parse: clean prefix (extent and kind
@@ -499,11 +568,13 @@ fn reconcile(
                 .get(&drafts[i].start)
                 .map_or(&[][..], Vec::as_slice);
             let closed = closed_at(src, drafts, i, tail_open);
+            let prev_nonempty = prev_output_nonempty(&blocks[..i]);
             update_block(
                 &mut blocks[i],
                 &drafts[i],
                 events,
                 closed,
+                prev_nonempty,
                 width,
                 highlighter,
             );
@@ -515,15 +586,16 @@ fn reconcile(
         for (j, draft) in drafts.iter().enumerate().skip(i) {
             let events = events_map.get(&draft.start).map_or(&[][..], Vec::as_slice);
             let closed = closed_at(src, drafts, j, tail_open);
-            blocks.push(render_block(
-                j,
+            let new_block = render_block(
+                blocks.as_slice(),
                 draft,
                 events,
                 closed,
                 pending_flushed,
                 width,
                 highlighter,
-            ));
+            );
+            blocks.push(new_block);
         }
     }
     if drafts.len() < blocks.len() {
@@ -548,9 +620,19 @@ fn closed_at(src: &str, drafts: &[Draft], i: usize, tail_open: bool) -> bool {
         }
 }
 
+/// Whether earlier blocks have produced any output line — flushed lines
+/// count: fully flushed blocks stay as extent anchors, and a block
+/// (re-)rendered behind them still gets its separator, so the anchored
+/// `flushed` bookkeeping stays aligned (module docs, lazy separators).
+fn prev_output_nonempty(prev_blocks: &[Block]) -> bool {
+    prev_blocks
+        .iter()
+        .any(|block| block.flushed > 0 || !block.lines.is_empty())
+}
+
 /// Fresh-render one block.
 fn render_block(
-    index: usize,
+    prev_blocks: &[Block],
     draft: &Draft,
     events: &[Event<'static>],
     closed: bool,
@@ -558,10 +640,19 @@ fn render_block(
     width: u16,
     highlighter: &Highlighter,
 ) -> Block {
-    let sep = index > 0;
     let content = render_content(&draft.kind, events, closed, width, highlighter);
     let flushed = pending_flushed.remove(&draft.start).unwrap_or(0);
-    let (lines, open_flushable) = assemble(sep, content.lines, content.open_flushable, flushed);
+    // The lazy separator materializes with the block's first content, and
+    // only when earlier output exists — never at the output start.
+    let sep = !content.lines.is_empty() && prev_output_nonempty(prev_blocks);
+    let verbatim = matches!(draft.kind, Kind::Fence { .. });
+    let (lines, open_flushable) = assemble(
+        sep,
+        content.lines,
+        content.open_flushable,
+        flushed,
+        verbatim,
+    );
     Block {
         start: draft.start,
         end: draft.end,
@@ -584,6 +675,7 @@ fn update_block(
     draft: &Draft,
     events: &[Event<'static>],
     closed: bool,
+    prev_nonempty: bool,
     width: u16,
     highlighter: &Highlighter,
 ) {
@@ -592,14 +684,19 @@ fn update_block(
         // Catches the body up incrementally; when only the closer line
         // arrived there is nothing new (it renders zero rows) and the
         // fast-path lines stand — identical to a fresh `highlight_snippet`.
-        fence_update(block, events, highlighter);
+        fence_update(block, events, highlighter, prev_nonempty);
     } else {
         let content = render_content(&block.kind, events, closed, width, highlighter);
+        // Tail growth can be the block's first content (e.g. an empty
+        // quote gaining a line): the separator materializes now, lazily.
+        block.materialize_sep(prev_nonempty, !content.lines.is_empty());
+        let verbatim = matches!(block.kind, Kind::Fence { .. });
         let (lines, open_flushable) = assemble(
             block.sep,
             content.lines,
             content.open_flushable,
             block.flushed,
+            verbatim,
         );
         block.lines = lines;
         block.open_flushable = open_flushable;
@@ -695,22 +792,41 @@ fn render_content(
 /// Advance an open fence (item 4.3): new complete body lines continue the
 /// syntect state; a maybe-closing line among them forces a full body
 /// re-render. Plain mode (unknown language) appends literal lines and never
-/// needs the fallback.
-fn fence_update(block: &mut Block, events: &[Event<'static>], highlighter: &Highlighter) {
+/// needs the fallback. Body lines are verbatim content — blank lines
+/// included; nothing here trims, collapses, or skips them.
+fn fence_update(
+    block: &mut Block,
+    events: &[Event<'static>],
+    highlighter: &Highlighter,
+    prev_nonempty: bool,
+) {
     let Kind::Fence { lang } = &block.kind else {
         return;
     };
+    let lang = lang.clone();
     let body = code_body(events);
     let total = body.lines().count();
-    let Some(state) = &mut block.fence else {
+    let Some(state) = &block.fence else {
         return;
     };
     if total <= state.body_lines {
         return;
     }
-    let lang = lang.clone();
-    let new: Vec<&str> = body.lines().skip(state.body_lines).collect();
+    let rendered_so_far = state.body_lines;
+    let new: Vec<&str> = body.lines().skip(rendered_so_far).collect();
     let fallback = new.iter().any(|line| maybe_closing(line));
+    // The first body line is the fence's first content: the separator
+    // materializes ahead of it. An empty body renders nothing — no
+    // dangling separator.
+    block.materialize_sep(prev_nonempty, true);
+    if !fallback && block.sep && block.lines.is_empty() && block.flushed == 0 {
+        // The append arms maintain the conceptual layout by hand; the
+        // fallback re-renders through `assemble`, which owns the separator.
+        block.lines.push(Line::default());
+    }
+    let Some(state) = &mut block.fence else {
+        return;
+    };
     match &mut state.hl {
         Some(hl) if !fallback => {
             for line in new {
@@ -727,7 +843,7 @@ fn fence_update(block: &mut Block, events: &[Event<'static>], highlighter: &High
         }
         _ => {
             let (rendered, fresh_state) = replay_fence(&lang, &body, highlighter);
-            let (lines, _) = assemble(block.sep, rendered, 0, block.flushed);
+            let (lines, _) = assemble(block.sep, rendered, 0, block.flushed, true);
             block.lines = lines;
             *state = fresh_state;
         }
@@ -1007,12 +1123,28 @@ fn render_table(events: &[Event<'static>], cols: usize, width: u16) -> Vec<Line>
     if total > usize::from(width) {
         return transpose_table(&header, &rows, cols);
     }
-    let mut lines = Vec::with_capacity(rows.len() + 1);
-    lines.push(flat_row(&header, &widths));
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+    if !header.is_empty() {
+        lines.push(flat_row(&header, &widths));
+        lines.push(flat_divider(&widths));
+    }
     for row in &rows {
         lines.push(flat_row(row, &widths));
     }
     lines
+}
+
+/// One subtle divider row under the table header: cells are dashes
+/// repeated to column width, joined with a subtle ` | `.
+fn flat_divider(widths: &[usize]) -> Line {
+    let mut spans: Vec<Span> = Vec::new();
+    for (ci, width) in widths.iter().enumerate() {
+        if ci > 0 {
+            spans.push(Span::slotted(" | ", Slot::TextSubtle));
+        }
+        spans.push(Span::slotted("-".repeat(*width), Slot::TextSubtle));
+    }
+    Line::from_spans(spans)
 }
 
 /// One table row: cells padded to column width, joined with a subtle
@@ -1041,13 +1173,17 @@ fn flat_row(cells: &[Line], widths: &[usize]) -> Line {
 }
 
 /// The narrow fit: one logical line per cell, `header: cell`, records
-/// back-to-back (item 4.4 — this doubles as the table's streaming
-/// presentation once settled). Cell inline styling is preserved.
+/// formatted compactly with continuation fields indented by two spaces
+/// (item 4.4 — this doubles as the table's streaming presentation once settled).
+/// Cell inline styling is preserved.
 fn transpose_table(header: &[Line], rows: &[Vec<Line>], cols: usize) -> Vec<Line> {
     let mut lines = Vec::new();
     for row in rows {
         for ci in 0..cols {
             let mut spans: Vec<Span> = Vec::new();
+            if ci > 0 {
+                spans.push(Span::plain("  "));
+            }
             if let Some(head) = header.get(ci) {
                 spans.extend(head.spans.iter().cloned());
             }
@@ -1556,7 +1692,7 @@ mod tests {
         let mut stream = MarkdownStream::new();
         stream.push_delta("| a |\n| --- |\n");
         let (live, flushable) = state(&mut stream, 80);
-        assert_eq!(live, vec!["a"]);
+        assert_eq!(live, vec!["a", "-"]);
         assert_eq!(flushable, 0, "the header row is held");
         stream.push_delta("| 1 |\n");
         let (_, flushable) = state(&mut stream, 80);
@@ -1565,9 +1701,9 @@ mod tests {
         // as another row, per GFM).
         stream.push_delta("\nafter\n");
         let (live, flushable) = state(&mut stream, 80);
-        assert_eq!(live, vec!["a", "1", "", "after"]);
+        assert_eq!(live, vec!["a", "-", "1", "", "after"]);
         assert_eq!(
-            flushable, 3,
+            flushable, 4,
             "the settled table flushes; the open paragraph holds"
         );
     }
@@ -1577,7 +1713,7 @@ mod tests {
         let mut stream = MarkdownStream::new();
         stream.push_delta("done\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n");
         let (live, flushable) = state(&mut stream, 80);
-        assert_eq!(live, vec!["done", "", "a | b", "1 | 2"]);
+        assert_eq!(live, vec!["done", "", "a | b", "- | -", "1 | 2"]);
         assert_eq!(flushable, 2, "the held table blocks its own lines only");
     }
 
@@ -1775,7 +1911,7 @@ mod tests {
             80,
             highlighter(),
         );
-        assert_eq!(texts(&lines), vec!["a   | bb", "ccc | d"]);
+        assert_eq!(texts(&lines), vec!["a   | bb", "--- | --", "ccc | d"]);
         let header = &lines[0];
         assert!(header.spans[0].style.mods.bold);
         let sep = header
@@ -1784,6 +1920,11 @@ mod tests {
             .find(|span| span.text == " | ")
             .expect("the join separator span");
         assert_eq!(sep.style.fg, Some(Color::Slot(Slot::TextSubtle)));
+        let divider = &lines[1];
+        assert_eq!(
+            divider.spans[0].style.fg,
+            Some(Color::Slot(Slot::TextSubtle))
+        );
     }
 
     #[test]
@@ -1792,7 +1933,7 @@ mod tests {
         let lines = render_document(source, 12, highlighter());
         assert_eq!(
             texts(&lines),
-            vec!["name: alpha", "value: 1", "name: beta", "value: 200"]
+            vec!["name: alpha", "  value: 1", "name: beta", "  value: 200"]
         );
         assert!(
             lines[0].spans[0].style.mods.bold,
@@ -1807,7 +1948,7 @@ mod tests {
             4,
             highlighter(),
         );
-        assert_eq!(texts(&lines), vec!["h: x", "g: y"]);
+        assert_eq!(texts(&lines), vec!["h: x", "  g: y"]);
         assert!(
             lines[0]
                 .spans
@@ -1932,9 +2073,9 @@ mod tests {
         let mut stream = MarkdownStream::new();
         stream.push_delta("| abc | def |\n| --- | --- |\n| 1 | 2 |\n\n");
         let (live, _) = state(&mut stream, 80);
-        assert_eq!(live, vec!["abc | def", "1   | 2"]);
+        assert_eq!(live, vec!["abc | def", "--- | ---", "1   | 2"]);
         let (live, _) = state(&mut stream, 8);
-        assert_eq!(live, vec!["abc: 1", "def: 2"]);
+        assert_eq!(live, vec!["abc: 1", "  def: 2"]);
     }
 
     #[test]
@@ -1946,6 +2087,193 @@ mod tests {
         stream.finalize(source);
         let streamed = stream.render(60, highlighter()).live_lines().to_vec();
         assert_eq!(direct, streamed);
+    }
+
+    #[test]
+    fn assemble_trims_structural_blanks_and_realigins() {
+        // Non-fence renders drop leading/trailing blanks; internal blanks
+        // stay verbatim (spacing between blocks is the separator's job).
+        let content = vec![
+            Line::default(),
+            Line::plain("a"),
+            Line::default(),
+            Line::default(),
+            Line::plain("b"),
+            Line::default(),
+        ];
+        let (lines, open_flushable) = assemble(false, content, 4, 0, false);
+        assert_eq!(texts(&lines), vec!["a", "", "", "b"]);
+        assert_eq!(open_flushable, 3);
+
+        // An all-blank render yields nothing — and no dangling separator.
+        let (lines, open_flushable) =
+            assemble(true, vec![Line::default(), Line::default()], 0, 0, false);
+        assert!(lines.is_empty());
+        assert_eq!(open_flushable, 0);
+
+        // Fences are verbatim: blank runs are content, never trimmed.
+        let content = vec![
+            Line::plain("a"),
+            Line::default(),
+            Line::default(),
+            Line::plain("b"),
+            Line::default(),
+        ];
+        let (lines, _) = assemble(false, content, 0, 0, true);
+        assert_eq!(texts(&lines), vec!["a", "", "", "b", ""]);
+
+        // The separator prepends exactly one blank and flushes ahead of
+        // held content; the flushed-prefix drop stays accurate across it.
+        let (lines, open_flushable) = assemble(true, vec![Line::plain("x")], 0, 0, false);
+        assert_eq!(texts(&lines), vec!["", "x"]);
+        assert_eq!(open_flushable, 1);
+        let (lines, open_flushable) = assemble(true, vec![Line::plain("x")], 0, 1, false);
+        assert_eq!(texts(&lines), vec!["x"]);
+        assert_eq!(open_flushable, 0);
+    }
+
+    #[test]
+    fn the_separator_materializes_with_the_later_blocks_first_content_line() {
+        let mut stream = MarkdownStream::new();
+        stream.push_delta("para\n\n```rust\n");
+        let (live, flushable) = state(&mut stream, 80);
+        // An empty open fence renders nothing — no dangling separator.
+        assert_eq!(live, vec!["para"]);
+        assert_eq!(flushable, 1);
+        stream.push_delta("let a = 1;\n");
+        let (live, flushable) = state(&mut stream, 80);
+        // The separator arrives with the first content line, as one batch.
+        assert_eq!(live, vec!["para", "", "let a = 1;"]);
+        assert_eq!(flushable, 3);
+    }
+
+    #[test]
+    fn the_separator_materializes_on_tail_growth_into_an_empty_block() {
+        // The same lazy materialization through the non-fence update path:
+        // an empty open quote renders nothing until its first line lands.
+        let mut stream = MarkdownStream::new();
+        stream.push_delta("para\n\n>\n");
+        let (live, _) = state(&mut stream, 80);
+        assert_eq!(live, vec!["para"]);
+        stream.push_delta("> quoted\n");
+        let (live, _) = state(&mut stream, 80);
+        assert_eq!(live, vec!["para", "", "> quoted"]);
+    }
+
+    #[test]
+    fn no_separator_at_the_output_start() {
+        // The first block never emits a leading blank, however many blank
+        // lines the source starts with.
+        let lines = render_document("\n\n\n# Head\n\npara\n", 80, highlighter());
+        assert_eq!(texts(&lines), vec!["Head", "", "para"]);
+    }
+
+    #[test]
+    fn multiple_blank_lines_between_blocks_yield_one_separator() {
+        let source = "# Heading 1\n\n\n\n\nParagraph 1\n\n\n\n\n| col |\n| --- |\n| val |\n\n\n\n\nParagraph 2\n";
+        let lines = render_document(source, 80, highlighter());
+        let t = texts(&lines);
+        assert_eq!(
+            t,
+            vec![
+                "Heading 1",
+                "",
+                "Paragraph 1",
+                "",
+                "col",
+                "---",
+                "val",
+                "",
+                "Paragraph 2"
+            ]
+        );
+        // Source blank runs never multiply the separator.
+        for w in t.windows(2) {
+            assert!(
+                !(w[0].is_empty() && w[1].is_empty()),
+                "consecutive empty lines found"
+            );
+        }
+    }
+
+    #[test]
+    fn live_output_never_ends_with_a_structural_empty_line() {
+        // Trailing structural blanks never render: the separator logic
+        // re-emits spacing when the next block arrives.
+        let mut stream = MarkdownStream::new();
+        stream.push_delta("alpha\n");
+        let (live, _) = state(&mut stream, 80);
+        assert_eq!(live, vec!["alpha"]);
+        stream.push_delta("\n\n\n");
+        let (live, flushable) = state(&mut stream, 80);
+        assert_eq!(live, vec!["alpha"]);
+        assert_eq!(flushable, 1);
+        let lines = render_document("alpha\n\n\n\n", 80, highlighter());
+        assert_eq!(texts(&lines), vec!["alpha"]);
+    }
+
+    #[test]
+    fn code_block_blank_lines_are_verbatim_content() {
+        // Blank runs inside a fence are content: preserved exactly.
+        let source = "```rust\nfn a() {}\n\n\n\nfn b() {}\n```\n";
+        let lines = render_document(source, 80, highlighter());
+        assert_eq!(texts(&lines), vec!["fn a() {}", "", "", "", "fn b() {}"]);
+
+        // The streaming append path preserves them too.
+        let mut stream = MarkdownStream::new();
+        stream.push_delta("```rust\nfn a() {}\n");
+        stream.push_delta("\n\n");
+        let (live, flushable) = state(&mut stream, 80);
+        assert_eq!(live, vec!["fn a() {}", "", ""]);
+        assert_eq!(flushable, 3, "blank body lines are literal and flush");
+        stream.push_delta("fn b() {}\n```\n");
+        let (live, flushable) = state(&mut stream, 80);
+        assert_eq!(live, vec!["fn a() {}", "", "", "fn b() {}"]);
+        assert_eq!(flushable, 4);
+
+        // A fence whose body ends blank, followed by another block,
+        // honestly renders the content blank AND the separator (module
+        // docs): two consecutive empty lines.
+        let lines = render_document("```\ncode\n\n```\nafter\n", 80, highlighter());
+        assert_eq!(texts(&lines), vec!["code", "", "", "after"]);
+    }
+
+    #[test]
+    fn streaming_excess_blank_lines_preserves_monotonic_flush() {
+        let mut stream = MarkdownStream::new();
+        stream.push_delta("alpha\n\n\n\n");
+        let (live, flushable) = state(&mut stream, 80);
+        // Excess source blanks are structural: nothing renders past
+        // "alpha".
+        assert_eq!(live, vec!["alpha"]);
+        assert_eq!(flushable, 1);
+        stream.ack_flushed(flushable);
+        assert!(stream.render(80, highlighter()).live_lines().is_empty());
+
+        // The separator re-materializes with the next block even though the
+        // earlier block already drained to scrollback — its flushed lines
+        // still count as earlier output.
+        stream.push_delta("beta\n\n");
+        let (live, flushable) = state(&mut stream, 80);
+        assert_eq!(live, vec!["", "beta"]);
+        assert_eq!(flushable, 2);
+    }
+
+    #[test]
+    fn the_separator_stays_aligned_with_the_flushed_prefix() {
+        // Flush everything flushable, then invalidate (a resize): the open
+        // tail re-renders behind fully flushed anchors. The flushed
+        // separator must stay accounted — re-dropping must not eat a
+        // content line.
+        let mut stream = MarkdownStream::new();
+        stream.push_delta("one\n\n```\na\n```\ntwo\n");
+        let (live, flushable) = state(&mut stream, 80);
+        assert_eq!(live, vec!["one", "", "a", "", "two"]);
+        assert_eq!(flushable, 4, "the open paragraph's separator flushes");
+        stream.ack_flushed(flushable);
+        let (live, flushable) = state(&mut stream, 40);
+        assert_eq!(live, vec!["two"]);
+        assert_eq!(flushable, 0);
     }
 
     #[test]
