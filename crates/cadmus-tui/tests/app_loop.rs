@@ -1,7 +1,9 @@
 //! The app loop, locked end to end with vt100 (ADR-0018 items 5 and 10):
-//! keys drive the composer, Enter spawns a run through the scripted driver,
-//! stable rows type out of the emission queue into scrollback at the paced
-//! budget (the 2026-09-20 second amendment), the unstable tail is never
+//! keys drive the composer, Enter spawns a run through the scripted driver
+//! (mid-run it sends an inject steer, Tab a queued one — the 2026-09-21
+//! binding amendment), stable rows type out of the emission queue into
+//! scrollback at the paced budget (the 2026-09-20 second amendment), the
+//! unstable tail is never
 //! rendered (the `receiving…` row carries the liveness signal), Esc sends
 //! the interrupt command and dumps the queue whole, and the outcome folds
 //! back into the session history. The rig shares `tests/common`'s vt100
@@ -20,8 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use cadmus_contract::{
     Approval, Attachment, Command, Event as TraceEvent, EventKind, InFlight, LiveItem, LiveKind,
-    LiveUpdate, Message, PendingApproval, RunState, SettledApproval, StreamChunk, Sync, ToolCall,
-    ToolCompletion,
+    LiveUpdate, Message, PendingApproval, RunState, SettledApproval, SteerMode, StreamChunk, Sync,
+    ToolCall, ToolCompletion,
 };
 use cadmus_tui::app::{App, AppConfig, RunDriver, RunHandle};
 use cadmus_tui::shell::{InlineShell, ScrollbackStrategy};
@@ -50,9 +52,13 @@ fn has_row(rows: &[String], text: &str) -> bool {
 
 const COMPOSER_PLACEHOLDER: &str = "❯ Ask anything";
 
-/// The composer's placeholder while a run is active (Enter stays inert
-/// until the steer slice; Esc is the one key that works mid-run).
-const BUSY_PLACEHOLDER: &str = "❯ Esc to interrupt";
+/// The composer's placeholder while a run is active: the keys that work
+/// mid-run (the steer pair and Esc — the 2026-09-21 binding amendment).
+const BUSY_PLACEHOLDER: &str = "❯ Enter to steer · Tab to queue · Esc to interrupt";
+
+/// The busy placeholder while the approval dialog is open: the dialog owns
+/// Tab, so the composer names only the keys still its own.
+const DIALOG_PLACEHOLDER: &str = "❯ Enter to steer · Esc to interrupt";
 
 fn call_decision(
     command_id: &str,
@@ -721,7 +727,7 @@ async fn a_second_call_can_be_approved_before_the_first() {
                     APPROVAL_SECTION.map(String::from).to_vec(),
                     vec![
                         "Waiting for approval · 0s".to_string(),
-                        BUSY_PLACEHOLDER.to_string(),
+                        DIALOG_PLACEHOLDER.to_string(),
                         "kimi·k2".to_string(),
                     ],
                 ]
@@ -2116,6 +2122,350 @@ async fn an_interrupt_collapses_the_band_through_the_same_outcome_path() {
                 world.visible_rows(),
                 world.scrollback_rows()
             );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// Enter mid-run sends an inject steer (the default granularity): the
+/// composer clears into the pending acknowledgment, the recorded command
+/// renders the block exactly once, and the acknowledgment retires.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn enter_mid_run_sends_an_inject_steer_and_the_record_renders_it_once() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "fix the bug");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            assert!(has_row(&world.nonblank_rows(), BUSY_PLACEHOLDER));
+            run.live.send(delta(1, 1, "working\n")).expect("feed");
+            settle().await;
+
+            type_text(&rig, "also check the tests");
+            rig.input.send(key(KeyCode::Enter)).expect("steer");
+            settle().await;
+            assert!(
+                matches!(
+                    driver.commands().as_slice(),
+                    [Command::Steer { command_id, text, mode: SteerMode::Inject }]
+                        if command_id == "tui-0" && text == "also check the tests"
+                ),
+                "commands: {:?}",
+                driver.commands()
+            );
+            // The send's acknowledgment: the composer names the pending
+            // steer while it awaits application core-side.
+            assert!(has_row(&world.nonblank_rows(), "1 steer pending"));
+
+            // The core applies the steer at the next boundary: the recorded
+            // command renders the block, the count retires.
+            run.record(
+                2,
+                EventKind::Command(Command::Steer {
+                    command_id: "tui-0".into(),
+                    text: "also check the tests".into(),
+                    mode: SteerMode::Inject,
+                }),
+            );
+            settle_until(|| has_row(&world.nonblank_rows(), "❯ also check the tests")).await;
+            assert!(has_row(&world.nonblank_rows(), BUSY_PLACEHOLDER));
+
+            run.record(3, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("fix the bug"),
+                    Message::user("also check the tests"),
+                    Message::text(cadmus_contract::Role::Assistant, "working\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            assert_eq!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .filter(|row| row.contains("also check the tests"))
+                    .count(),
+                1,
+                "the steer renders exactly once: {:?}",
+                world.nonblank_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// Tab mid-run sends a queue steer — the held granularity. The pending
+/// count accumulates over sends and resets with the run when the buffered
+/// steers die unapplied (never logged, never rendered).
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn tab_mid_run_queues_until_the_run_resets_the_acknowledgment() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "fix the bug");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            type_text(&rig, "one more thing");
+            rig.input.send(key(KeyCode::Tab)).expect("queue");
+            settle().await;
+            assert!(
+                matches!(
+                    driver.commands().as_slice(),
+                    [Command::Steer { text, mode: SteerMode::Queue, .. }] if text == "one more thing"
+                ),
+                "commands: {:?}",
+                driver.commands()
+            );
+            assert!(has_row(&world.nonblank_rows(), "1 steer pending"));
+
+            type_text(&rig, "and another");
+            rig.input.send(key(KeyCode::Tab)).expect("queue");
+            settle().await;
+            assert!(has_row(&world.nonblank_rows(), "2 steers pending"));
+            assert_eq!(driver.commands().len(), 2);
+
+            // The run ends with both steers still buffered core-side: the
+            // acknowledgment resets with the run, the composer returns to
+            // the idle placeholder.
+            run.record(1, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("fix the bug"),
+                    Message::text(cadmus_contract::Role::Assistant, "done"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            assert!(has_row(&world.nonblank_rows(), COMPOSER_PLACEHOLDER));
+            assert!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .all(|row| !row.contains("steer pending")),
+                "no acknowledgment outlives the run: {:?}",
+                world.nonblank_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// Nothing to steer: idle Tab keeps the draft (there is no run), and an
+/// empty composer mid-run sends neither an inject nor a queue.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn tab_or_enter_with_nothing_to_steer_sends_nothing() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "draft");
+            rig.input.send(key(KeyCode::Tab)).expect("tab");
+            settle().await;
+            assert!(
+                driver.commands().is_empty() && driver.submitted().is_empty(),
+                "idle Tab is a no-op: {:?} / {:?}",
+                driver.commands(),
+                driver.submitted()
+            );
+            assert!(has_row(&world.nonblank_rows(), "❯ draft"));
+
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            rig.input.send(key(KeyCode::Enter)).expect("enter");
+            rig.input.send(key(KeyCode::Tab)).expect("tab");
+            settle().await;
+            assert!(
+                driver.commands().is_empty(),
+                "an empty composer steers nothing: {:?}",
+                driver.commands()
+            );
+
+            run.record(1, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("draft"),
+                    Message::text(cadmus_contract::Role::Assistant, "ok"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The modal's capture boundary: while the approval dialog is open Tab
+/// moves its focus (no steer leaks) and the composer placeholder names
+/// only the keys still its own, but Enter is not the dialog's — it
+/// steers, and the pending acknowledgment rides the composer while the
+/// dialog waits.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_dialog_owns_tab_but_not_enter() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "change main");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            run.live
+                .send(approval_request(1, "ap1", gated_batch()))
+                .expect("feed");
+            settle_until(|| {
+                world
+                    .visible_rows()
+                    .iter()
+                    .any(|row| row.contains("approve 2 call(s)"))
+            })
+            .await;
+            // The truthfulness rule: while the dialog owns Tab, the
+            // composer stops claiming it (the dialog's hint row names it).
+            assert!(has_row(&world.visible_rows(), DIALOG_PLACEHOLDER));
+            assert!(
+                world.visible_rows().iter().all(|row| !row.contains("Tab to queue")),
+                "no Tab claim while the dialog owns it: {:?}",
+                world.visible_rows()
+            );
+
+            type_text(&rig, "steer attempt");
+            rig.input.send(key(KeyCode::Tab)).expect("tab");
+            settle().await;
+            assert!(
+                driver.commands().is_empty(),
+                "the dialog's Tab steers nothing: {:?}",
+                driver.commands()
+            );
+            assert!(has_row(&world.visible_rows(), "❯ steer attempt"));
+
+            rig.input.send(key(KeyCode::Enter)).expect("steer");
+            settle().await;
+            assert!(
+                matches!(
+                    driver.commands().as_slice(),
+                    [Command::Steer { text, mode: SteerMode::Inject, .. }] if text == "steer attempt"
+                ),
+                "commands: {:?}",
+                driver.commands()
+            );
+            assert!(has_row(
+                &world.nonblank_rows(),
+                "❯ 1 steer pending · Enter to steer · Esc to interrupt"
+            ));
+
+            // The dialog settles: the placeholder reclaims the full keymap.
+            run.record(
+                2,
+                EventKind::Command(Command::ResolveApproval {
+                    command_id: "cmd-remote".into(),
+                    request_id: "ap1".into(),
+                    decisions: vec![Approval::Approved, Approval::Approved],
+                }),
+            );
+            settle_until(|| {
+                has_row(
+                    &world.nonblank_rows(),
+                    "❯ 1 steer pending · Enter to steer · Tab to queue · Esc to interrupt",
+                )
+            })
+            .await;
+
+            // The run ends with the steer still buffered: the
+            // acknowledgment dies with it.
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![Message::user("change main")]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+            assert!(has_row(&world.nonblank_rows(), COMPOSER_PLACEHOLDER));
+            assert!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .all(|row| !row.contains("steer pending")),
+                "no acknowledgment outlives the run: {:?}",
+                world.nonblank_rows()
+            );
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// A lag re-attach zeroes the pending acknowledgment: the hole's steer
+/// applications landed in the fold and the still-buffered ones are
+/// unknowable, so the count can only over-report from there.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn a_pending_steer_zeroes_at_a_resync() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "fix the bug");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            type_text(&rig, "one more thing");
+            rig.input.send(key(KeyCode::Tab)).expect("queue");
+            settle().await;
+            assert!(has_row(&world.nonblank_rows(), "1 steer pending"));
+
+            let (tail, receiver) = std::sync::mpsc::channel();
+            *driver.reattachment.lock().expect("reattachment") = Some(Attachment {
+                sync: sync_with_pending(Vec::new(), Vec::new()),
+                tail: Box::new(receiver.into_iter()),
+            });
+            run.live.send(LiveUpdate::Lagged).expect("lag");
+            settle_until(|| has_row(&world.nonblank_rows(), "resynced")).await;
+            assert!(has_row(&world.nonblank_rows(), BUSY_PLACEHOLDER));
+            assert!(
+                world
+                    .nonblank_rows()
+                    .iter()
+                    .all(|row| !row.contains("steer pending")),
+                "the acknowledgment zeroes at a resync: {:?}",
+                world.nonblank_rows()
+            );
+
+            drop(tail);
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![Message::user("fix the bug")]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
 
             quit_and_join(task, &rig.input).await;
         })

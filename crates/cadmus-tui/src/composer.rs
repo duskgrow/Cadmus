@@ -68,9 +68,16 @@ const GUTTER_WIDTH: u16 = 2;
 pub(crate) const DEFAULT_PLACEHOLDER: &str = "Ask anything";
 
 /// The placeholder while a run is active — the truthfulness rule: it names
-/// only the keys that work mid-run (Esc interrupts; Enter stays inert until
-/// the steer slice wires it — see `App::submit`).
-pub(crate) const RUNNING_PLACEHOLDER: &str = "Esc to interrupt";
+/// only the keys that work mid-run (Enter steers at the next request
+/// boundary, Tab queues to the finish line, Esc interrupts — ADR-0018's
+/// 2026-09-21 binding amendment). While the approval dialog is open Tab
+/// belongs to it, and [`DIALOG_PLACEHOLDER`] tells that truth instead.
+pub(crate) const RUNNING_PLACEHOLDER: &str = "Enter to steer · Tab to queue · Esc to interrupt";
+
+/// The running placeholder while the approval dialog is open: the dialog
+/// owns Tab (its own hint row names that), so the composer names only the
+/// keys still its own.
+pub(crate) const DIALOG_PLACEHOLDER: &str = "Enter to steer · Esc to interrupt";
 
 /// A (line index, byte column) buffer position.
 type Pos = (usize, usize);

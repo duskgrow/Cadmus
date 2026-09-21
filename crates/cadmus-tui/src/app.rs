@@ -20,11 +20,13 @@
 //! automatic), the run-status row rides its frozen clock until the queue
 //! empties, and the band's final collapse is then exactly that one row.
 //!
-//! Key handling is a minimal fixed map (chars, editing ops, Enter submits,
-//! Esc interrupts, Ctrl-C quits, Tab selects a call and y/n answer it) —
-//! ADR-0018 item 6's mode × key → command layer with keymap-as-data is its
-//! own slice, and the default bindings are decided in its binding-design
-//! task.
+//! Key handling is a minimal fixed map (chars, editing ops, Enter submits —
+//! mid-run it steers at the next request boundary, Tab queues to the finish
+//! line — Esc interrupts, Ctrl-C quits, and while the approval dialog is
+//! open Tab selects a call and y/n answer it) — ADR-0018 item 6's mode ×
+//! key → command layer with keymap-as-data is its own slice, and the
+//! default bindings are decided in its binding-design task (the steer
+//! pair's record: the 2026-09-21 amendment).
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -32,7 +34,7 @@ use std::time::Duration;
 
 use cadmus_contract::{
     Approval, Attachment, Command, EventKind, LiveItem, LiveKind, LiveUpdate, Message,
-    PendingApproval, Sync,
+    PendingApproval, SteerMode, Sync,
 };
 use cadmus_ui::highlight::Highlighter;
 use cadmus_ui::ir::{self, Slot};
@@ -51,7 +53,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::approval;
 use crate::clock::RunClock;
-use crate::composer::{Composer, DEFAULT_PLACEHOLDER, RUNNING_PLACEHOLDER};
+use crate::composer::{Composer, DEFAULT_PLACEHOLDER, DIALOG_PLACEHOLDER, RUNNING_PLACEHOLDER};
 use crate::cursor::CursorTracker;
 use crate::debounce::ResizeDebounce;
 use crate::frame::{Draw, FrameRequester, frame_scheduler};
@@ -262,6 +264,14 @@ pub struct App<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: Event
     /// shown on the run-status row once known.
     context_tokens: Option<u64>,
     command_seq: u64,
+    /// Steers sent but not yet applied core-side (record-on-effect: the
+    /// recorded command is the application). The composer placeholder
+    /// carries the count — a queued steer's hold can outlive minutes of
+    /// streaming, and an unacknowledged hold reads as a lost keystroke.
+    /// Zeroed at the outcome (unapplied steers die unlogged) and at a
+    /// resync (the hole's applications landed in the fold; still-buffered
+    /// ones are unknowable, so the count can only over-report from there).
+    pending_steers: usize,
     /// Approval requests awaiting the user's decisions, FIFO — the band
     /// renders the head, Tab selects a call and y/n answer that call.
     /// The gate presents one batch per turn and awaits its decisions, so
@@ -353,6 +363,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
             clock: None,
             context_tokens: None,
             command_seq: 0,
+            pending_steers: 0,
             approvals: VecDeque::new(),
             paced: true,
             dump: false,
@@ -684,6 +695,10 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.quit = true,
             (KeyCode::Enter, KeyModifiers::NONE) => self.submit(),
+            // Queue is mid-run only (idle Tab is a no-op — `steer` returns
+            // without a run); the approval dialog's Tab never reaches here
+            // (`on_key` routes it first).
+            (KeyCode::Tab, KeyModifiers::NONE) => self.steer(SteerMode::Queue),
             (KeyCode::Char('j'), KeyModifiers::CONTROL) => composer.insert_newline(),
             (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
                 composer.undo();
@@ -708,10 +723,12 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         self.requester.schedule_frame();
     }
 
-    /// Enter submits when idle (steering a live run is the steer slice's;
-    /// until then the run's composer input stays editable but inert).
+    /// Enter: idle starts a run; mid-run sends the composer's text as an
+    /// inject steer — the default granularity (ADR-0011's 2026-09-11
+    /// amendment), landing as a user message at the next request boundary.
     fn submit(&mut self) {
         if self.run.is_some() {
+            self.steer(SteerMode::Inject);
             return;
         }
         let text = self.composer.text();
@@ -729,7 +746,6 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         // behind the new prompt — the queue's FIFO orders them).
         self.dump = false;
         self.composer.clear();
-        self.composer.set_placeholder(RUNNING_PLACEHOLDER);
         self.transcript.push_user(&text);
         let mut messages = self.history.clone();
         messages.push(Message::user(&text));
@@ -740,9 +756,61 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         self.run = Some(ActiveRun {
             commands: handle.commands,
         });
+        self.sync_composer_placeholder();
         self.clock = Some(RunClock::start(Instant::now()));
         self.status = Status::Streaming;
         self.requester.schedule_frame();
+    }
+
+    /// One steering command (ADR-0011 item 3's granularities, bound per
+    /// ADR-0018's 2026-09-21 amendment): the composer's text enters the
+    /// running session as a user message — Inject lands at the next
+    /// request boundary, Queue is held until the run would otherwise
+    /// finish. The core records the command at application and the
+    /// recorded event renders the block (the transcript's steer arm), so
+    /// the composer clears on send and the pending count bridges the gap.
+    /// Idle is a no-op: there is nothing to steer.
+    fn steer(&mut self, mode: SteerMode) {
+        let Some(run) = &self.run else { return };
+        let text = self.composer.text();
+        if text.trim().is_empty() {
+            return;
+        }
+        (run.commands)(Command::Steer {
+            command_id: format!("tui-{}", self.command_seq),
+            text,
+            mode,
+        });
+        self.command_seq += 1;
+        self.pending_steers += 1;
+        self.composer.clear();
+        self.sync_composer_placeholder();
+    }
+
+    /// The composer's placeholder by run state: idle the default; running
+    /// the mid-run keymap — the dialog-aware variant while the approval
+    /// dialog owns Tab — plus the pending-steer count while sent steers
+    /// await application (the field's doc). One policy point, the
+    /// `sync_clock_pause` pattern: every transition that can change an
+    /// input routes here instead of tracking transitions by hand.
+    fn sync_composer_placeholder(&mut self) {
+        if self.run.is_none() {
+            self.composer.set_placeholder(DEFAULT_PLACEHOLDER);
+            return;
+        }
+        // While the approval dialog is open it owns Tab (its hint row
+        // names that): the composer names only the keys still its own.
+        let keymap = if self.approvals.is_empty() {
+            RUNNING_PLACEHOLDER
+        } else {
+            DIALOG_PLACEHOLDER
+        };
+        let text = match self.pending_steers {
+            0 => keymap.to_string(),
+            1 => format!("1 steer pending · {keymap}"),
+            n => format!("{n} steers pending · {keymap}"),
+        };
+        self.composer.set_placeholder(text);
     }
 
     /// Esc: the ADR-0011 item 3 interrupt — completed work is preserved
@@ -765,6 +833,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         }
         let section = dialog.lines();
         self.approvals.push_back(QueuedApproval { dialog, section });
+        self.sync_composer_placeholder();
     }
 
     /// Submission is not settlement: suppress retries locally, but keep the
@@ -808,6 +877,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
                 self.queue_approval(request.clone());
             }
         }
+        self.sync_composer_placeholder();
     }
 
     fn settle_approval(&mut self, kind: &EventKind) {
@@ -835,6 +905,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
             EventKind::RunFinished { .. } => self.approvals.clear(),
             _ => {}
         }
+        self.sync_composer_placeholder();
     }
 
     /// The context-size metric: the latest response's input + cache-read
@@ -878,6 +949,14 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
                 // dialog; individual answers leave siblings available.
                 if fresh && let LiveKind::Recorded { event } = &item.kind {
                     self.settle_approval(&event.kind);
+                    if matches!(&event.kind, EventKind::Command(Command::Steer { .. })) {
+                        // The applied steer renders as a prompt block (the
+                        // transcript's steer arm); its send's pending
+                        // acknowledgment retires here. saturating: a steer
+                        // applied by another client owns no local send.
+                        self.pending_steers = self.pending_steers.saturating_sub(1);
+                        self.sync_composer_placeholder();
+                    }
                 }
                 self.status.note(light);
                 self.sync_clock_pause();
@@ -901,6 +980,11 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
                 // The rebuild's rows bypass pacing for the same reason.
                 self.pump_dump()?;
                 if resync {
+                    // The hole's steer applications landed in the fold, the
+                    // still-buffered ones are unknowable — zero the count
+                    // rather than over-report (the field's doc).
+                    self.pending_steers = 0;
+                    self.sync_composer_placeholder();
                     // The hole marker: flushed directly, outside the block
                     // model, so replays never reorder it (transcript docs).
                     self.flush_resync_marker(width)?;
@@ -1008,7 +1092,10 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         // A dead run owns no dialog: its gate already denied every
         // pending request (the channel-drop rule).
         self.approvals.clear();
-        self.composer.set_placeholder(DEFAULT_PLACEHOLDER);
+        // Unapplied steers died with the run (never logged): the pending
+        // count resets with it (run is already None → the default).
+        self.pending_steers = 0;
+        self.sync_composer_placeholder();
         match outcome {
             Ok(messages) => {
                 self.history = messages;

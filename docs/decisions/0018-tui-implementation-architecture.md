@@ -580,3 +580,47 @@ rows/protocol only. Native tmux probes with default scroll-on-clear
 matched the harness's nonblank history and two long CJK histories including
 blank rows. Windows Terminal, Zellij and GUI-terminal physical reflow still
 need manual matrix checks; the tmux run is not evidence for those terminals.
+
+## Amendment — 2026-09-21 (2nd): the steer bindings — Enter injects, Tab queues
+
+Item 6 leaves the default keymap content to the binding-design task at
+implementation; the steer slice decides its first mid-run content.
+**Enter = Inject, Tab = Queue** — Codex's Tab/Enter split, because
+ADR-0011's 2026-09-11 amendment pins inject-at-next-tool-boundary as the
+default granularity and the default deserves the unmodified submit key.
+Claude Code's Enter=queue is thereby rejected, as is a mode-toggle design
+(Tab arms queue mode, Enter sends): two direct submit keys, one keystroke,
+no mode state to display and forget. The three named granularities
+realize as two bindings because inject-now cannot touch the in-flight
+request (its bytes are on the wire) — its only deterministic realization
+is the next request boundary, which is the third granularity's own
+definition; Esc + steer covers redirect-now.
+
+Precedence: while the approval dialog is open it owns Tab/Shift-Tab and
+y/n (the 2026-09-19 dialog amendment); Enter is not the dialog's and
+steers — typing and steering during an approval wait both work, the
+steer applying after the gate settles. Idle Tab is a no-op (nothing to
+steer), as is an empty composer.
+
+Feedback follows record-on-effect: the composer clears on send, the core
+records the steer at application, and the recorded command renders the
+prompt block (the transcript's steer arm pre-exists). The gap is bridged
+by a pending count in the composer placeholder — a queued steer's hold
+can outlive minutes of streaming, and an unacknowledged hold reads as a
+lost keystroke. The count retires per recorded steer, zeroes at the
+outcome (unapplied steers die unlogged) and at a resync (the hole's
+applications landed in the fold, the still-buffered ones are unknowable,
+so the count can only over-report from there). The acknowledgment lives
+on the placeholder deliberately: it renders on the empty buffer, which is
+exactly the post-send moment — while the user composes the next steer the
+count hides, accepted because the next send re-displays it and a
+persistent indicator would cost the run-status row's budgeted width.
+
+The running placeholder names the working mid-run keys (the truthfulness
+rule) with two variants: the full pair (Enter steer · Tab queue · Esc)
+normally, and without the Tab clause while the approval dialog is open —
+the dialog owns Tab there and its own hint row says so; a placeholder
+claiming otherwise would lie through the whole wait. One policy point
+(`sync_composer_placeholder`, the `sync_clock_pause` pattern) recomputes
+the text at every transition of its three inputs: run presence, pending
+count, dialog visibility.
