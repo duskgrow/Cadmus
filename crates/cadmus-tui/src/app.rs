@@ -225,7 +225,7 @@ struct ActiveRun {
 struct RunEnd;
 
 /// The app. See the module docs.
-pub struct App<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> {
+pub struct App<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> {
     shell: InlineShell<B, W>,
     input: I,
     driver: Box<dyn RunDriver>,
@@ -314,7 +314,7 @@ fn wrap_section(
     )
 }
 
-impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, I> {
+impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> App<B, W, I> {
     /// Wire the parts and spawn the frame-scheduler actor — call within a
     /// tokio runtime (the actor is `tokio::spawn`ed). The boot frame is
     /// scheduled immediately: the band appears before the first keystroke.
@@ -573,8 +573,9 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
             // Flush first, then confirm: the ack contract is a *successful*
             // shell insert, so a structural failure must die un-acked.
             shell.flush(&drained.rows, render)?;
-            transcript.apply_flush(&drained.acks);
         }
+        // Zero-row completion emissions still carry a logical-line ack.
+        transcript.apply_flush(&drained.acks);
         // The end-of-run completion: the note's last row just landed. Esc's
         // dump mode ends here too, and the run-status row releases — the
         // collapse below is then exactly its one row (the outcome already
@@ -602,9 +603,8 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write, I: EventSource> App<B, W, 
         // descend into, so neither the run's final batch nor the transcript
         // ever sees a residue gap (the 2026-09-20 amendment's mechanism).
         if shell.needs_height_change(layout.band_height) {
-            // The recreation seam: the cursor tracker answers the anchor
-            // query without a CPR round-trip (cursor.rs), so no quiesce
-            // window — the event stream stays live across recreation.
+            // Geometry is shell-owned; installing a fixed drawing surface
+            // never queries the cursor or quiesces the input stream.
             let render = band_render(approval_rows.clone(), &mut band);
             shell.set_height(layout.band_height, render)?;
         }
@@ -1151,7 +1151,7 @@ async fn resize_next(debounce: &ResizeDebounce) {
 }
 
 /// The band split for the current content (the height function's output).
-fn band_layout<B: Backend<Error = io::Error> + Clone, W: Write>(
+fn band_layout<B: Backend<Error = io::Error> + Clone + Write, W: Write>(
     shell: &mut InlineShell<B, W>,
     composer: &Composer,
     receiving_rows: u16,
@@ -1544,7 +1544,12 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
     // seed query above needs crossterm's global event reader uncontended,
     // and an EventStream's create-drop cycle would leave a stale wake edge
     // that a query could read as an instant timeout (input.rs).
-    let shell = InlineShell::new(backend, Stdout, band)?;
+    let shell = InlineShell::new(
+        backend,
+        Stdout,
+        band,
+        crate::shell::ScrollbackStrategy::detect(),
+    )?;
     let input = InputBroker::new();
     let mut app = App::new(shell, input, driver, config).with_pacing(crate::style::detect_paced());
     app.run_loop().await

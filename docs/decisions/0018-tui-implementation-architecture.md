@@ -527,3 +527,56 @@ the viewport UP over the inserted rows, erasing them (any resize within
 the debounce window after streaming inserts). The shell now parks the
 cursor inside the viewport after every insert (`tests/dynamic_height_spike.rs`
 locks it; recorded in the ratatui-bump open item as upstream evidence).
+
+## Amendment — 2026-09-21: own history insertion and band geometry
+
+Field evidence reopens the first spike's `insert_before` verdict: ratatui's
+portable path writes wide-character continuation cells as spaces. Chinese
+text gains physical width, wraps unexpectedly and loses its tail under the
+next insert, despite an intact trajectory. Waiting for upstream #2527 is
+not acceptable for a daily driver. Adopt Codex-style span writes and CRLF
+scrolling, with terminal-specific fallback, without a dependency fork.
+
+The recorded small-shim premise was wrong: stock ratatui's viewport setter
+is private, unlike Codex's custom Terminal. Recreating Inline after each
+insert also couples cached cursor offsets, extra size reads and automatic
+clears; a resize between insert and redraw can erase just-acknowledged
+history. **Use Inline only for the initial reservation, then stock Fixed
+as the drawing surface.** The shell owns subsequent geometry, retains the
+high-water/top-anchored-collapse policy and keeps one synchronized-update
+wrapper per operation. The post-insert cursor-parking workaround retires;
+a hidden cursor no longer participates in geometry.
+
+The port follows Codex's `insert_history.rs` and `tui/scrollback.rs`
+(re-read 2026-09-21; Apache-2.0 attribution retained in `history.rs`). CRLF
+at the history region's lower margin is intentional: CSI S discards
+native scrollback in QTermWidget/xterm.js. Windows Terminal uses the
+full-screen fallback; Zellij takes precedence and uses the standard path
+for Cadmus's pre-wrapped rows. Zero/one-row history regions also fall back
+because DECSTBM requires distinct margins. Clear the old band before
+scrolling and reset margins even on write failure; at the screen origin,
+clear rows individually so tmux's default scroll-on-clear cannot copy a
+transient composer into permanent history.
+
+Debounced horizontal shrink still replaces the visible history from source.
+Intervening draws and height changes cannot consume that replay obligation
+or clear the history independently. Vertical fitting scrolls reachable
+history before occupying its rows. The display-row prefix of a partial
+emission now has successful-insert coordinates (source slice, old wrap
+width, confirmed row count): whole-emission acks alone omitted it from
+replay. Reconstruct it before reflow, never expose queued continuations,
+and retain no second rendered-history cache. The kept remainder retains
+its old row boundaries, rewrapped only if too wide for the current screen.
+Controls are filtered at the raw-write boundary; a grapheme wider than the
+entire screen uses an ASCII Unicode escape instead of silently disappearing.
+The source stays intact for later replay at a usable width.
+
+Evidence: `tests/history_insert.rs`, the dynamic-height/app/stream vt100
+suites and the partial-replay unit tests cover text, blanks, styles,
+cleanup, hidden cursors and physical resizes before/after raw writes.
+The emulator drops partial-region departures, so full-world assertions
+use the full-screen path and standard-path assertions cover visible
+rows/protocol only. Native tmux probes with default scroll-on-clear
+matched the harness's nonblank history and two long CJK histories including
+blank rows. Windows Terminal, Zellij and GUI-terminal physical reflow still
+need manual matrix checks; the tmux run is not evidence for those terminals.

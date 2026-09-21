@@ -14,7 +14,7 @@
 
 mod common;
 
-use cadmus_tui::shell::InlineShell;
+use cadmus_tui::shell::{InlineShell, ScrollbackStrategy};
 use common::{BSU, ESU, GuardSink, SCREEN_COLS, SCREEN_ROWS, VtBackend, World};
 use ratatui::layout::Position;
 use ratatui::text::Line;
@@ -71,8 +71,13 @@ struct ProbeApp {
 impl ProbeApp {
     fn boot(world: &World, band_height: u16, composer_rows: u16) -> Self {
         let guard_sink = GuardSink::default();
-        let shell = InlineShell::new(world.backend.clone(), guard_sink.clone(), band_height)
-            .expect("boot shell");
+        let shell = InlineShell::new(
+            world.backend.clone(),
+            guard_sink.clone(),
+            band_height,
+            ScrollbackStrategy::FullScreen,
+        )
+        .expect("boot shell");
         let mut app = Self {
             shell,
             guard_sink,
@@ -430,16 +435,9 @@ fn width_shrink_replays_the_visible_tail_from_source() {
     );
 }
 
-/// The stale-width window: the terminal has already resized (vt100 knows)
-/// but the shell has not (the debounce holds the event) — a flush landing
-/// in that window must survive the later re-anchor. Regression pin for the
-/// `insert_before` cursor-restore underflow the shell repairs
-/// (`park_cursor_at_viewport_top`): the portable insert path's closing
-/// clear restores the cursor to its pre-insert position — a row the
-/// viewport slide pushed ABOVE the band — and the next resize's re-anchor
-/// read an offset that saturated to zero and pulled the viewport UP over
-/// the inserted rows, erasing them. Rows after the window and after a
-/// second stale-window pair must all land exactly once.
+/// The stale-width window: the terminal has resized but the debounce still
+/// holds the notification. Inserts and later replay must agree on geometry,
+/// never move the band back over rows that have just been acknowledged.
 #[test]
 fn a_flush_in_the_stale_width_window_survives_the_resize() {
     let world = World::new();
@@ -467,49 +465,61 @@ fn a_flush_in_the_stale_width_window_survives_the_resize() {
     assert_world(&world, &mut app, &expected);
 }
 
-/// Spike discipline 3, locked: a CPR timeout inside `draw`'s autoresize is
-/// tolerated and counted, the wrapper stays balanced, and the next op
-/// re-anchors and repaints — drawing never kills a run.
+/// Post-boot geometry is owned by the shell, not ratatui's inline cursor
+/// re-anchor. Even a size drift discovered during draw must never issue CPR.
 #[test]
-fn draw_tolerates_a_failed_reanchor_and_recovers() {
+fn draw_adapts_to_size_drift_without_postboot_cursor_queries() {
     let world = World::new();
     let (mut app, _expected) = boot_anchored(&world, 8, 2);
     app.guard_sink.take();
+    let boot_queries = world.cursor_queries();
 
-    // Backend size drifts from ratatui's last-known area, so the next draw's
-    // autoresize re-anchors — into an injected CPR failure.
     world.resize(20, SCREEN_COLS);
     world.fail_queries(true);
-    app.draw_band();
-    assert_eq!(app.shell.stats().tolerated_draw_errors, 1);
-    assert_eq!(
-        app.guard_sink.take(),
-        [BSU, ESU].concat(),
-        "a failed op still closes its wrapper"
-    );
-
-    world.fail_queries(false);
-    app.draw_band();
-    assert_eq!(app.shell.stats().tolerated_draw_errors, 1);
-    assert_eq!(app.shell.band_area().height, 8, "the next op re-anchored");
+    for _ in 0..2 {
+        app.draw_band();
+        assert_eq!(world.cursor_queries(), boot_queries, "no post-boot CPR");
+        assert_eq!(app.shell.stats().tolerated_draw_errors, 0);
+        assert_eq!(app.shell.stats().tolerated_resize_errors, 0);
+        assert_eq!(app.guard_sink.take(), [BSU, ESU].concat());
+        let area = app.shell.band_area();
+        assert_eq!(area.height, 8);
+        assert!(area.bottom() <= 20, "the band fits the physical screen");
+        assert_eq!(
+            world.visible_rows()[usize::from(area.y)..usize::from(area.bottom())],
+            app.expected_band()
+        );
+        assert_eq!(world.cursor(), app.expected_cursor());
+    }
 }
 
-/// The explicit resize path tolerates the same failure: counted, replay
-/// skipped, wrapper balanced, band height untouched.
+/// A blocked CPR channel cannot suppress an explicit resize or its replay:
+/// the initial anchor is the last geometry step allowed to query the backend.
 #[test]
-fn resize_reanchor_failure_is_tolerated() {
+fn resize_replays_without_postboot_cursor_queries() {
     let world = World::new();
     let (mut app, _expected) = boot_anchored(&world, 8, 2);
     app.guard_sink.take();
+    let boot_queries = world.cursor_queries();
+    let mut expected = world.scrollback_rows();
+    let mut replayed = false;
 
     world.fail_queries(true);
-    app.on_resize(64, SCREEN_ROWS, |_max_rows, _width| {
-        unreachable!("replay must be skipped when the re-anchor fails")
+    world.resize(SCREEN_ROWS, 64);
+    app.on_resize(64, SCREEN_ROWS, |max_rows, width| {
+        replayed = true;
+        assert_eq!((max_rows, width), (16, 64));
+        vec![Line::from("REPLAY"), Line::from("REPLAY TAIL")]
     });
-    assert_eq!(app.shell.stats().tolerated_resize_errors, 1);
+    assert!(replayed, "a blocked CPR channel must not skip replay");
+    assert_eq!(world.cursor_queries(), boot_queries);
+    assert_eq!(app.shell.stats().tolerated_resize_errors, 0);
+    assert_eq!(app.shell.stats().tolerated_draw_errors, 0);
     assert_eq!(app.guard_sink.take(), [BSU, ESU].concat());
     assert_eq!(app.shell.band_height(), 8);
     assert_eq!(app.shell.width(), 64);
+    expected.extend(["REPLAY".into(), "REPLAY TAIL".into()]);
+    assert_world(&world, &mut app, &expected);
 }
 
 /// Screen shorter than the band: ratatui clamps the viewport on resize, the

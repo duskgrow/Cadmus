@@ -18,7 +18,7 @@ mod common;
 
 use std::sync::OnceLock;
 
-use cadmus_tui::shell::InlineShell;
+use cadmus_tui::shell::{InlineShell, ScrollbackStrategy};
 use cadmus_tui::stream::Stream;
 use cadmus_tui::wrap::wrap_rows;
 use cadmus_ui::highlight::Highlighter;
@@ -50,7 +50,13 @@ struct StreamApp {
 impl StreamApp {
     fn boot(world: &World) -> Self {
         let guard = GuardSink::default();
-        let shell = InlineShell::new(world.backend.clone(), guard, 2).expect("boot shell");
+        let shell = InlineShell::new(
+            world.backend.clone(),
+            guard,
+            2,
+            ScrollbackStrategy::FullScreen,
+        )
+        .expect("boot shell");
         let mut app = Self {
             shell,
             stream: Stream::new(),
@@ -210,8 +216,8 @@ fn an_open_fence_streams_its_body_lines() {
     );
 }
 
-/// A width shrink clears the screen (stock ratatui); the shell replays the
-/// still-visible *flushed* tail, re-rendered from the stream's source SSOT
+/// A width shrink replaces the visible history through source replay;
+/// the shell replays the still-visible *flushed* tail, re-rendered from the stream's source SSOT
 /// at the new width — while the unstable tail stays unrendered and is never
 /// duplicated above the band.
 #[test]
@@ -263,7 +269,7 @@ fn width_shrink_replays_the_stream_tail_from_source() {
 
     // Streaming continues undisturbed at the new width; closing the
     // paragraph flushes it exactly once, at the new wrap. (The shrink
-    // cleared the on-screen boot lines — stock ratatui's shrink clear; the
+    // cleared the on-screen boot lines — the shell's shrink clear; the
     // replay owns only the stream's tail — so the world is now the
     // replay, the new flush and the band.)
     app.stream.push_delta("nu xi omicron pi rho\n\n");

@@ -1,46 +1,26 @@
-//! The inline shell — the cadmus-tui library layer that owns the raw
-//! terminal and the band's lifecycle (anchor, height, `Terminal` recreation,
-//! resize reflow, guarded draws) and frames the band the widgets live in
-//! (ADR-0018, both 2026-09-14 amendments). The event loop, input broker and
-//! widgets build on top of it.
+//! The inline shell owns terminal geometry and history insertion (ADR-0018).
+//! Stock Inline reserves the initial band; afterwards stock Fixed renders
+//! the rectangle the shell owns. Ratatui must not independently resize or
+//! clear history between a raw insert and its acknowledgement.
 //!
-//! Contracts this module enforces:
-//!
-//! - **One wrapper**: every multi-step terminal mutation is wrapped in
-//!   exactly one synchronized-update (2026h) guard, emitted only here, never
-//!   nested — real terminals end the update at the first ESU, so a nested
-//!   pair would leave the op's tail unguarded (the spike harness nested the
-//!   shrink-replay guard inside the resize guard; this layer removes that).
-//! - **Guard-stream integrity**: guard bytes go through the same stream the
-//!   backend writes to — the spike's tee lesson: routing them to a parallel
-//!   raw-stdout handle once punched a hole in the capture.
-//! - **Cursor-query-free after boot**: ratatui's inline viewport queries
-//!   the cursor position inside `Terminal::with_options`
-//!   (construction/recreation), `Terminal::clear` (which the portable
-//!   `insert_before` calls on its way out — so an ordinary flush queries)
-//!   and `Terminal::resize`. Any real CPR round-trip issued once the input
-//!   broker's reader thread is parked stalls for the full two-second reader
-//!   lock timeout and then fails (verified on a real pty, 2026-09-16 — the
-//!   mechanism behind upstream ratatui #2640). The shell's real-terminal
-//!   backend is therefore the cursor tracker ([`crate::cursor`]), whose one
-//!   real query is the seed at boot, before the broker exists.
-//! - **Query/IO tolerance**: draw and resize failures are tolerated and
-//!   counted in [`ShellStats`], never fatal — the next op re-anchors and
-//!   repaints (spike fact F3). Insert/clear/recreate failures are
-//!   structural and propagate.
+//! Every multi-step mutation has exactly one synchronized-update wrapper,
+//! on the backend's output stream. Draw/resize failures are tolerated and
+//! counted; history insert and structural clear failures propagate. The
+//! real backend is [`crate::cursor::CursorTracker`]: its one boot CPR runs
+//! before the input broker, and no later operation needs a cursor query.
 
 use std::io::{self, Write};
 
 use crossterm::execute;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::backend::Backend;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Rect, Size};
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
 use ratatui::{Frame, Terminal, TerminalOptions, Viewport};
 
-/// Mechanism counters, exposed for the quirk harness's diagnostics and
-/// sidecar — self-report for observation, never load-bearing for behavior.
+pub use crate::history::ScrollbackStrategy;
+
+/// Mechanism counters for the quirk harness; never load-bearing state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShellStats {
     pub inserts: usize,
@@ -52,43 +32,59 @@ pub struct ShellStats {
     pub tolerated_resize_errors: usize,
 }
 
-/// See the module docs for the contracts. `B` is io-flavored so guard
-/// emission and backend errors share one channel; `Clone` because the OS
-/// terminal outlives the `Terminal` — recreation clones the backend handle.
-pub struct InlineShell<B: Backend<Error = io::Error> + Clone, W: Write> {
+/// The backend and guard writer must share the same output stream. Clone
+/// duplicates the backend handle, not the underlying terminal.
+pub struct InlineShell<B: Backend<Error = io::Error> + Clone + Write, W: Write> {
     terminal: Terminal<B>,
-    /// Guard-sequence sink: a handle onto the backend's stream (e.g. the
-    /// harness's tee), never a parallel raw-stdout handle.
     guard: W,
-    /// The effective (screen-clamped) band height.
+    /// Requested height survives a temporarily shorter screen.
     band_height: u16,
-    /// Last known terminal width — the width-shrink replay trigger.
+    /// Last debounced width, not consumed by an intervening height change.
     width: u16,
+    screen: Size,
+    /// A shrink observed between debounce ticks still owes a source replay,
+    /// even if the window grows again before the notification arrives.
+    replay_pending: bool,
     stats: ShellStats,
+    scrollback: ScrollbackStrategy,
 }
 
-impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
-    /// Claim an inline band of `band_height` rows (clamped to the screen) at
-    /// the cursor and clear it. The anchor reads go through the backend's
-    /// cursor answer — tracked state for the real terminal, never a live
-    /// query (module docs).
-    pub fn new(backend: B, guard: W, band_height: u16) -> io::Result<Self> {
+impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> {
+    /// Reserve the initial band at the cursor. On the real terminal this
+    /// reads the cursor tracker's seed, never a second CPR.
+    pub fn new(
+        backend: B,
+        guard: W,
+        band_height: u16,
+        scrollback: ScrollbackStrategy,
+    ) -> io::Result<Self> {
         let screen = backend.size()?;
         let band_height = clamp_height(band_height, screen.height);
-        let mut terminal = Terminal::with_options(
+        let mut initial = Terminal::with_options(
             backend,
             TerminalOptions {
                 viewport: Viewport::Inline(band_height),
             },
         )?;
-        terminal.clear()?;
-        Ok(Self {
+        let area = initial.get_frame().area();
+        let terminal = Terminal::with_options(
+            initial.backend().clone(),
+            TerminalOptions {
+                viewport: Viewport::Fixed(area),
+            },
+        )?;
+        let mut shell = Self {
             terminal,
             guard,
             band_height,
             width: screen.width,
+            screen,
+            replay_pending: false,
             stats: ShellStats::default(),
-        })
+            scrollback,
+        };
+        shell.clear_band()?;
+        Ok(shell)
     }
 
     #[must_use]
@@ -96,7 +92,7 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         self.band_height
     }
 
-    /// The band's current on-screen area, for layout and cursor math.
+    /// The actual band rectangle; callers must not infer it from the cursor.
     pub fn band_area(&mut self) -> Rect {
         self.terminal.get_frame().area()
     }
@@ -106,21 +102,17 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         self.width
     }
 
-    /// The screen's current row count — the layout function's input.
     pub fn screen_rows(&mut self) -> u16 {
         self.terminal
             .size()
-            .map_or(self.band_height, |size| size.height)
+            .map_or(self.screen.height, |size| size.height)
     }
 
-    /// Whether `set_height(desired)` would do anything (its equality no-op,
-    /// exposed so the app can skip the recreation seam when nothing would
-    /// change — recreation is for real height changes only).
+    /// Match `set_height`'s no-op without emitting a wrapper.
     pub fn needs_height_change(&mut self, desired: u16) -> bool {
-        let Ok(screen_rows) = self.terminal.size().map(|size| size.height) else {
-            return false;
-        };
-        clamp_height(desired, screen_rows) != clamp_height(self.band_height, screen_rows)
+        self.terminal.size().is_ok_and(|screen| {
+            clamp_height(desired, screen.height) != clamp_height(self.band_height, screen.height)
+        })
     }
 
     #[must_use]
@@ -128,8 +120,8 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         self.stats
     }
 
-    /// Repaint the band under one wrapper; failure is tolerated and counted
-    /// (the next op repaints) — drawing is never allowed to kill a run.
+    /// Drawing cannot kill a run. The next operation retries geometry and
+    /// repaint after failure.
     pub fn draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) {
         if self
             .guarded(|shell| {
@@ -138,16 +130,12 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
             })
             .is_err()
         {
-            // The guard stream itself failed (draw errors are counted inside
-            // `tolerated_draw`): the terminal is likely wedged mid-guard, but
-            // drawing must never kill a run.
             self.stats.tolerated_draw_errors += 1;
         }
     }
 
-    /// Completed rows leave the band into real scrollback: insert them above
-    /// the viewport, then repaint (the portable insert path clears the
-    /// viewport on its way out). One wrapper around the pair.
+    /// Insert completed display rows, then repaint under the same wrapper.
+    /// A successful return permits the caller to acknowledge the rows.
     pub fn flush(
         &mut self,
         rows: &[Line<'_>],
@@ -156,12 +144,9 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         if rows.is_empty() {
             return Ok(());
         }
-        let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
         self.guarded(|shell| {
-            shell.terminal.insert_before(height, |buf| {
-                Paragraph::new(rows.to_vec()).render(buf.area, buf);
-            })?;
-            shell.park_cursor_at_viewport_top()?;
+            shell.sync_size()?;
+            shell.insert_history(rows)?;
             shell.stats.inserts += 1;
             shell.stats.inserted_rows += rows.len();
             shell.tolerated_draw(render);
@@ -169,54 +154,58 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         })
     }
 
-    /// The dynamic-height mechanism, event-driven (composer line crossings,
-    /// held-block settle, resize) and never per-frame. Policy works on
-    /// effective (screen-clamped) heights: both `desired` and the current
-    /// height clamp to the screen before comparing, and equality no-ops —
-    /// without the early no-op the grow math underflows when the band fills
-    /// the screen. Grow: the collapse's blank buffer below the band is
-    /// absorbed first (park + recreate, no scroll); only the overflow goes
-    /// through the insert path (insert Δ blanks above the band, park the
-    /// cursor at the future band top, recreate — the re-anchor's append
-    /// lands exactly at the bottom row, zero residue). Shrink: clear the old
-    /// band and recreate at the SAME top edge — the vacated Δ rows become a
-    /// blank buffer BELOW the band, never a gap inside the transcript above;
-    /// later growth re-absorbs the buffer and later inserts descend into it
-    /// (ADR-0018's 2026-09-20 amendment). One wrapper around insert/clear +
-    /// recreate + draw.
+    /// Grow into the blank buffer first, scroll only the overflow. Shrink
+    /// keeps the top edge, leaving vacated rows below the band, not inside
+    /// the transcript (ADR-0018's high-water amendment).
     pub fn set_height(
         &mut self,
         desired: u16,
         render: impl FnOnce(&mut Frame<'_>),
     ) -> io::Result<()> {
-        let screen_rows = self.terminal.size()?.height;
-        let new_height = clamp_height(desired, screen_rows);
-        let current = clamp_height(self.band_height, screen_rows);
+        let screen = self.terminal.size()?;
+        let new_height = clamp_height(desired, screen.height);
+        let current = clamp_height(self.band_height, screen.height);
         if new_height == current {
             return Ok(());
         }
-        if new_height > current {
-            self.grow_from(new_height, current, render)
-        } else {
-            self.shrink_from(new_height, current, render)
-        }
+        self.guarded(|shell| {
+            shell.sync_size()?;
+            let old = shell.band_area();
+            let target = clamp_height(desired, shell.screen.height);
+            shell.clear_band()?;
+            let top = old.y.min(shell.screen.height.saturating_sub(target));
+            let displaced = old.y - top;
+            if displaced > 0 {
+                crate::history::scroll_history(
+                    shell.terminal.backend_mut(),
+                    old.y,
+                    shell.screen.height,
+                    displaced,
+                    shell.scrollback,
+                )?;
+            }
+            // No blank-history insertion is needed once the shell owns the
+            // rectangle. Publish the new geometry before resampling: if a
+            // resize raced the scroll, fit_screen preserves the displaced
+            // history using this new boundary, not the old height's math.
+            shell.band_height = target;
+            shell.install_area(Rect::new(0, top, shell.screen.width, target))?;
+            shell.sync_size()?;
+            if target > old.height {
+                shell.stats.grows += 1;
+            } else {
+                shell.stats.shrinks += 1;
+            }
+            shell.clear_band()?;
+            shell.tolerated_draw(render);
+            Ok(())
+        })
     }
 
-    /// Resize handling under one wrapper: re-anchor (a CPR round-trip whose
-    /// failure is tolerated and counted — the next resize or draw
-    /// re-anchors), then on a horizontal shrink replay the still-visible
-    /// history tail from source (stock ratatui clears the screen on shrink).
-    /// `replay_tail(max_rows, width)` returns up to `max_rows` wrapped rows
-    /// from the caller's event source — the shell never retains history.
-    ///
-    /// Width follows the terminal. The recorded band height is the requested
-    /// height, not re-clamped here: ratatui re-clamps the viewport to the
-    /// screen on every resize (and re-expands when the screen grows back),
-    /// so the on-screen effective height is always `min(requested, screen)`
-    /// and `set_height` derives its deltas from that. Re-deriving the desired
-    /// height after a resize is the caller's job (height policy is
-    /// event-driven). Processing cadence (the ~75 ms debounce, spike
-    /// discipline 2) belongs to the event loop, not here.
+    /// Debounced resize owns the destructive width-shrink replay. Ordinary
+    /// draws and inserts may fit the band meanwhile, but never clear history
+    /// or consume the replay marker. `replay_tail` supplies only displayed
+    /// content from the caller's source, bounded to the visible window.
     pub fn on_resize(
         &mut self,
         cols: u16,
@@ -224,149 +213,120 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
         replay_tail: impl FnOnce(u16, u16) -> Vec<Line<'static>>,
         render: impl FnOnce(&mut Frame<'_>),
     ) -> io::Result<()> {
-        let shrunk = cols < self.width;
-        self.width = cols;
         self.guarded(|shell| {
-            if shell.terminal.resize(Rect::new(0, 0, cols, rows)).is_err() {
+            if shell.fit_screen(Size::new(cols, rows)).is_err() {
                 shell.stats.tolerated_resize_errors += 1;
                 return Ok(());
             }
+            let shrunk = cols < shell.width || shell.replay_pending;
             if shrunk {
-                let visible_history = rows.saturating_sub(shell.band_height);
-                let tail = replay_tail(visible_history, cols);
+                crate::history::clear_below(shell.terminal.backend_mut(), 0, rows)?;
+                shell.install_area(Rect::new(0, 0, cols, clamp_height(shell.band_height, rows)))?;
+                shell.clear_band()?;
+                let tail = replay_tail(rows.saturating_sub(shell.band_height), cols);
                 if !tail.is_empty() {
-                    let height = u16::try_from(tail.len()).unwrap_or(u16::MAX);
-                    let len = tail.len();
-                    shell.terminal.insert_before(height, |buf| {
-                        Paragraph::new(tail).render(buf.area, buf);
-                    })?;
-                    shell.park_cursor_at_viewport_top()?;
+                    shell.insert_history(&tail)?;
                     shell.stats.inserts += 1;
-                    shell.stats.inserted_rows += len;
+                    shell.stats.inserted_rows += tail.len();
                     shell.stats.shrink_replays += 1;
                 }
             }
+            shell.width = cols;
+            shell.replay_pending = false;
             shell.tolerated_draw(render);
             Ok(())
         })
     }
 
-    fn grow_from(
-        &mut self,
-        new_height: u16,
-        current: u16,
-        render: impl FnOnce(&mut Frame<'_>),
-    ) -> io::Result<()> {
-        let delta = new_height - current;
-        self.guarded(|shell| {
-            // The blank buffer below the band (a top-anchored shrink's Δ
-            // rows): growth extends into it first — a park + recreate, no
-            // scroll, no insert — and only the overflow goes through the
-            // bottom-anchored insert path.
-            let screen_rows = shell.terminal.size()?.height;
-            let top = shell.terminal.get_frame().area().y;
-            let buffer = screen_rows.saturating_sub(top + current);
-            let absorb = delta.min(buffer);
-            if absorb > 0 {
-                shell.terminal.set_cursor_position(Position::new(0, top))?;
-                // The insert path's clear, for the same reason: the coming
-                // draw is a cell diff, so a fresh blank glyph never
-                // overwrites a stale one — the old band rows must be wiped
-                // for the taller viewport to repaint clean.
-                shell.terminal.clear()?;
-                shell.recreate(current + absorb)?;
-            }
-            let overflow = delta - absorb;
-            if overflow > 0 {
-                shell.terminal.insert_before(overflow, |_buf| {})?;
-                let area_y = shell.terminal.get_frame().area().y;
-                debug_assert!(
-                    area_y >= overflow,
-                    "grow invariant: a bottom-anchored band of {} rows on a \
-                     clamped screen always has Δ={overflow} rows of room above",
-                    current + absorb,
-                );
-                let new_top = area_y - overflow;
-                shell
-                    .terminal
-                    .set_cursor_position(Position::new(0, new_top))?;
-                shell.recreate(new_height)?;
-            }
-            shell.stats.grows += 1;
-            shell.tolerated_draw(render);
-            Ok(())
-        })
+    /// The public Fixed viewport constructor installs known geometry without
+    /// querying, reserving rows, or implicitly clearing the user's history.
+    fn install_area(&mut self, area: Rect) -> io::Result<()> {
+        if self.band_area() != area {
+            self.terminal = Terminal::with_options(
+                self.terminal.backend().clone(),
+                TerminalOptions {
+                    viewport: Viewport::Fixed(area),
+                },
+            )?;
+        }
+        self.terminal.set_cursor_position(area.as_position())
     }
 
-    fn shrink_from(
-        &mut self,
-        new_height: u16,
-        current: u16,
-        render: impl FnOnce(&mut Frame<'_>),
-    ) -> io::Result<()> {
-        debug_assert!(new_height < current);
-        self.guarded(|shell| {
-            shell.terminal.clear()?;
-            // Top-anchored: the band keeps its top edge, so the vacated rows
-            // sit BELOW it as a blank buffer — the transcript above never
-            // sees a gap. `grow_from` re-absorbs the buffer without
-            // scrolling; `flush` inserts descend into it (the portable
-            // insert path re-anchors the viewport below the inserted rows).
-            let new_top = shell.terminal.get_frame().area().y;
-            shell
-                .terminal
-                .set_cursor_position(Position::new(0, new_top))?;
-            shell.recreate(new_height)?;
-            shell.stats.shrinks += 1;
-            shell.tolerated_draw(render);
-            Ok(())
-        })
-    }
-
-    /// The recreation seam (spike fact F1's escape hatch, adopted by the
-    /// second 2026-09-14 amendment). The anchor query is answered from
-    /// tracked cursor state — the shell parked the cursor at the future
-    /// band top one step earlier, so the answer is exact (module docs).
-    /// Width re-syncs here: a resize landing between debounce ticks is
-    /// missed by the input contract, and recreation is the one place that
-    /// always re-reads the terminal (the next debounced resize still owns
-    /// the replay path).
-    fn recreate(&mut self, new_height: u16) -> io::Result<()> {
-        self.terminal = Terminal::with_options(
-            self.terminal.backend().clone(),
-            TerminalOptions {
-                viewport: Viewport::Inline(new_height),
-            },
+    fn clear_band(&mut self) -> io::Result<()> {
+        let area = self.band_area();
+        crate::history::clear_below(
+            self.terminal.backend_mut(),
+            area.y,
+            self.screen.height.max(area.bottom()),
         )?;
-        self.band_height = new_height;
-        self.width = self.terminal.size()?.width;
+        self.terminal.set_cursor_position(area.as_position())?;
+        // Invalidate both buffers after raw writes, including default spaces.
+        self.terminal.swap_buffers();
+        self.terminal.swap_buffers();
         Ok(())
     }
 
-    /// Repair the cursor after an `insert_before`: the portable insert
-    /// path's closing `Terminal::clear` restores the cursor to its
-    /// pre-insert position — a row the viewport slide just pushed ABOVE the
-    /// band. Left there, the next `resize`'s re-anchor computes a cursor
-    /// offset that saturates to zero and pulls the viewport UP over the
-    /// inserted rows, erasing them (upstream bug in
-    /// `insert_before_no_scrolling_regions`' restore; the re-anchor only
-    /// ever runs on resize, which is why the window stayed latent). Any
-    /// in-viewport row preserves the re-anchor's math; the band's next draw
-    /// repositions the cursor for display anyway.
-    fn park_cursor_at_viewport_top(&mut self) -> io::Result<()> {
-        let top = self.terminal.get_frame().area().y;
-        self.terminal.set_cursor_position(Position::new(0, top))
+    fn sync_size(&mut self) -> io::Result<()> {
+        let screen = self.terminal.size()?;
+        self.fit_screen(screen)
     }
 
-    /// Draw, tolerating CPR-class failure (spike discipline 3).
+    /// Fit only the band to physical dimensions. The terminal can resize
+    /// during a raw write; this must never invoke ratatui's whole-screen
+    /// clear afterwards. Source replay waits for the debounced event.
+    fn fit_screen(&mut self, screen: Size) -> io::Result<()> {
+        if screen == self.screen {
+            return Ok(());
+        }
+        let old = self.band_area();
+        let height = clamp_height(self.band_height, screen.height);
+        let top = old.y.min(screen.height.saturating_sub(height));
+        let history_bottom = old.y.min(screen.height);
+        let displaced = history_bottom.saturating_sub(top);
+        if displaced > 0 {
+            crate::history::scroll_history(
+                self.terminal.backend_mut(),
+                history_bottom,
+                screen.height,
+                displaced,
+                self.scrollback,
+            )?;
+        }
+        self.install_area(Rect::new(0, top, screen.width, height))?;
+        self.clear_band()?;
+        self.replay_pending |= screen.width < self.screen.width;
+        self.screen = screen;
+        Ok(())
+    }
+
+    fn insert_history(&mut self, rows: &[Line<'_>]) -> io::Result<()> {
+        let before = self.band_area();
+        let after = crate::history::insert(
+            self.terminal.backend_mut(),
+            rows,
+            before,
+            self.screen,
+            self.scrollback,
+        )?;
+        self.install_area(after)?;
+        // The raw writer's flush can race a physical resize. Fit before
+        // clearing: an out-of-screen CUP would clamp onto a history row.
+        self.sync_size()?;
+        self.clear_band()
+    }
+
     fn tolerated_draw(&mut self, render: impl FnOnce(&mut Frame<'_>)) {
-        if self.terminal.draw(render).is_err() {
+        if self
+            .sync_size()
+            .and_then(|()| self.terminal.draw(render).map(|_| ()))
+            .is_err()
+        {
             self.stats.tolerated_draw_errors += 1;
         }
     }
 
-    /// One 2026h wrapper around `op`: begin, run, always end — a leaked open
-    /// guard would wedge the terminal's compositing for the rest of the run.
+    /// Always attempt the closing wrapper, even when a structural write
+    /// failed. Both handles must target the same terminal stream.
     fn guarded(&mut self, op: impl FnOnce(&mut Self) -> io::Result<()>) -> io::Result<()> {
         execute!(&mut self.guard, BeginSynchronizedUpdate)?;
         let result = op(self);
@@ -375,8 +335,6 @@ impl<B: Backend<Error = io::Error> + Clone, W: Write> InlineShell<B, W> {
     }
 }
 
-/// Height policy works on effective (screen-clamped) heights; a band is at
-/// least one row.
 fn clamp_height(desired: u16, screen_rows: u16) -> u16 {
     desired.clamp(1, screen_rows.max(1))
 }

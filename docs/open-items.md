@@ -284,53 +284,17 @@ selection/copy drift under a moving stream); and the evidence-gated
 behaviors — pause or batch inserts while the user is scrolled up, only if
 the matrix shows bottom-anchored terminals in the support set.
 
-## The next ratatui bump moves the inline spike's accepted costs
+## Reassess history ownership on the next ratatui bump
 
-Consumer: the first ratatui version bump (0.30.3 or later).
+Consumer: the first ratatui dependency upgrade after the history-write port.
 
-crates.io still serves 0.30.2 (2026-06-19) — the version the inline
-spike measured — but upstream's inline-viewport area is converging on
-Codex-class behavior fast (GitHub issue tracker, 2026-09-14):
-merged-unreleased #2670 (breaking: no full-screen clear when an
-inline viewport shrinks horizontally) and #2731 (skip the redundant
-shrink clear), #2666 closed (the live viewport duplicating into
-scrollback on resize under continuous draw + insert_before), #2527
-in progress (wide-grapheme continuation cells in insert_before,
-tagged v0.31.0). Field confirmation (2026-09-16): every flushed CJK
-prompt row lands in scrollback with a spurious space per continuation
-cell (`你好` becomes `你 好`, the tail shifting right) — the bug bites
-on the ordinary path, no exotic setup needed, which raises the bump's
-priority. Separately, same day: the first interactive session died on
-`insert_before`'s closing `Terminal::clear` — its cursor-position query
-stalled behind crossterm's parked event-reader thread (ratatui #2640's
-mechanism, reproduced on a pty). cadmus-tui now answers all post-boot
-cursor queries from tracked state (`src/cursor.rs`), so #2640 no longer
-reaches the shell; the tracker's seed query is the session's only CPR. Same area, one more upstream
-wrinkle found by the paced-emission work (2026-09-20): the portable
-`insert_before` path's closing `Terminal::clear` restores the cursor to
-its pre-insert position, a row the viewport slide pushed ABOVE the band —
-a resize reading that offset saturates it to zero and pulls the viewport
-UP over the inserted rows, erasing them. The shell parks the cursor inside
-the viewport after every insert (`InlineShell::park_cursor_at_viewport_top`);
-on the next bump, re-check whether upstream fixed the restore so the park
-can retire. Field sighting three, same day (real session, deepseek):
-ratatui #2527's nastier face — the spurious spaces inflate a CJK row's PHYSICAL
-width past the terminal width (logical 68 + 30 CJK = 98 on a ~95-col
-screen), the terminal soft-wraps the tail onto the next row, and the next
-write overwrites it: the final line lost ` 权限）。` to the `Worked for`
-insert and `举` vanished mid-paragraph at the wrap boundary — both exactly
-at the physical-width edge, content verified intact in the trajectory.
-If the bump keeps slipping, the recorded alternative is porting codex's
-`insert_history.rs` (own the flush-write path: DECSTBM scroll regions +
-per-line writes that never touch continuation cells, cursor-position
-neutral — ports to stock ratatui 0.30.2 with a ~30-line shim, verified
-against their source 2026-09-20). Two of the spike verdict's accepted costs live
-exactly here: resize residue and the shrink clear+replay. On the
-next bump, before merging: re-run the inline-spike harness matrix —
-the shrink replay may flip from necessary to harmful (inserting rows
-nothing lost) — plus the dynamic-height probe suite
-(`tests/dynamic_height_spike.rs`), and re-check the ADR-0018
-amendment's evidence lines. MSRV holds at 1.88 through 0.30.2.
+ADR-0018's 2026-09-21 amendment removes `insert_before` from production and
+uses stock Fixed after boot. Upstream #2527/#2640 and the inline shrink
+clear changes therefore no longer repair our active write path directly.
+On the next bump, rerun `history_insert`, `dynamic_height_spike` and the
+native inline-spike matrix; only then consider returning geometry or
+insertion to upstream. A fixed upstream writer alone is not evidence that
+its resize/ack behavior satisfies the shell's contract.
 
 ## The stream emission's motion profile is a TERM=dumb switch until config lands
 
@@ -344,30 +308,6 @@ cadmus-tui terminal boundary (`style::detect_paced`, mirroring
 is `full|reduced|none` as a settings key over the same seam; it lands with
 the item-7 TOML loader, which owns the profile's naming, precedence and
 default.
-
-## Own the flush-write path: port codex's insert_history
-
-Consumer: the next slice after the PR split (approved by the maintainer,
-2026-09-20).
-
-ratatui #2527 has now bitten three times in the field (CJK spurious
-spaces, wrap-boundary grapheme loss, soft-wrap tail-eating — see the
-ratatui-bump item), and the bump is gated on upstream. The alternative
-that fixes it NOW: replace `shell.flush`'s `insert_before` with our own
-history insertion, ported from codex's `codex-rs/tui/src/insert_history.rs`
-(read 2026-09-20): DECSTBM partial scroll regions + per-line writes that
-never touch wide-grapheme continuation cells, cursor-position-neutral,
-with the closing `clear_after_position` + full-repaint invalidation as
-~30 lines of shim on stock ratatui 0.30.2 (`viewport_area()`/
-`set_viewport_area` are public; we already track the cursor in
-`src/cursor.rs`). Port their `ScrollbackStrategy::detect` fallback
-too — their comments record DECSTBM quirks (CSI S discards departing
-rows in QTermWidget/xterm.js; partial regions misbehave in Windows
-Terminal), so the detect matrix is part of the port, not optional. The
-vt100 rig is the proof harness; the port also retires the
-`park_cursor_at_viewport_top` workaround and the CJK artifacts the
-ratatui-bump item tracks, and is the substrate for any later
-drain/scroll-policy work (codex solves the same residue class here).
 
 ## The typewriter drain emits in arrival-sized bursts, not a smooth rhythm
 
@@ -384,6 +324,12 @@ first: a slower base rate that lets a backlog smooth the rhythm across
 bursts (at the cost of display lag), sub-paragraph stability for prose
 (a wrap-stability proof, not a heuristic), character-grain pacing for the
 current row. Decide with a real-terminal A/B, not the vt100 rig.
+
+The history-port review also found a pre-existing scaling cost for this
+consumer: `Transcript::queued_len` scans every emission on each paced
+pump. Draining many one-row emissions is quadratic in emission count.
+Measure backlog-heavy turns in the refinement pass and maintain the
+pending-row total incrementally if the queue remains emission-based.
 
 ## The floor's session-cost field has no pricing source
 

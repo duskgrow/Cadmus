@@ -9,8 +9,8 @@
 //! It sees the contract and the IR — never core internals.
 //!
 //! - [`shell`] — the inline shell: owns the raw terminal and the band's
-//!   lifecycle (anchor, dynamic height via `Terminal` recreation, resize
-//!   reflow, guarded draws — ADR-0018's 2026-09-14 amendments).
+//!   lifecycle (boot anchor, shell-owned band geometry and history writes,
+//!   source replay, guarded draws — ADR-0018's history-write amendment).
 //! - [`cursor`] — the cursor tracker: answers ratatui's cursor-position
 //!   queries from protocol state, so no CPR round-trip ever races the input
 //!   broker's parked reader thread.
@@ -55,6 +55,7 @@ pub mod composer;
 pub mod cursor;
 pub mod debounce;
 pub mod frame;
+mod history;
 pub mod input;
 pub mod layout;
 pub mod shell;

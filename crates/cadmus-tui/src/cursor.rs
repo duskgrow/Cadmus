@@ -1,50 +1,23 @@
-//! The cursor tracker: a [`Backend`] adapter that answers
-//! `get_cursor_position` from protocol state instead of CPR round-trips.
+//! The cursor tracker: answers [`Backend::get_cursor_position`] from state
+//! rather than issuing a CPR through crossterm's process-global reader.
+//! The reader's parked input thread can hold its lock for the query timeout
+//! (ratatui #2640, reproduced on a pty). Seed once before the input broker.
 //!
-//! Why this exists: every cursor-position query (`ESC[6n`) goes through
-//! crossterm's process-global event reader, whose lock the input broker's
-//! parked reader thread *holds while idle*. A query issued in that steady
-//! state stalls for the full two-second lock timeout and then fails —
-//! verified end to end on a real pty (2026-09-16): the terminal answered
-//! immediately, yet the query returned "cursor position could not be read
-//! within a normal duration" after 2.0 s. ratatui's inline viewport queries
-//! the cursor inside `Terminal::with_options` (construction/recreation),
-//! `Terminal::clear` (which the portable `insert_before` calls on its way
-//! out — so an ordinary prompt flush queried) and `Terminal::resize`, so
-//! the first submitted line was enough to kill the session.
-//!
-//! The tracker removes every post-boot query. It is seeded once with the
-//! real position at construction — the session's one CPR, which must run
-//! before the input broker exists (the app boundary in `app::run` owns that
-//! order) — and then tracks the cursor through the shell's own ops:
-//! `set_cursor_position` sets it, `append_lines` advances it with
-//! scroll-at-bottom clamping, clears never move it. Exactness is only
-//! needed at ratatui's query points, and each is preceded by an explicit
-//! park (the grow/shrink protocol) or by a draw (which ends in
-//! `set_cursor_position` via the frame cursor):
-//!
-//! - construction/recreation and `clear`'s snapshot-restore read the
-//!   cursor; recreation is always preceded by the shell parking the cursor
-//!   at the future band top;
-//! - `resize` reads it after the terminal reflowed — the one approximate
-//!   read (reflow moves content without telling us). An approximate
-//!   re-anchor strictly beats the old behavior: a two-second stall followed
-//!   by abandoning the resize.
-//!
-//! Ops whose cursor side effect is deliberately not modeled — cell `draw`s
-//! (the real cursor lands past the last written cell) and `scroll_region_*`
-//! (the trait leaves the aftermath undefined) — leave the tracked value
-//! untouched: no query point observes it before the next park. Enabling
-//! ratatui's `scrolling-regions` feature later adds two required trait
-//! methods — delegate them and keep this rule.
+//! The shell now uses Inline only to reserve the boot band, then Fixed
+//! geometry (ADR-0018's history-write amendment). Neither drawing nor
+//! resizing needs post-boot cursor queries. Raw writes and cell draws do
+//! not update this cache: the shell explicitly parks before any subsequent
+//! anchor read. `set_cursor_position` and `append_lines` track the boot
+//! reservation; clears do not move the cursor.
+
+use std::io::{self, Write};
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 
-/// See the module docs for the contract. `Clone` because the shell's
-/// recreation clones the backend handle — the clone carries the just-parked
-/// position, which is exactly what the new `Terminal`'s anchor query needs.
+/// `Clone` duplicates the handle for a new fixed drawing surface; the
+/// underlying terminal outlives both handles.
 #[derive(Clone, Debug)]
 pub struct CursorTracker<B> {
     inner: B,
@@ -60,6 +33,18 @@ impl<B: Backend> CursorTracker<B> {
     pub fn new(mut inner: B) -> Result<Self, B::Error> {
         let cursor = inner.get_cursor_position()?;
         Ok(Self { inner, cursor })
+    }
+}
+
+// Raw history writes temporarily move the cursor outside the band. The
+// shell synchronizes it through set_cursor_position before any query.
+impl<B: Write> Write for CursorTracker<B> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 

@@ -24,7 +24,7 @@ use cadmus_contract::{
     ToolCompletion,
 };
 use cadmus_tui::app::{App, AppConfig, RunDriver, RunHandle};
-use cadmus_tui::shell::InlineShell;
+use cadmus_tui::shell::{InlineShell, ScrollbackStrategy};
 use cadmus_ui::theme::{ColorDepth, Theme};
 use common::{GuardSink, ScriptedInput, World};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -212,7 +212,13 @@ fn boot_with_config(
 ) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
     let (input_tx, input) = ScriptedInput::channel();
     let guard = GuardSink::default();
-    let shell = InlineShell::new(world.backend.clone(), guard, 2).expect("boot shell");
+    let shell = InlineShell::new(
+        world.backend.clone(),
+        guard,
+        2,
+        ScrollbackStrategy::FullScreen,
+    )
+    .expect("boot shell");
     let driver = ScriptDriver::new();
     *driver.pending.lock().expect("pending") = pending;
     *driver.settled.lock().expect("settled") = settled;
@@ -2128,8 +2134,13 @@ async fn the_floor_shows_context_usage_and_refreshes_the_git_label_at_the_outcom
             // Boot by hand: the refresh closure is the seam under test. The
             // dirty marker `*` is what the refresh adds.
             let (input_tx, input) = ScriptedInput::channel();
-            let shell = InlineShell::new(world.backend.clone(), GuardSink::default(), 2)
-                .expect("boot shell");
+            let shell = InlineShell::new(
+                world.backend.clone(),
+                GuardSink::default(),
+                2,
+                ScrollbackStrategy::FullScreen,
+            )
+            .expect("boot shell");
             let driver = ScriptDriver::new();
             let refreshes = Arc::new(Mutex::new(0usize));
             let refresh = {

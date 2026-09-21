@@ -12,17 +12,26 @@
 //! prefix of the wrapped whole — the flush split and the stream suite rely
 //! on this.
 
+use std::borrow::Cow;
+
 use cadmus_ui::ir;
 use cadmus_ui::theme::{ColorDepth, Theme};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::style::ir_style;
 
 /// Map logical IR lines onto ratatui lines under the theme and depth.
-fn map_lines(lines: &[ir::Line], theme: &Theme, depth: ColorDepth) -> Vec<Line<'static>> {
+fn map_lines(
+    lines: &[ir::Line],
+    width: u16,
+    theme: &Theme,
+    depth: ColorDepth,
+) -> Vec<Line<'static>> {
     lines
         .iter()
         .map(|line| {
@@ -30,7 +39,10 @@ fn map_lines(lines: &[ir::Line], theme: &Theme, depth: ColorDepth) -> Vec<Line<'
                 line.spans
                     .iter()
                     .map(|span| {
-                        Span::styled(span.text.clone(), ir_style(&span.style, theme, depth))
+                        Span::styled(
+                            display_text(&span.text, width).into_owned(),
+                            ir_style(&span.style, theme, depth),
+                        )
                     })
                     .collect::<Vec<_>>(),
             )
@@ -53,7 +65,8 @@ pub fn wrap_rows(
         return Vec::new();
     }
     let width = width.max(1);
-    let paragraph = Paragraph::new(map_lines(logical, theme, depth)).wrap(Wrap { trim: false });
+    let paragraph =
+        Paragraph::new(map_lines(logical, width, theme, depth)).wrap(Wrap { trim: false });
     let height = paragraph.line_count(width);
     let height = u16::try_from(height).unwrap_or(u16::MAX);
     let area = Rect::new(0, 0, width, height);
@@ -62,11 +75,74 @@ pub fn wrap_rows(
     (0..height).map(|y| extract_row(&buf, y, width)).collect()
 }
 
+/// Raw writes must not interpret model-controlled escapes. A glyph wider
+/// than the entire terminal cannot be rendered; use its ASCII Unicode escape
+/// rather than letting ratatui's word wrapper silently discard it. The source
+/// remains intact for replay at a usable width.
+pub(crate) fn display_text(text: &str, width: u16) -> Cow<'_, str> {
+    if !text.contains(char::is_control)
+        && text
+            .graphemes(true)
+            .all(|g| g.width() <= usize::from(width))
+    {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::new();
+    for grapheme in text.graphemes(true) {
+        let oversized = grapheme.width() > usize::from(width);
+        for ch in grapheme.chars().filter(|ch| !ch.is_control()) {
+            if oversized {
+                out.extend(ch.escape_unicode());
+            } else {
+                out.push(ch);
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Re-wrap display rows that survived a width change, keeping their old
+/// boundaries. Ordinary safe rows are borrowed; only changed rows allocate.
+pub(crate) fn rewrap_rows<'r, 't>(rows: &'r [Line<'t>], width: u16) -> Vec<Cow<'r, Line<'t>>> {
+    let width = width.max(1);
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.width() <= usize::from(width)
+            && row
+                .spans
+                .iter()
+                .all(|span| matches!(display_text(&span.content, width), Cow::Borrowed(_)))
+        {
+            output.push(Cow::Borrowed(row));
+            continue;
+        }
+        let sanitized = Line::from(
+            row.spans
+                .iter()
+                .map(|span| {
+                    Span::styled(display_text(&span.content, width).into_owned(), span.style)
+                })
+                .collect::<Vec<_>>(),
+        )
+        .style(row.style);
+        if sanitized.width() <= usize::from(width) {
+            output.push(Cow::Owned(sanitized));
+            continue;
+        }
+        let paragraph = Paragraph::new(sanitized).wrap(Wrap { trim: false });
+        let height = u16::try_from(paragraph.line_count(width)).unwrap_or(u16::MAX);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
+        paragraph.render(buffer.area, &mut buffer);
+        output.extend((0..height).map(|y| Cow::Owned(extract_row(&buffer, y, width))));
+    }
+    output
+}
+
 /// One row of the scratch buffer as a line: consecutive same-style cells
 /// merge, wide-grapheme continuation cells (which `Buffer` resets to a
 /// blank symbol) are skipped by width math, and trailing whitespace drops —
 /// invisible on screen, and keeping it would only pollute scrollback diffs.
-fn extract_row(buf: &Buffer, y: u16, width: u16) -> Line<'static> {
+pub(crate) fn extract_row(buf: &Buffer, y: u16, width: u16) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut skip = 0u16;
     let mut x = 0;

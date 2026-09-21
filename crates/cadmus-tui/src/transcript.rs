@@ -46,7 +46,7 @@ use cadmus_ui::ir::{self, Slot};
 use cadmus_ui::theme::{ColorDepth, Theme};
 use ratatui::text::Line;
 
-use crate::stream::Stream;
+use crate::stream::{SourceSlice, Stream, rewrap_prefix};
 use crate::wrap::wrap_rows;
 
 /// One assistant block: the markdown pipeline plus the scrollback/queue
@@ -105,12 +105,23 @@ pub enum Light {
 /// flush-plan step their successful insert confirms. The ack fires when the
 /// slice's LAST row lands; a zero-row slice (a block whose lines were all
 /// queued before it sealed — an open fence's body) fires on arrival at the
-/// queue's head. `drained` marks that rows already left (the rewind's
+/// queue's head. `prefix.rows` marks that rows already left (the rewind's
 /// keep-the-front test — see [`Transcript::rewind_queue`]).
 struct Emission {
     rows: VecDeque<Line<'static>>,
     ack: FlushAck,
-    drained: bool,
+    prefix: EmissionPrefix,
+}
+
+/// Replay coordinates, not a second history cache. The queue counts rows
+/// removed by drain; `Transcript::partial` copies that count ONLY on a
+/// successful insert, and survives even if an unconfirmed drain pops the
+/// emission. Static blocks need no source slice because they are immutable.
+#[derive(Clone, Copy)]
+struct EmissionPrefix {
+    source: Option<SourceSlice>,
+    width: u16,
+    rows: usize,
 }
 
 /// The per-block flush plan, aligned with the transcript's unflushed blocks
@@ -159,6 +170,9 @@ pub struct Transcript {
     /// The emission queue (ADR-0018's 2026-09-20 second amendment): stable
     /// rows pending the paced drain, in block order.
     queue: VecDeque<Emission>,
+    /// Confirmed display-row prefix of block `flushed`'s current emission;
+    /// not acked as logical lines until the entire emission succeeds.
+    partial: Option<EmissionPrefix>,
     /// The open assistant block's turn, when the tail is one.
     open_turn: Option<u32>,
     /// The client rule's position filter (ADR-0013 item 4): items with
@@ -177,11 +191,21 @@ pub struct Transcript {
 
 /// Push one block slice onto the emission queue (`rows` may be empty — the
 /// completing-ack-only case, see [`Transcript::snapshot`]).
-fn queue_emission(queue: &mut VecDeque<Emission>, rows: Vec<Line<'static>>, ack: FlushAck) {
+fn queue_emission(
+    queue: &mut VecDeque<Emission>,
+    rows: Vec<Line<'static>>,
+    ack: FlushAck,
+    width: u16,
+    source: Option<SourceSlice>,
+) {
     queue.push_back(Emission {
         rows: rows.into(),
         ack,
-        drained: false,
+        prefix: EmissionPrefix {
+            source,
+            width,
+            rows: 0,
+        },
     });
 }
 
@@ -193,6 +217,7 @@ impl Transcript {
             flushed: 0,
             queued: 0,
             queue: VecDeque::new(),
+            partial: None,
             open_turn: None,
             as_of_seq: 0,
             live_calls: HashMap::new(),
@@ -322,6 +347,7 @@ impl Transcript {
         // not re-type — and the transfer below counts acked lines, so
         // undrained rows would be lost here); the rebuild starts it clean.
         self.queue.clear();
+        self.partial = None;
         self.open_turn = None;
         self.live_calls.clear();
         self.approvals.clear();
@@ -380,23 +406,12 @@ impl Transcript {
         }
         self.sync_completions(&sync.in_flight.completed_tools, resync);
         if let Some(open) = &sync.in_flight.open_turn {
-            self.blocks.push(Block::Agent(Agent {
-                stream: {
-                    let mut stream = Stream::new();
-                    stream.push_delta(&open.partial.text);
-                    stream
-                },
-                acked: 0,
-                emitted: 0,
-            }));
-            self.open_turn = Some(open.turn);
+            let agent = self.agent_block(open.turn);
+            agent.stream.push_delta(&open.partial.text);
             if let Some((turn, acked)) = transfer
                 && turn == open.turn
                 && acked > 0
             {
-                let Some(Block::Agent(agent)) = self.blocks.last_mut() else {
-                    unreachable!("the in-flight block was just pushed");
-                };
                 let flushable = agent.stream.render(width, highlighter).flushable_len();
                 debug_assert!(
                     acked <= flushable,
@@ -515,7 +530,7 @@ impl Transcript {
             match &mut self.blocks[index] {
                 Block::Static(lines) => {
                     let rows = wrap_rows(lines, width, theme, depth);
-                    queue_emission(&mut self.queue, rows, FlushAck::WholeBlock);
+                    queue_emission(&mut self.queue, rows, FlushAck::WholeBlock, width, None);
                     self.queued += 1;
                 }
                 Block::Agent(agent) => {
@@ -535,7 +550,9 @@ impl Transcript {
                     let newly = flushable - pending;
                     agent.emitted = agent.acked + flushable;
                     if newly > 0 {
+                        let trailing_lines = live.len() - flushable;
                         let rows = wrap_rows(&live[pending..flushable], width, theme, depth);
+                        let source = agent.stream.source_slice(trailing_lines, newly);
                         queue_emission(
                             &mut self.queue,
                             rows,
@@ -543,6 +560,8 @@ impl Transcript {
                                 lines: newly,
                                 completes,
                             },
+                            width,
+                            Some(source),
                         );
                     } else if completes {
                         // The seal completed a block whose lines were all
@@ -555,6 +574,8 @@ impl Transcript {
                                 lines: 0,
                                 completes: true,
                             },
+                            width,
+                            None,
                         );
                     }
                     if completes {
@@ -580,7 +601,9 @@ impl Transcript {
     /// The returned acks cover exactly the emissions whose rows ALL left —
     /// the caller confirms them after a successful shell insert
     /// ([`Transcript::apply_flush`]), so a budget spent mid-emission holds
-    /// its ack for the next drain.
+    /// its ack for the next drain. Confirm a successful insert before the
+    /// next drain; a failed insert is fatal, not a retryable dequeue.
+    /// Replay advances only when [`Transcript::apply_flush`] confirms it.
     pub fn drain(&mut self, budget: usize) -> Drain {
         let mut rows = Vec::new();
         let mut acks = Vec::new();
@@ -592,7 +615,7 @@ impl Transcript {
                 && let Some(row) = front.rows.pop_front()
             {
                 rows.push(row);
-                front.drained = true;
+                front.prefix.rows += 1;
             }
             if front.rows.is_empty() {
                 acks.push(self.queue.pop_front().expect("the front emission").ack);
@@ -623,7 +646,11 @@ impl Transcript {
     pub fn rewind_queue(&mut self) {
         // The first block whose append cursor folds back wholesale: every
         // block after the kept slice's.
-        let first = if self.queue.front().is_some_and(|front| front.drained) {
+        let first = if self
+            .queue
+            .front()
+            .is_some_and(|front| front.prefix.rows > 0)
+        {
             let front = self.queue.pop_front().expect("the front emission");
             self.queue.clear();
             self.queued = match front.ack {
@@ -658,7 +685,9 @@ impl Transcript {
         }
     }
 
-    /// Confirm a drain's flush plan (a successful shell insert).
+    /// Confirm a drain's successful shell insert, including its partial
+    /// emission prefix. Call even when `acks` is empty if rows were inserted;
+    /// the whole-emission plan alone cannot describe display-row progress.
     pub fn apply_flush(&mut self, acks: &[FlushAck]) {
         let mut index = self.flushed;
         for ack in acks {
@@ -677,15 +706,21 @@ impl Transcript {
             }
         }
         self.flushed = index;
+        self.partial = self
+            .queue
+            .front()
+            .filter(|front| front.prefix.rows > 0)
+            .map(|front| front.prefix);
     }
 
     /// Resize replay (the shell's `on_resize` closure): the flushed history
     /// tail re-materialized from source at the new width, up to `max_rows`
-    /// display rows, newest last. The live tail is excluded — it comes back
-    /// with the band's own repaint. Per block: flushed static blocks replay
-    /// whole; assistant blocks replay their flushed prefix (the committed
-    /// document minus the still-live lines), which for a fully flushed block
-    /// is everything. Blocks are walked newest-first and the walk stops once
+    /// display rows, newest last. Queued and unstable rows stay excluded.
+    /// Fully flushed static blocks replay whole; assistant blocks replay
+    /// their acked logical prefix. The current emission also contributes
+    /// its confirmed display-row prefix, reconstructed at the emission's
+    /// old width before reflow so queued continuations cannot leak in.
+    /// Blocks are walked newest-first and the walk stops once
     /// the window is full — a session's age never inflates a shrink replay.
     pub fn replay_tail(
         &mut self,
@@ -711,6 +746,23 @@ impl Transcript {
                         .replay_tail(u16::MAX, width, highlighter, theme, depth)
                 }
             };
+            if index == self.flushed
+                && let Some(prefix) = self.partial
+            {
+                let original = match block {
+                    Block::Static(lines) => wrap_rows(lines, prefix.width, theme, depth),
+                    Block::Agent(agent) => agent.stream.replay_slice(
+                        prefix
+                            .source
+                            .expect("an agent emission has source coordinates"),
+                        prefix.width,
+                        highlighter,
+                        theme,
+                        depth,
+                    ),
+                };
+                block_rows.extend(rewrap_prefix(&original, prefix.rows, width));
+            }
             // Keep only what still fits, then prepend (blocks older than the
             // window's edge render fully — per-block work is the floor).
             let room = usize::from(max_rows) - rows.len();
@@ -2489,6 +2541,247 @@ mod tests {
             )),
             "the untouched queue re-wrapped wholesale at the new width"
         );
+    }
+
+    fn replay(transcript: &mut Transcript, width: u16) -> Vec<Line<'static>> {
+        transcript.replay_tail(
+            u16::MAX,
+            width,
+            highlighter(),
+            &Theme::ansi(),
+            ColorDepth::Truecolor,
+        )
+    }
+
+    #[test]
+    fn a_partially_flushed_prompt_replays_only_its_confirmed_rows() {
+        let mut transcript = Transcript::new();
+        transcript.push_user("first\nsecond\nthird");
+        snapshot(&mut transcript);
+        let drain = transcript.drain(1);
+        assert_eq!(texts(&drain.rows), vec!["❯ first"]);
+        assert!(drain.acks.is_empty());
+        transcript.apply_flush(&drain.acks);
+
+        transcript.rewind_queue();
+        transcript.snapshot(12, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(texts(&replay(&mut transcript, 12)), vec!["❯ first"]);
+        assert_eq!(transcript.queued_len(), 3);
+    }
+
+    #[test]
+    fn a_static_partial_keeps_its_wrap_across_repeated_drains_and_rewinds() {
+        let mut transcript = Transcript::new();
+        transcript.push_user("alpha beta gamma delta epsilon zeta\nlast prompt line");
+        transcript.snapshot(16, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        let original: Vec<_> = transcript.queue[0].rows.iter().cloned().collect();
+        assert!(original.len() > 3);
+        let mut inserted = Vec::new();
+
+        for width in [12, 8, 20] {
+            let drain = transcript.drain(1);
+            assert!(drain.acks.is_empty());
+            inserted.extend(drain.rows);
+            transcript.apply_flush(&drain.acks);
+            transcript.rewind_queue();
+            transcript.snapshot(width, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+            assert_eq!(inserted, original[..inserted.len()]);
+            assert_eq!(
+                replay(&mut transcript, width),
+                rewrap_prefix(&inserted, inserted.len(), width)
+            );
+            assert_eq!(transcript.queued_len(), original.len() - inserted.len());
+        }
+
+        let drain = transcript.drain(usize::MAX);
+        inserted.extend(drain.rows);
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(inserted, original, "the remaining rows keep the old wrap");
+        assert!(transcript.partial.is_none());
+        let Block::Static(lines) = &transcript.blocks[0] else {
+            panic!("the prompt is static");
+        };
+        let expected = wrap_rows(lines, 8, &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(
+            replay(&mut transcript, 8),
+            expected,
+            "completion must not replay the prefix twice"
+        );
+        assert!(pump(&mut transcript).0.is_empty());
+    }
+
+    #[test]
+    fn an_agent_partial_follows_prior_acks_and_survives_later_emissions() {
+        let mut transcript = Transcript::new();
+        transcript.push_user("prompt");
+        transcript.apply_item(&delta(1, 1, "```text\nprior\n"));
+        assert_eq!(pump(&mut transcript).0, vec!["❯ prompt", "", "prior"]);
+        transcript.apply_item(&delta(2, 1, "alpha beta gamma delta\nsecond\n"));
+        snapshot(&mut transcript);
+        let first = transcript.drain(1);
+        assert_eq!(texts(&first.rows), vec!["alpha beta gamma delta"]);
+        assert!(first.acks.is_empty());
+        transcript.apply_flush(&first.acks);
+
+        // A later slice of the same block must fold back, not become part
+        // of the source coordinates used to replay the partial front.
+        transcript.apply_item(&delta(3, 1, "third\nfourth\n"));
+        snapshot(&mut transcript);
+        assert_eq!(transcript.queue.len(), 2);
+        transcript.rewind_queue();
+        assert_eq!(transcript.queue.len(), 1);
+        transcript.snapshot(10, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        let expected = vec!["❯ prompt", "", "prior", "alpha beta", "gamma", "delta"];
+        assert_eq!(texts(&replay(&mut transcript, 10)), expected);
+        let tail =
+            transcript.replay_tail(2, 10, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(texts(&tail), vec!["gamma", "delta"]);
+
+        // One drain completes the old emission and starts the next one.
+        let drain = transcript.drain(2);
+        assert_eq!(texts(&drain.rows), vec!["second", "third"]);
+        assert_eq!(
+            drain.acks,
+            vec![FlushAck::AgentLines {
+                lines: 2,
+                completes: false
+            }]
+        );
+        transcript.apply_flush(&drain.acks);
+        transcript.rewind_queue();
+        transcript.snapshot(8, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        assert_eq!(
+            texts(&replay(&mut transcript, 8)),
+            vec![
+                "❯ prompt",
+                "",
+                "prior",
+                "alpha",
+                "beta",
+                "gamma",
+                "delta",
+                "second",
+                "third"
+            ]
+        );
+
+        transcript.apply_item(&llm_response(
+            4,
+            1,
+            "```text\nprior\nalpha beta gamma delta\nsecond\nthird\nfourth\n```\n",
+        ));
+        transcript.snapshot(8, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        let drain = transcript.drain(usize::MAX);
+        assert_eq!(texts(&drain.rows), vec!["fourth"]);
+        assert_eq!(
+            drain.acks,
+            vec![
+                FlushAck::AgentLines {
+                    lines: 2,
+                    completes: false
+                },
+                FlushAck::AgentLines {
+                    lines: 0,
+                    completes: true
+                },
+            ]
+        );
+        transcript.apply_flush(&drain.acks);
+        assert!(transcript.partial.is_none());
+        assert_eq!(
+            texts(&replay(&mut transcript, 80)),
+            vec![
+                "❯ prompt",
+                "",
+                "prior",
+                "alpha beta gamma delta",
+                "second",
+                "third",
+                "fourth"
+            ]
+        );
+        assert_eq!(transcript.flushed, transcript.blocks.len());
+        assert!(pump(&mut transcript).0.is_empty());
+    }
+
+    #[test]
+    fn an_agent_partial_never_replays_a_queued_logical_line_continuation() {
+        let mut transcript = Transcript::new();
+        transcript.apply_item(&delta(1, 1, "alpha beta gamma delta\n\nheld\n"));
+        transcript.snapshot(10, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+        for expected in [vec!["alpha beta"], vec!["alpha beta", "gamma"]] {
+            let drain = transcript.drain(1);
+            assert!(drain.acks.is_empty());
+            transcript.apply_flush(&drain.acks);
+            transcript.rewind_queue();
+            snapshot(&mut transcript);
+            assert_eq!(texts(&replay(&mut transcript, 80)), expected);
+        }
+        let drain = transcript.drain(usize::MAX);
+        assert_eq!(texts(&drain.rows), vec!["delta", ""]);
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(
+            texts(&replay(&mut transcript, 80)),
+            vec!["alpha beta gamma delta", ""]
+        );
+    }
+
+    #[test]
+    fn a_drain_crossing_blocks_confirms_only_the_new_partial_prefix() {
+        let mut transcript = Transcript::new();
+        transcript.push_user("prompt");
+        transcript.apply_item(&llm_response(1, 1, "```text\nfirst\nsecond\n```\n"));
+        snapshot(&mut transcript);
+        let drain = transcript.drain(3);
+        assert_eq!(texts(&drain.rows), vec!["❯ prompt", "", "first"]);
+        assert_eq!(drain.acks, vec![FlushAck::WholeBlock]);
+        assert!(replay(&mut transcript, 80).is_empty());
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(
+            texts(&replay(&mut transcript, 80)),
+            vec!["❯ prompt", "", "first"]
+        );
+        let drain = transcript.drain(usize::MAX);
+        transcript.apply_flush(&drain.acks);
+        assert_eq!(
+            texts(&replay(&mut transcript, 80)),
+            vec!["❯ prompt", "", "first", "second"]
+        );
+    }
+
+    #[test]
+    fn failed_inserts_never_advance_partial_replay() {
+        // No apply_flush models the app's fatal shell-insert error. Cover
+        // both a retained front and one popped by the failed final drain.
+        for agent in [false, true] {
+            for confirmed in [false, true] {
+                for budget in [1, usize::MAX] {
+                    let mut transcript = Transcript::new();
+                    if agent {
+                        transcript.apply_item(&delta(1, 1, "```text\nprior\n"));
+                        pump(&mut transcript);
+                        transcript.apply_item(&delta(2, 1, "first\nsecond\nthird\n"));
+                    } else {
+                        transcript.push_user("first\nsecond\nthird");
+                    }
+                    snapshot(&mut transcript);
+                    if confirmed {
+                        let drain = transcript.drain(1);
+                        transcript.apply_flush(&drain.acks);
+                    }
+                    let expected = replay(&mut transcript, 12);
+                    assert!(!transcript.drain(budget).rows.is_empty());
+                    assert_eq!(replay(&mut transcript, 12), expected);
+                    transcript.rewind_queue();
+                    transcript.snapshot(12, highlighter(), &Theme::ansi(), ColorDepth::Truecolor);
+                    assert_eq!(
+                        replay(&mut transcript, 12),
+                        expected,
+                        "rewind must not commit a failed insert"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,8 +1,7 @@
 //! Terminal-quirk regression harness for the inline shell (ADR-0018): a thin
 //! driver over `cadmus_tui::shell::InlineShell` — the band mechanism (2026h
-//! guarded insert+draw, the grow/shrink recreation protocol, the shrink
-//! replay, cursor-query tolerance) lives in the library and is locked
-//! deterministically by `tests/dynamic_height_spike.rs`. This harness
+//! guarded insert+draw, shell-owned geometry and shrink replay) lives in
+//! the library and is locked by the vt100 integration suites. This harness
 //! supplies what the suite cannot: a fake typewriter stream, key bindings,
 //! the capture pipeline and diagnostics counters — so the terminal-quirk
 //! matrix exercises the production path.
@@ -17,12 +16,11 @@
 //! Machine-verifiable evidence: every run tees the raw output stream to
 //! `target/inline-spike/capture-<ts>.bin` plus a `.txt` sidecar (initial
 //! size, terminal identity, resize events with byte offsets, the full key
-//! log, and the expected final row sequence). `inline_spike_replay` replays
-//! the capture through vt100 and diffs it against the sidecar model — the
-//! matrix verdict is computed, not described. The sentinel protocol (tap `x`
-//! around each height key) makes swallowed-input races at Terminal
-//! recreation (upstream #2640) visible in the key log — the input broker
-//! that owns this race lands with the event-loop PR. Keep the window size
+//! log, and the expected final row sequence). For the full-screen fallback,
+//! `inline_spike_replay` can diff the capture against the sidecar through
+//! vt100. Standard partial regions need a native history capture: vt100
+//! discards their departing rows. Sentinel keys still check swallowed input
+//! around geometry changes. Keep the window size
 //! fixed during a dynamic-height leg: the sidecar model wraps at the final
 //! width, so mid-leg resizes make the model unreliable (resize reflow is a
 //! separate matrix leg).
@@ -46,7 +44,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// Initial band height. The grow/shrink keys change it at runtime through
-/// the shell's recreation protocol.
+/// the shell's geometry protocol.
 const VIEWPORT_HEIGHT: u16 = 8;
 /// Grow/shrink step of the dynamic-height probe.
 const HEIGHT_STEP: u16 = 4;
@@ -186,7 +184,7 @@ fn main() -> io::Result<()> {
     println!("inline_spike diagnostics");
     println!("  terminal: {identity}");
     println!(
-        "  turns: {}, insert_before calls: {}, rows inserted: {}",
+        "  turns: {}, history inserts: {}, rows inserted: {}",
         stats.turns, shell_stats.inserts, shell_stats.inserted_rows
     );
     println!(
@@ -249,6 +247,7 @@ impl Harness {
             // Zed run showed 0 guards in the stream).
             tee.clone(),
             VIEWPORT_HEIGHT,
+            cadmus_tui::shell::ScrollbackStrategy::detect(),
         )?;
         Ok(Some(Self {
             shell,
