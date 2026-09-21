@@ -13,8 +13,12 @@
 //! pins exactly where every blank row is allowed to be.
 //!
 //! Time is tokio's paused clock (frame gate, debounce, the pacing horizon);
-//! the drainer thread is real-time but only forwards into a channel, so a
-//! few settle pumps always converge the world.
+//! the drainer thread is real-time and only *scheduled*, never awaited, so
+//! nothing here may assume when its delivery lands: the waits hop in real time
+//! until the world shows the effect (`flush_feed_until`). Every real-time wait
+//! goes through `real_wait`, which inhibits the paused clock's auto-advance, so
+//! the clock moves only where this suite advances it — the invariant the
+//! tick-counting assertions rest on (and the one the Windows job caught).
 
 mod common;
 
@@ -360,33 +364,87 @@ async fn settle_until(mut condition: impl FnMut() -> bool) {
             yield_now().await;
             return;
         }
-        std::thread::sleep(Duration::from_millis(1));
+        real_wait().await;
     }
     panic!("the world never reached the expected state");
 }
 
-/// Pump the loop on real time only (no virtual advance): the drainer
-/// forwards, the app applies, and a demand frame fires if the frame gate
-/// is quiescent — but no pacing horizon can fire (the paused clock holds),
-/// so the paced drain stays frozen for exact tick counting.
-async fn flush_feed() {
-    for _ in 0..8 {
-        yield_now().await;
-        std::thread::sleep(Duration::from_millis(1));
-        yield_now().await;
-    }
+/// The delivery window's hop budget (`FEED_HOPS` ≈ 1 ms each). The predicate
+/// form is budgeted in hops and one frame step, never in tries: only that
+/// generous real-time backstop — and never a tuned window — is a timing
+/// assumption about the machine.
+const FEED_HOPS: usize = 32;
+
+/// One real-time hop that leaves the paused clock alone, and the only way the
+/// suite waits in real time. While a blocking task runs, tokio inhibits the
+/// paused clock's auto-advance (`time::pause`'s documented seam; `start_paused`
+/// guarantees the current-thread runtime the inhibit needs), so the park this
+/// wait puts the loop in wakes on real deliveries — a bare park instead jumps
+/// the clock to the next timer, firing the 33 ms pacing horizon or the 1 Hz
+/// clock tick mid-window. Virtual time then moves only where this suite
+/// advances it, which every tick-counting assertion depends on.
+async fn real_wait() {
+    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+        .await
+        .expect("the real-time wait joins");
 }
 
-/// The arrival pump, deterministically: the feed applies on real-time
-/// yields, the (possibly rate-gated) demand frame fires within 10 ms of
-/// virtual time, and the queue's first budget drains. The 33 ms pacing
-/// horizon is out of reach, so every 33 ms step after this is exactly one
-/// budget.
-async fn flush_arrival() {
-    flush_feed().await;
+/// One delivery hop: the drainer is only ever *scheduled*, never awaited, so
+/// the loop is pumped on real time — no virtual advance, so the frame gate
+/// alone decides whether a pump fires.
+async fn feed_hop() {
+    yield_now().await;
+    real_wait().await;
+    yield_now().await;
+}
+
+/// The hops half of a wait: real time until `condition` holds, no virtual
+/// advance. A pump the open gate already unblocked lands here, and a slow
+/// deliverer is absorbed in real time — which is the whole point: the paced
+/// suites would otherwise read a late delivery as a missing budget.
+async fn hop_until(condition: &mut impl FnMut() -> bool) -> bool {
+    for _ in 0..FEED_HOPS {
+        feed_hop().await;
+        if condition() {
+            return true;
+        }
+    }
+    false
+}
+
+/// One 10 ms frame step: a demand frame blocked by the rate gate fires here,
+/// and the queue's first budget drains with it. The 10 ms is the harness's one
+/// piece of arithmetic, and it is deliberate: wider than the 120 FPS frame gate
+/// (`frame::MIN_FRAME_INTERVAL`, 8.33 ms) so a gated frame does fire, narrower
+/// than the 33 ms pacing tick so no horizon can — the "one budget per step" the
+/// tick-counting assertions rest on (the Esc-dump pin included: a dump that
+/// waited for the next tick instead of the next pump fails here).
+async fn arrival_frame() {
     advance(Duration::from_millis(10)).await;
     yield_now().await;
     yield_now().await;
+}
+
+/// Pump the loop on real time until `condition` reports the world caught up,
+/// then stop at that pump.
+///
+/// Hops first, and the one frame step after them is the fallback for a gate the
+/// app's own frames left hot; the trailing hops let that step's pump land. The
+/// clock moves at most those 10 ms, so the wait cannot hand its caller a second
+/// budget: no horizon is reachable, and whatever frame the step fires is the
+/// one the delivery was waiting on.
+async fn flush_feed_until(mut condition: impl FnMut() -> bool) {
+    if hop_until(&mut condition).await {
+        return;
+    }
+    arrival_frame().await;
+    if condition() || hop_until(&mut condition).await {
+        return;
+    }
+    panic!(
+        "the feed never landed: ~{} real-time hops and one 10 ms frame step without the condition holding",
+        FEED_HOPS * 2
+    );
 }
 
 /// One pacing tick: the 33 ms horizon fires exactly one pump (one budget).
@@ -510,6 +568,28 @@ fn tokens(from: usize, to: usize) -> String {
         .map(|i| format!("token{i:04}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The harness's own seam, pinned: a real-time wait must leave the paused
+/// clock alone even with a timer pending. Without the blocking task's
+/// auto-advance inhibit, the park jumps the clock to that timer — the failure
+/// the Windows job showed (its doubled arrival budget, itself only a symptom)
+/// — and every tick-counting assertion in this file is downstream of the clock
+/// staying put.
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn a_real_time_wait_leaves_the_paused_clock_alone() {
+    // A timer pending across the waits: a park would advance to it.
+    let armed = tokio::spawn(tokio::time::sleep(Duration::from_secs(60)));
+    let before = tokio::time::Instant::now();
+    for _ in 0..4 {
+        real_wait().await;
+    }
+    assert_eq!(
+        tokio::time::Instant::now(),
+        before,
+        "the clock moved on its own"
+    );
+    armed.abort();
 }
 
 #[tokio::test(start_paused = true, flavor = "current_thread")]
@@ -1906,18 +1986,21 @@ async fn a_width_grow_mid_run_loses_no_rows() {
             let run = driver.take_run();
 
             // Content streaming: one closed paragraph typing out, a second
-            // closed behind it, a third held open.
+            // closed behind it, a third held open. Each arrival stops at the
+            // next budget (its whole effect here: the queue runs on), so the
+            // queue is still mid-drain when the resize lands below.
             let p1 = tokens(1, 33);
             let p2 = tokens(41, 57);
             let p3 = tokens(61, 77);
             run.live
                 .send(delta(1, 1, &format!("{p1}\n\n")))
                 .expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| !token_words(&world).is_empty()).await;
+            let typed = token_words(&world).len();
             run.live
                 .send(delta(2, 1, &format!("{p2}\n\n{p3}\n")))
                 .expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| token_words(&world).len() > typed).await;
 
             // The resize lands mid-drain: the queue's pending rows fold
             // back and re-wrap at 100 columns as they type out.
@@ -2599,13 +2682,13 @@ async fn the_typewriter_emits_at_the_paced_rate() {
             run.live
                 .send(delta(1, 1, &format!("```\n{fence}")))
                 .expect("feed");
-            flush_arrival().await;
             let body_rows = || {
                 all_rows(&world)
                     .iter()
                     .filter(|row| row.starts_with("line "))
                     .count()
             };
+            flush_feed_until(|| body_rows() > 0).await;
             let schedule = [4, 8, 10, 12, 14, 16, 18, 20, 22, 24, 25, 26, 27, 28, 29, 30];
             assert_eq!(
                 body_rows(),
@@ -2650,7 +2733,7 @@ async fn the_unstable_tail_is_never_rendered() {
             run.live
                 .send(delta(1, 1, "half formed thought\n"))
                 .expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| receiving_row(&world)).await;
             let rows = world.nonblank_rows();
             assert!(
                 !has_row(&rows, "half formed"),
@@ -2674,7 +2757,7 @@ async fn the_unstable_tail_is_never_rendered() {
 
             // The closing blank makes it stable: it types out at the pace.
             run.live.send(delta(2, 1, "\n")).expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| has_row(&world.nonblank_rows(), "half formed thought")).await;
             assert!(
                 has_row(&world.nonblank_rows(), "half formed thought"),
                 "stable now, typed out: {:?}",
@@ -2715,14 +2798,14 @@ async fn the_receiving_row_lives_and_dies_with_the_drain() {
 
             // An unstable tail turns it on.
             run.live.send(delta(1, 1, "forming\n")).expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| receiving_row(&world)).await;
             assert!(receiving_row(&world));
 
             // The closing blank queues the paragraph (its separator is
             // lazy — it comes with the NEXT block); the first budget
             // drains it — the row holds while the queue is non-empty.
             run.live.send(delta(2, 1, "\nsecond\n\n")).expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| has_row(&all_rows(&world), "forming")).await;
             assert!(
                 has_row(&all_rows(&world), "forming"),
                 "the stable row typed out"
@@ -2741,7 +2824,7 @@ async fn the_receiving_row_lives_and_dies_with_the_drain() {
             // Closing "second" queues it; the last drain empties the queue
             // and no tail remains — the row is gone.
             run.live.send(delta(3, 1, "\n")).expect("feed");
-            flush_arrival().await;
+            flush_feed_until(|| !receiving_row(&world)).await;
             assert!(
                 !receiving_row(&world),
                 "drained: the row is gone: {:?}",
@@ -2776,19 +2859,21 @@ async fn the_note_types_last_and_the_band_collapses_by_one_row() {
             let run = driver.take_run();
 
             // 20 tokens: 3 rows at 80 columns, held as the unstable tail
-            // (a single trailing newline). The arrival pump heats the
-            // frame gate, so the outcome below lands before any drain.
+            // (a single trailing newline). The arrival pump heats the frame
+            // gate, so the outcome below lands before any drain.
             let text = tokens(1, 20);
             run.live
                 .send(delta(1, 1, &format!("{text}\n")))
                 .expect("feed");
-            flush_feed().await;
+            flush_feed_until(|| receiving_row(&world)).await;
             assert!(receiving_row(&world));
 
-            // The seal, the terminal record and the report land together —
-            // real-time yields only: the frame gate is still hot, so no
-            // pump can fire and the whole burst applies before the first
-            // budget does.
+            // The seal, the terminal record and the report land together on
+            // real time — the frame gate is still hot from the arrival pump,
+            // so the delivery alone fires nothing; the 10 ms frame step that
+            // follows is the one accelerated budget (4): the 3 content rows
+            // typed and the note's separator, with the note's TEXT still
+            // queued behind them.
             run.live
                 .send(llm_response(2, 1, &format!("{text}\n")))
                 .expect("feed");
@@ -2800,10 +2885,7 @@ async fn the_note_types_last_and_the_band_collapses_by_one_row() {
                     Message::text(cadmus_contract::Role::Assistant, format!("{text}\n")),
                 ]))
                 .expect("outcome");
-            flush_feed().await;
-            advance(Duration::from_millis(10)).await;
-            yield_now().await;
-            yield_now().await;
+            flush_feed_until(|| has_row(&world.nonblank_rows(), &tokens(17, 20))).await;
 
             // The accelerated budget (4): the 3 content rows typed, the
             // note's separator too — but the note's TEXT is still queued.
@@ -2887,19 +2969,19 @@ async fn an_interrupt_dumps_the_queue_instantly() {
             run.live
                 .send(delta(1, 1, &format!("```\n{fence}")))
                 .expect("feed");
-            flush_arrival().await;
             let body_rows = || {
                 all_rows(&world)
                     .iter()
                     .filter(|row| row.starts_with("line "))
                     .count()
             };
+            flush_feed_until(|| body_rows() > 0).await;
             assert_eq!(body_rows(), 2, "the paced arrival budget");
 
             // Esc: everything dumps whole — a 10 ms demand frame, NOT a
             // 33 ms tick, puts all 12 rows out.
             rig.input.send(key(KeyCode::Esc)).expect("interrupt");
-            flush_arrival().await;
+            flush_feed_until(|| body_rows() > 2).await;
             assert_eq!(body_rows(), 12, "the backlog dumped instantly");
             assert!(
                 matches!(driver.commands().as_slice(), [Command::Interrupt { .. }]),
@@ -2914,7 +2996,7 @@ async fn an_interrupt_dumps_the_queue_instantly() {
             run.outcome
                 .send(Ok(vec![Message::user("stop it")]))
                 .expect("outcome");
-            flush_arrival().await;
+            flush_feed_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
             assert!(
                 has_row(&world.nonblank_rows(), "Worked for 0s"),
                 "the note landed instantly: {:?}",
@@ -2955,10 +3037,10 @@ async fn an_attach_replay_bypasses_the_pacing() {
 
             type_text(&rig, "replay me");
             rig.input.send(key(KeyCode::Enter)).expect("input");
-            // Real-time yields only — NOT a virtual millisecond: the whole
+            // Real-time delivery only — NOT a virtual millisecond: the whole
             // replay is already there (paced emission would have put out
             // one budget at most).
-            flush_feed().await;
+            flush_feed_until(|| has_row(&world.nonblank_rows(), &tokens(1, 8))).await;
             assert_eq!(
                 world.nonblank_rows(),
                 vec![
@@ -3006,12 +3088,14 @@ async fn the_dumb_terminal_profile_emits_instantly() {
             run.live
                 .send(delta(1, 1, &format!("```\n{fence}")))
                 .expect("feed");
-            flush_arrival().await;
-            let body_rows = all_rows(&world)
-                .iter()
-                .filter(|row| row.starts_with("line "))
-                .count();
-            assert_eq!(body_rows, 10, "unpaced: instant emission");
+            let body_rows = || {
+                all_rows(&world)
+                    .iter()
+                    .filter(|row| row.starts_with("line "))
+                    .count()
+            };
+            flush_feed_until(|| body_rows() > 0).await;
+            assert_eq!(body_rows(), 10, "unpaced: instant emission");
 
             run.live
                 .send(llm_response(2, 1, &format!("```\n{fence}```\n")))
