@@ -631,22 +631,25 @@ Item 7's settings file lands (`cadmus-tui::config`), consuming two open
 items whose rationale this amendment now carries.
 
 **File layout and precedence** (ADR-0012 item 1's chain, flags > env >
-project > user > system): the system tier reads the first readable
-`cadmus/settings.toml` across the `$XDG_CONFIG_DIRS` entries in order
-(default `/etc/xdg`; empty or relative entries are invalid per the
-basedir spec and skipped), the user tier reads
-`$XDG_CONFIG_HOME/cadmus/settings.toml` through the trace-root chain's
-config twin (`~/.config`, then `%USERPROFILE%/AppData/Roaming`), and the
-project tier reads the nearest `.cadmus/settings.toml` walking up from
-the cwd — nearest-only, unlike the instructions chain's accumulate-all
-ancestors (context.rs): settings are one project's voice, not a stacked
-dialogue, and the approval-rules slice can revisit accumulation if it
-wants org-wide defaults. Layers merge per key: a higher layer's set keys
-replace, unset keys inherit. Missing files skip silently; a present but
-unreadable or malformed file fails the boot as the `cadmus::settings`
-diagnostic (its own miette code, not the TUI's) with the path — and for
-parse errors the parser's position. The flags layer has no inhabitant
-yet — the first CLI flag lands with its consumer.
+project > user > system): the system tier follows the platform's own
+convention — on Unix the first readable `cadmus/settings.toml` across
+the `$XDG_CONFIG_DIRS` entries in order (default `/etc/xdg`; empty or
+relative entries are invalid per the basedir spec and skipped), on
+Windows `%PROGRAMDATA%\cadmus\settings.toml` (the XDG search path and
+its colon separator cannot even name a drive letter). The user tier
+reads `$XDG_CONFIG_HOME/cadmus/settings.toml` through the trace-root
+chain's config twin (`~/.config`, then `%USERPROFILE%/AppData/Roaming`),
+and the project tier reads the nearest `.cadmus/settings.toml` walking
+up from the cwd — nearest-only, unlike the instructions chain's
+accumulate-all ancestors (context.rs): settings are one project's
+voice, not a stacked dialogue, and the approval-rules slice can revisit
+accumulation if it wants org-wide defaults. Layers merge per key: a
+higher layer's set keys replace, unset keys inherit. Missing files skip
+silently; a present but unreadable or malformed file fails the boot as
+the `cadmus::settings` diagnostic (its own miette code, not the TUI's)
+with the path — and for parse errors the parser's position. The flags
+layer has no inhabitant yet — the first CLI flag lands with its
+consumer.
 
 **The tripwire resolution.** `check_serialization_boundary` exempts only
 the contract, and config files are local data, not wire protocol — so

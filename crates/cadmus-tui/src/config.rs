@@ -153,10 +153,14 @@ fn read_first(paths: &[PathBuf], read: &Read) -> Result<Option<Layer>, ConfigErr
     Ok(None)
 }
 
-/// The system tier: `cadmus/settings.toml` under each `$XDG_CONFIG_DIRS`
-/// entry, in order (default `/etc/xdg`). Empty or relative entries are
-/// invalid per the basedir spec and skipped; an empty or unset variable is
-/// the default.
+/// The system tier, per the platform's own convention: on Unix,
+/// `cadmus/settings.toml` under each `$XDG_CONFIG_DIRS` entry in order
+/// (default `/etc/xdg`; empty or relative entries are invalid per the
+/// basedir spec and skipped — an empty or unset variable is the
+/// default). On Windows the XDG search path and its colon separator do
+/// not exist (they cannot even name a drive letter), so the tier reads
+/// `%PROGRAMDATA%\cadmus\settings.toml` (default `C:\ProgramData`).
+#[cfg(not(windows))]
 fn system_candidates(get: &Env) -> Vec<PathBuf> {
     let dirs = get("XDG_CONFIG_DIRS").unwrap_or_else(|| OsString::from("/etc/xdg"));
     dirs.to_string_lossy()
@@ -165,6 +169,13 @@ fn system_candidates(get: &Env) -> Vec<PathBuf> {
         .map(|dir| Path::new(dir).join("cadmus/settings.toml"))
         .filter(|path| path.is_absolute())
         .collect()
+}
+
+/// The Windows system tier (see the Unix twin above).
+#[cfg(windows)]
+fn system_candidates(get: &Env) -> Vec<PathBuf> {
+    let base = get("PROGRAMDATA").unwrap_or_else(|| OsString::from(r"C:\ProgramData"));
+    vec![PathBuf::from(base).join("cadmus/settings.toml")]
 }
 
 /// The user tier: `$XDG_CONFIG_HOME/cadmus/settings.toml`, else
@@ -418,6 +429,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn the_system_tier_takes_the_first_readable_dir() {
         let fake = Fake {
@@ -437,6 +449,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn an_empty_xdg_config_dirs_falls_back_to_the_default() {
         let fake = Fake {
@@ -449,6 +462,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn relative_xdg_dirs_are_rejected() {
         let fake = Fake {
@@ -458,6 +472,32 @@ mod tests {
         assert_eq!(
             system_candidates(&fake.get()),
             vec![PathBuf::from("/etc/cadmus/settings.toml")]
+        );
+    }
+
+    /// The Windows system tier reads `%PROGRAMDATA%` (with its documented
+    /// default) instead of the XDG search path.
+    #[cfg(windows)]
+    #[test]
+    fn the_system_tier_reads_programdata_on_windows() {
+        let served = PathBuf::from(r"D:\Sys").join("cadmus/settings.toml");
+        let fake = Fake {
+            env: HashMap::from([("PROGRAMDATA".into(), OsString::from(r"D:\Sys"))]),
+            files: HashMap::from([(served.clone(), Ok("[display]\nmotion = \"none\"".into()))]),
+        };
+        assert_eq!(system_candidates(&fake.get()), vec![served]);
+        assert_eq!(
+            load(&fake.get(), None, &fake.read()).unwrap().motion,
+            Some(Motion::None)
+        );
+        // Unset PROGRAMDATA falls back to the default system-root.
+        let fake = Fake {
+            env: HashMap::new(),
+            files: HashMap::new(),
+        };
+        assert_eq!(
+            system_candidates(&fake.get()),
+            vec![PathBuf::from(r"C:\ProgramData").join("cadmus/settings.toml")]
         );
     }
 
