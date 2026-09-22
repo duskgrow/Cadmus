@@ -131,6 +131,14 @@ Parked design questions for that ADR:
    into the current agent; a profile defines an agent's identity and
    capability envelope. The overlap zone (a persona preloading skills)
    needs an explicit rule.
+8. Scope sizing evidence (12-factor-agents factor 10, fetched
+   2026-09-22): LLM reliability degrades with step count — the cited
+   working envelope is ~3–10 steps (20 max) per agent — so a child run
+   should own one deliverable, not an open-ended subtask. The same
+   text's answer to "what if LLMs get smarter" — grow an agent's slice
+   only behind measured quality — is ADR-0010's gate discipline
+   restated, and phase-2's reflect→delta→gate→merge pipeline should
+   hold its LLM steps to the same envelope.
 
 ## Scoped approval rules and the settings stack
 
@@ -241,6 +249,49 @@ convergence leaves interactive sessions without a turn limit
 (Claude/Codex/Gemini default unlimited or none) while headless keeps a
 hard cap — the TUI's interactive default is unlimited; the headless cap
 rises to 100 alongside the context-pipeline work.
+
+12-factor-agents factor 9 (humanlayer/12-factor-agents, fetched
+2026-09-22) adds the numbered discipline for the error side: the base
+self-healing pattern (append the formatted error, continue) is already
+ADR-0008's "tool errors never terminate a run"; on top of it, track a
+per-tool consecutive-error counter and break at ~3 attempts — reset
+part of the rendered context or escalate to a human (the loop-health
+break path above). Spin-out mitigation: never feed a repeated error
+back verbatim — restructure how it is represented in context (the
+render-time seam of the item below); the text's own "number one
+prevention" is small, focused agents (the persona item's scope
+evidence).
+
+## Resolved errors can leave the model's view without leaving the log
+
+Consumer: the ADR-0007 context-pipeline implementation (the fold/render
+machinery).
+
+12-factor-agents factors 3+9 (fetched 2026-09-22): once an error is
+resolved, dropping the failed call and its error from the _rendered_
+context raises information density and removes a repeat-offense
+attractor, while the full-fidelity record stays in the JSONL log
+(ADR-0005) so replay and the reflector are unaffected. The render-time
+fold-directive seam already makes this possible without touching
+history; it is a candidate policy to validate against trace evidence,
+not a decided behavior — a resolved error can also be signal the model
+still needs mid-task.
+
+## Escalation is a structured intent, not a plaintext reply
+
+Consumer: the loop-health mechanism's break path above, and the
+`ask_user` interaction surface (ADR-0011 floor) when it lands.
+
+12-factor-agents factor 7 (fetched 2026-09-22): human contact as a
+first-class structured intent — `request_human_input` carrying
+urgency (low/medium/high) and answer format (free_text / yes_no /
+multiple_choice) — emitted by the model or raised deterministically by
+stuck detection; the loop breaks on the intent and resumes on the
+answer event instead of holding an in-memory wait. Synchronous and
+in-band, so it stays inside ADR-0008's exclusion of async/proactive
+communication families; the factor's always-JSON experiment (never the
+plaintext-vs-tool-call first-token gamble) is noted, not adopted — our
+finish line stays "an assistant turn without tool calls" (ADR-0005).
 
 ## Agent UI/UX landscape survey (2026-09-11)
 
