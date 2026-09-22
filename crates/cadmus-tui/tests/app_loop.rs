@@ -6,7 +6,9 @@
 //! unstable tail is never
 //! rendered (the `receiving…` row carries the liveness signal), Esc sends
 //! the interrupt command and dumps the queue whole, and the outcome folds
-//! back into the session history. The rig shares `tests/common`'s vt100
+//! back into the session history. Slash commands expand client-side at the
+//! idle prompt (the crate's `slash` module): no run, no log, no model. The
+//! rig shares `tests/common`'s vt100
 //! world; the strongest assertion is again the full non-blank row sequence
 //! (scrollback + screen, oldest first) — and for the run high-water hold
 //! (ADR-0018's 2026-09-20 amendment) its blank-preserving sibling, which
@@ -55,7 +57,7 @@ fn has_row(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
 
-const COMPOSER_PLACEHOLDER: &str = "❯ Ask anything";
+const COMPOSER_PLACEHOLDER: &str = "❯ Ask anything · /help for commands";
 
 /// The composer's placeholder while a run is active: the keys that work
 /// mid-run (the steer pair and Esc — the 2026-09-21 binding amendment).
@@ -3157,6 +3159,290 @@ async fn the_dumb_terminal_profile_emits_instantly() {
                 "collapsed: {visible:?}"
             );
 
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// A usage-carrying response event (the `/usage` tests' script).
+fn usage_response(seq: u64, usage: cadmus_contract::Usage) -> LiveUpdate {
+    recorded(
+        seq,
+        1,
+        EventKind::LlmResponse {
+            message: Message::text(cadmus_contract::Role::Assistant, "hi\n"),
+            usage: Some(usage),
+            finish: cadmus_contract::FinishReason::Stop,
+            outcome: cadmus_contract::TurnOutcome::Content,
+            warnings: Vec::new(),
+        },
+    )
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn slash_commands_expand_client_side_at_the_idle_prompt() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            // /help renders the table and the policy lines — and never
+            // starts a run or sends a command.
+            type_text(&rig, "/help");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            // Wait for the table's LAST line: the typewriter emits the block
+            // at its paced budget, so an early row's arrival says nothing
+            // about the footer.
+            settle_until(|| has_row(&world.nonblank_rows(), "Idle prompt only")).await;
+            let rows = world.nonblank_rows();
+            for expected in [
+                "Commands run client-side — they never reach the model or the log.",
+                "/help   list the commands",
+                "/usage  token usage this session",
+                "/clear  start a new conversation",
+                "/quit   exit cadmus",
+                "Idle prompt only — mid-run, Enter injects text into the running turn.",
+            ] {
+                assert!(
+                    rows.contains(&expected.to_string()),
+                    "missing {expected:?}: {rows:?}"
+                );
+            }
+            assert!(
+                driver.submitted().is_empty(),
+                "no run: {:?}",
+                driver.submitted()
+            );
+            assert!(driver.commands().is_empty());
+
+            // An unknown command is a client-side note, never a prompt.
+            type_text(&rig, "/diff");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle_until(|| has_row(&world.nonblank_rows(), "Unknown command")).await;
+            assert!(has_row(
+                &world.nonblank_rows(),
+                "Unknown command /diff — /help lists them."
+            ));
+            assert!(driver.submitted().is_empty());
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn slash_usage_counts_each_fresh_response_once() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "hi");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            let usage = cadmus_contract::Usage {
+                input: 45_000,
+                cache_read: 200,
+                output: 1_500,
+                ..Default::default()
+            };
+            run.live
+                .send(usage_response(1, usage.clone()))
+                .expect("feed");
+            // The resync replay: a stale seq must not double-count (the one
+            // client rule extends to the totals).
+            run.live.send(usage_response(1, usage)).expect("feed");
+            run.record(2, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("hi"),
+                    Message::text(cadmus_contract::Role::Assistant, "hi\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+
+            type_text(&rig, "/usage");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            // Wait for the block's last line (the paced emission's
+            // ordering makes it the block-complete signal).
+            settle_until(|| has_row(&world.nonblank_rows(), "reasoning")).await;
+            let rows = world.nonblank_rows();
+            for expected in [
+                "1 model request this session",
+                "input 45,000 · cache read 200 · cache write 0",
+                "output 1,500 · reasoning 0",
+            ] {
+                assert!(
+                    rows.contains(&expected.to_string()),
+                    "missing {expected:?}: {rows:?}"
+                );
+            }
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn slash_clear_starts_a_new_conversation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            // One complete run with usage, so history and the floor's
+            // context readout both exist to clear.
+            type_text(&rig, "first");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+            run.live
+                .send(usage_response(
+                    1,
+                    cadmus_contract::Usage {
+                        input: 45_000,
+                        cache_read: 200,
+                        ..Default::default()
+                    },
+                ))
+                .expect("feed");
+            run.record(2, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome
+                .send(Ok(vec![
+                    Message::user("first"),
+                    Message::text(cadmus_contract::Role::Assistant, "hi\n"),
+                ]))
+                .expect("outcome");
+            settle_until(|| status_row(&world).ends_with("45.2k/128k (35%)")).await;
+
+            type_text(&rig, "/clear");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle_until(|| has_row(&world.nonblank_rows(), "New conversation")).await;
+            assert!(has_row(
+                &world.nonblank_rows(),
+                "New conversation — the trajectory log keeps the old one."
+            ));
+            // The context readout reset with the conversation.
+            assert_eq!(status_row(&world), "kimi·k2");
+            assert!(driver.submitted().len() == 1, "no new run");
+
+            // Session usage deliberately survives the clear: the totals are
+            // the session's, not the conversation's.
+            type_text(&rig, "/usage");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle_until(|| has_row(&world.nonblank_rows(), "1 model request this session")).await;
+
+            // The shrink replay is /clear's core promise: a resize
+            // re-renders the world from the transcript's source, so a
+            // transcript that forgot to reset would resurrect the cleared
+            // conversation (the replay window is newest-first — the pin is
+            // the exact sequence, never one row's absence).
+            world.resize(24, 60);
+            rig.input.send(Event::Resize(60, 24)).expect("resize event");
+            settle().await;
+            assert_eq!(
+                world.nonblank_rows(),
+                vec![
+                    "New conversation — the trajectory log keeps the old one.",
+                    "1 model request this session",
+                    "input 45,000 · cache read 200 · cache write 0",
+                    "output 0 · reasoning 0",
+                    COMPOSER_PLACEHOLDER,
+                    "kimi·k2",
+                ],
+                "the cleared conversation must not replay: {:?}",
+                world.nonblank_rows()
+            );
+
+            // The next prompt carries no history.
+            type_text(&rig, "second");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let _run2 = driver.take_run();
+            let submitted = driver.submitted();
+            assert_eq!(submitted.len(), 2);
+            assert_eq!(
+                submitted[1].len(),
+                1,
+                "the cleared conversation sends no history: {:?}",
+                submitted[1]
+            );
+            assert_eq!(submitted[1][0].text_body(), "second");
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn slash_quit_exits_the_loop() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "/quit");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            for _ in 0..8 {
+                yield_now().await;
+                if task.is_finished() {
+                    break;
+                }
+            }
+            assert!(task.is_finished(), "/quit must end the loop");
+            task.await.expect("the loop joins").expect("a clean exit");
+            assert!(driver.submitted().is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn slash_looking_text_mid_run_is_a_steer() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot(&world);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "go");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            // Mid-run Enter is a steer (the binding amendment); a
+            // slash-looking text rides that path like any other text.
+            type_text(&rig, "/help");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            assert!(
+                matches!(
+                    driver.commands().as_slice(),
+                    [Command::Steer { text, mode: SteerMode::Inject, .. }] if text == "/help"
+                ),
+                "commands: {:?}",
+                driver.commands()
+            );
+
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle().await;
             quit_and_join(task, &rig.input).await;
         })
         .await;

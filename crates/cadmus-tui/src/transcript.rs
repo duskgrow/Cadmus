@@ -259,15 +259,30 @@ impl Transcript {
     /// A static note block (the run-completion rows), complete at birth,
     /// so always fully flushable — the same contract as prompts and markers.
     pub fn push_note(&mut self, line: ir::Line) {
+        self.push_note_block(vec![line]);
+    }
+
+    /// The multi-line sibling of [`Transcript::push_note`] (slash-command
+    /// output): one static block, so the lines wrap and replay together.
+    pub fn push_note_block(&mut self, lines: Vec<ir::Line>) {
         self.seal_open();
         // A blank row separates the note from the run's tail, the same way
         // `push_user` separates the prompt from the prior run.
-        let mut lines = Vec::new();
+        let mut block = Vec::new();
         if !self.blocks.is_empty() {
-            lines.push(ir::Line::default());
+            block.push(ir::Line::default());
         }
-        lines.push(line);
-        self.blocks.push(Block::Static(lines));
+        block.extend(lines);
+        self.blocks.push(Block::Static(block));
+    }
+
+    /// Forget every block and counter (the `/clear` seam): the shell keeps
+    /// what it already drew — the inline renderer never rewrites terminal
+    /// history — while replay, the emission queue and the live bookkeeping
+    /// start over. Idle-only by construction: the caller (the app's slash
+    /// path) runs at the idle prompt, so there is no open turn to orphan.
+    pub fn reset(&mut self) {
+        *self = Self::new();
     }
 
     /// Apply one live item. Returns the status-light effect.
