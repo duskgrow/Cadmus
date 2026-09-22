@@ -77,6 +77,7 @@ pub async fn run_tui(config: &ChatConfig) -> Result<(), Error> {
         label: floor_label(),
         context_window,
         refresh_label: Some(Box::new(floor_label)),
+        motion: cadmus_tui::config::motion().map_err(Error::Settings)?,
         theme: cadmus_ui::theme::Theme::ansi(),
         depth: cadmus_tui::style::detect_depth(),
     };

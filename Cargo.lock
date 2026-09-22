@@ -432,6 +432,7 @@ dependencies = [
  "insta",
  "ratatui",
  "serde_json",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "toml",

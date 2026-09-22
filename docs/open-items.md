@@ -192,6 +192,25 @@ Starlark's trigger, deferred until a real consumer lands — a
 programmable-config platform is rejected as a pseudo-requirement at
 single-user scale.
 
+## Config discoverability: the self-describing `cadmus config` subcommand
+
+Consumer: the second settings.toml consumer's slice (today that is the
+scoped approval rules' persistence above — it needs "did my rule take
+effect?" answers on day one).
+
+Direction (maintainer, 2026-09-22): discovery lives in the CLI. The
+schema in `cadmus-tui::config` stays the SSOT; a `cadmus config`
+subcommand projects it — `path` (the layer files, which exist, which
+served), `show` (effective values with their winning layer), and a
+keys/defaults listing with one-line descriptions. Strict-file errors
+already list the valid keys on a typo; with a one-key surface that
+suffices, so nothing lands now. A README "Configuration" section rides
+the same slice (external-facing: the zh-CN translation syncs with it).
+The future GUI (ADR-0012's 2026-09-08 amendment) adds a settings page
+over the same schema — the projection splits, the SSOT does not. Not
+the story: editor schema integration (taplo) — speculative at this
+surface size.
+
 ## LLM compaction fires on the ceiling rule, not on ContextLength sightings
 
 Consumer: the phase-2 compaction ADR.
@@ -253,19 +272,6 @@ recomputes the previous assistant turn (~seconds of prefill per turn at
 local speeds). If phase-3 measurements make that hurt, the revisit is a
 transport-aware history policy, not a silent revert.
 
-## The serde-derive tripwire covers config file types too
-
-Consumer: cadmus-ui's theme loader (and later the TUI's settings/keymap
-files).
-
-`check_serialization_boundary` (crates/xtask/src/arch.rs) flags any
-`Serialize`/`Deserialize` derive outside cadmus-contract, but ADR-0018
-item 7 makes theme/settings/keymap files TOML data — local config, not
-wire protocol. When the theme loader lands, resolve deliberately: scope
-the check to actual wire boundaries, or parse `toml::Value` by hand (no
-derives). The check's intent (wire types only in the contract,
-ADR-0002) stands either way.
-
 ## Scroll-while-streaming interaction policy
 
 Consumer: the in-app transcript fallback slice (mouse-less contexts) —
@@ -295,19 +301,6 @@ On the next bump, rerun `history_insert`, `dynamic_height_spike` and the
 native inline-spike matrix; only then consider returning geometry or
 insertion to upstream. A fixed upstream writer alone is not evidence that
 its resize/ack behavior satisfies the shell's contract.
-
-## The stream emission's motion profile is a TERM=dumb switch until config lands
-
-Consumer: the TOML settings loader (ADR-0018 item 7).
-
-The paced typewriter drain (ADR-0018's 2026-09-20 second amendment) ships
-with a two-state motion profile: `TERM=dumb` disables pacing (instant
-emission), every other terminal gets the full profile — detected at the
-cadmus-tui terminal boundary (`style::detect_paced`, mirroring
-`detect_depth`), tests inject through `App::with_pacing`. The decided shape
-is `full|reduced|none` as a settings key over the same seam; it lands with
-the item-7 TOML loader, which owns the profile's naming, precedence and
-default.
 
 ## The typewriter drain emits in arrival-sized bursts, not a smooth rhythm
 
