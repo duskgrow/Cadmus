@@ -37,6 +37,7 @@
 - `doc-maintenance` — writing/reviewing docs: three-question filter, EN-canonical translation sync, drift hunting
 - `code-simplification` — behavior-preserving dedup/dead-code/abstraction cleanup, always as its own change
 - `release-review` — the human-gate checklist for merging a release-plz Release PR
+- `dependency-update-review` — digesting a Dependabot bump PR: upstream delta, obsoleted wheels with behavior evidence, open-item consumption, deny.toml fuse clearing
 
 Done = `just ci` green + the `pr-preflight` checklist clean.
 
