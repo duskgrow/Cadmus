@@ -27,6 +27,9 @@
 //!   the app's paced emission drain (the 2026-09-20 second amendment).
 //! - [`style`] — the IR → ratatui style mapping, incl. color-depth
 //!   degradation (ADR-0017 item 5).
+//! - [`config`] — the item-7 settings loader: layered `settings.toml`
+//!   discovery (system / user / project, `TERM` as the env layer), strict
+//!   hand-parsed TOML, and the motion profile's resolution seam.
 //! - [`layout`] — the band's height function and widget split rules (the
 //!   2026-09-14 amendments' composer cap and short-window corner), pure.
 //! - [`frame`] — the event loop's redraw half: the [`frame::FrameRequester`]/
@@ -52,6 +55,7 @@ pub mod app;
 pub mod approval;
 pub mod clock;
 pub mod composer;
+pub mod config;
 pub mod cursor;
 pub mod debounce;
 pub mod frame;

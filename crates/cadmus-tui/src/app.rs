@@ -54,6 +54,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::approval;
 use crate::clock::RunClock;
 use crate::composer::{Composer, DEFAULT_PLACEHOLDER, DIALOG_PLACEHOLDER, RUNNING_PLACEHOLDER};
+use crate::config::Motion;
 use crate::cursor::CursorTracker;
 use crate::debounce::ResizeDebounce;
 use crate::frame::{Draw, FrameRequester, frame_scheduler};
@@ -124,6 +125,10 @@ pub struct AppConfig {
     /// app calls it at each run outcome — the cadence at which the agent's
     /// edits land. `None` keeps the boot label for the session.
     pub refresh_label: Option<Box<dyn Fn() -> String + Send + ::std::marker::Sync>>,
+    /// The emission motion profile, resolved by the binary from the
+    /// settings layers and `TERM` ([`crate::config::motion`]) before the
+    /// terminal goes raw — the same boundary pattern as `depth`.
+    pub motion: Motion,
     pub theme: Theme,
     pub depth: ColorDepth,
 }
@@ -281,8 +286,9 @@ pub struct App<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: Event
     /// ends — a dead run's channel drop already denied the request, the app
     /// must not answer it.
     approvals: VecDeque<QueuedApproval>,
-    /// The emission pacing switch (see [`App::with_pacing`]).
-    paced: bool,
+    /// The emission motion profile ([`AppConfig::motion`]; anything but
+    /// `Full` bypasses the paced typewriter).
+    motion: Motion,
     /// Esc's impatient mode: set by [`App::interrupt`], the queue drains
     /// whole from there until the run's drain completes — an interrupt is
     /// no time for the typewriter. Cleared at the drain's completion and at
@@ -365,23 +371,11 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
             command_seq: 0,
             pending_steers: 0,
             approvals: VecDeque::new(),
-            paced: true,
+            motion: config.motion,
             dump: false,
             run_end: None,
             quit: false,
         }
-    }
-
-    /// The motion-profile switch (the 2026-09-20 second amendment):
-    /// `false` disables the paced typewriter (instant emission). The
-    /// real-terminal boot reads `TERM` at the boundary ([`run`] via
-    /// [`crate::style::detect_paced`]); tests inject the value directly —
-    /// the full `full|reduced|none` profile lands with the item-7 TOML
-    /// loader (docs/open-items.md).
-    #[must_use]
-    pub fn with_pacing(mut self, paced: bool) -> Self {
-        self.paced = paced;
-        self
     }
 
     /// The loop: select, handle, drain the feed, repeat until quit.
@@ -472,10 +466,10 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
     /// One tick's drain budget by queue depth (the paced typewriter's
     /// policy): a trickle while the queue is shallow, a catch-up slope as
     /// it deepens, and the accelerated floor while a run is finishing. The
-    /// instant modes bypass it: the `TERM=dumb` profile (`paced: false`)
-    /// and Esc's dump both drain whole.
+    /// instant modes bypass it: the non-`Full` motion profiles and Esc's
+    /// dump both drain whole.
     fn drain_budget(&self, depth: usize) -> usize {
-        if !self.paced || self.dump {
+        if !self.motion.paces() || self.dump {
             return usize::MAX;
         }
         let budget = if depth < DRAIN_DEEP {
@@ -1638,7 +1632,7 @@ pub async fn run(driver: Box<dyn RunDriver>, config: AppConfig) -> io::Result<()
         crate::shell::ScrollbackStrategy::detect(),
     )?;
     let input = InputBroker::new();
-    let mut app = App::new(shell, input, driver, config).with_pacing(crate::style::detect_paced());
+    let mut app = App::new(shell, input, driver, config);
     app.run_loop().await
 }
 

@@ -624,3 +624,59 @@ claiming otherwise would lie through the whole wait. One policy point
 (`sync_composer_placeholder`, the `sync_clock_pause` pattern) recomputes
 the text at every transition of its three inputs: run presence, pending
 count, dialog visibility.
+
+## Amendment — 2026-09-22: the settings loader — file layout, precedence, and the tripwire resolution
+
+Item 7's settings file lands (`cadmus-tui::config`), consuming two open
+items whose rationale this amendment now carries.
+
+**File layout and precedence** (ADR-0012 item 1's chain, flags > env >
+project > user > system): the system tier follows the platform's own
+convention — on Unix the first readable `cadmus/settings.toml` across
+the `$XDG_CONFIG_DIRS` entries in order (default `/etc/xdg`; empty or
+relative entries are invalid per the basedir spec and skipped), on
+Windows `%PROGRAMDATA%\cadmus\settings.toml` (the XDG search path and
+its colon separator cannot even name a drive letter). The user tier
+reads `$XDG_CONFIG_HOME/cadmus/settings.toml` through the trace-root
+chain's config twin (`~/.config`, then `%USERPROFILE%/AppData/Roaming`),
+and the project tier reads the nearest `.cadmus/settings.toml` walking
+up from the cwd — nearest-only, unlike the instructions chain's
+accumulate-all ancestors (context.rs): settings are one project's
+voice, not a stacked dialogue, and the approval-rules slice can revisit
+accumulation if it wants org-wide defaults. Layers merge per key: a
+higher layer's set keys replace, unset keys inherit. Missing files skip
+silently; a present but unreadable or malformed file fails the boot as
+the `cadmus::settings` diagnostic (its own miette code, not the TUI's)
+with the path — and for parse errors the parser's position. The flags
+layer has no inhabitant yet — the first CLI flag lands with its
+consumer.
+
+**The tripwire resolution.** `check_serialization_boundary` exempts only
+the contract, and config files are local data, not wire protocol — so
+settings parse by hand-walking `toml::Value`, no serde derives. This is
+the standing rule for the theme and keymap loaders too; widening the
+tripwire to scope actual wire boundaries remains possible, but it is an
+ADR-level decision, never a convenience taken in a feature PR. Files are
+strict: unknown keys and wrong types are startup errors, because a
+typo'd key that silently does nothing costs more than a clear failure —
+and item 7 already rejects per-feature config sprawl, so the key space
+stays small enough for strictness to stay cheap.
+
+**The motion profile's naming, precedence and default** (the loader owns
+them, per the consumed open item): `[display] motion =
+"full"|"reduced"|"none"`. The environment layer is capability detection,
+not a parallel settings vocabulary: `TERM=dumb` forces `none` over every
+file layer (ADR-0012's honor-`TERM=dumb` floor); any other `TERM`
+abstains. The default when no file speaks follows the terminal's
+trustworthiness: an unset `TERM` is an unknown terminal and gets `none`
+(the pre-config detection's conservative reading, kept —
+`detect_depth`'s absence rule is the same shape), anything else `full`.
+`reduced` currently emits instantly — the accessibility reading of
+reduced motion is less animation, and the differentiated middle profile
+(a calmer drain, not no drain) belongs to the pacing-refinement item,
+whose backlog-smoothing and sub-paragraph stability ideas will define
+it; the key is accepted now so the schema does not break when the
+behavior lands. The injection seam moves from `with_pacing(bool)` to
+`AppConfig::motion`, resolved by the binary before the terminal goes raw
+(the `detect_depth` pattern); `style::detect_paced` dies, its `TERM`
+reading absorbed into the loader's env layer.

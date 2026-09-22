@@ -164,6 +164,18 @@ pub enum Error {
     )]
     EvalScoreFile(std::io::Error),
 
+    /// A settings file is unreadable or malformed (ADR-0018 item 7's
+    /// loader: strict files, layered precedence).
+    #[error("{0}")]
+    #[diagnostic(
+        code(cadmus::settings),
+        help(
+            "fix or remove the file named above — parse errors carry the parser's line/column; \
+             missing files are skipped silently"
+        )
+    )]
+    Settings(cadmus_tui::config::ConfigError),
+
     /// The terminal UI hit a structural failure (the guard stream or an
     /// insert/clear/recreate op — draw failures are tolerated, never fatal).
     #[error("terminal UI failed: {0}")]

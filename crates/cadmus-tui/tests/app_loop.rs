@@ -30,6 +30,7 @@ use cadmus_contract::{
     ToolCall, ToolCompletion,
 };
 use cadmus_tui::app::{App, AppConfig, RunDriver, RunHandle};
+use cadmus_tui::config::Motion;
 use cadmus_tui::shell::{InlineShell, ScrollbackStrategy};
 use cadmus_ui::theme::{ColorDepth, Theme};
 use common::{GuardSink, ScriptedInput, World};
@@ -196,7 +197,7 @@ fn boot(world: &World) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig
 
 fn boot_unpaced(world: &World) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
     // The TERM=dumb motion profile: the paced typewriter is off.
-    boot_with_config(world, Vec::new(), Vec::new(), false)
+    boot_with_config(world, Vec::new(), Vec::new(), Motion::None)
 }
 
 fn boot_with_pending(
@@ -211,14 +212,14 @@ fn boot_with_baseline(
     pending: Vec<PendingApproval>,
     settled: Vec<SettledApproval>,
 ) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
-    boot_with_config(world, pending, settled, true)
+    boot_with_config(world, pending, settled, Motion::Full)
 }
 
 fn boot_with_config(
     world: &World,
     pending: Vec<PendingApproval>,
     settled: Vec<SettledApproval>,
-    paced: bool,
+    motion: Motion,
 ) -> (App<common::VtBackend, GuardSink, ScriptedInput>, Rig) {
     let (input_tx, input) = ScriptedInput::channel();
     let guard = GuardSink::default();
@@ -240,11 +241,11 @@ fn boot_with_config(
             label: "kimi·k2".into(),
             context_window: 128_000,
             refresh_label: None,
+            motion,
             theme: Theme::ansi(),
             depth: ColorDepth::Truecolor,
         },
-    )
-    .with_pacing(paced);
+    );
     (
         app,
         Rig {
@@ -2591,6 +2592,7 @@ async fn the_floor_shows_context_usage_and_refreshes_the_git_label_at_the_outcom
                     label: "kimi·k2 (git:main)".into(),
                     context_window: 128_000,
                     refresh_label: Some(Box::new(refresh)),
+                    motion: Motion::Full,
                     theme: Theme::ansi(),
                     depth: ColorDepth::Truecolor,
                 },
@@ -3065,7 +3067,51 @@ async fn an_attach_replay_bypasses_the_pacing() {
         .await;
 }
 
-/// The TERM=dumb motion profile (`paced: false`): every pump drains the
+/// `Motion::Reduced` boots into the instant-emission behavior (its
+/// differentiated calmer drain is the pacing-refinement item's consumer —
+/// until then it must not pace, pinned here so the alias cannot rot).
+#[tokio::test(start_paused = true, flavor = "current_thread")]
+async fn the_reduced_profile_emits_instantly() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let world = World::new();
+            let (mut app, rig) = boot_with_config(&world, Vec::new(), Vec::new(), Motion::Reduced);
+            let driver = rig.driver.clone_handles();
+            let task = tokio::task::spawn_local(async move { app.run_loop().await });
+            settle().await;
+
+            type_text(&rig, "go");
+            rig.input.send(key(KeyCode::Enter)).expect("input");
+            settle().await;
+            let run = driver.take_run();
+
+            let fence = (1..=10).fold(String::new(), |acc, i| acc + &format!("line {i:02}\n"));
+            run.live
+                .send(delta(1, 1, &format!("```\n{fence}")))
+                .expect("feed");
+            let body_rows = || {
+                all_rows(&world)
+                    .iter()
+                    .filter(|row| row.starts_with("line "))
+                    .count()
+            };
+            flush_feed_until(|| body_rows() > 0).await;
+            assert_eq!(body_rows(), 10, "reduced: instant emission");
+
+            run.live
+                .send(llm_response(2, 1, &format!("```\n{fence}```\n")))
+                .expect("feed");
+            run.record(3, EventKind::RunFinished { turns: 1 });
+            drop(run.live);
+            run.outcome.send(Ok(Vec::new())).expect("outcome");
+            settle_until(|| has_row(&world.nonblank_rows(), "Worked for")).await;
+
+            quit_and_join(task, &rig.input).await;
+        })
+        .await;
+}
+
+/// The TERM=dumb motion profile (`Motion::None`): every pump drains the
 /// whole queue — the typewriter is off, emission is instant.
 #[tokio::test(start_paused = true, flavor = "current_thread")]
 async fn the_dumb_terminal_profile_emits_instantly() {
