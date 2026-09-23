@@ -332,6 +332,39 @@ impl World {
             .expect("cell inside the visible screen")
             .clone()
     }
+
+    /// Emulate a restoring terminal's grow (ConPTY/Windows Terminal, reflow
+    /// xterm): the screen keeps its logical bottom, so existing content
+    /// shifts DOWN by `restored.len()` rows and these scrollback rows
+    /// reappear at the top. vt100 itself top-anchors on resize, so the rig
+    /// rebuilds that state by re-writing the rows — the restored rows stay
+    /// in vt100's own scrollback too, an emulation artifact: tests using
+    /// this must assert on visible rows only.
+    pub fn restore_on_grow(&self, restored: &[String]) {
+        let content = self.visible_rows();
+        let Size { width, height } = self.backend.size().expect("size");
+        let extra = u16::try_from(restored.len()).expect("a grow fits the screen");
+        self.resize(height + extra, width);
+        let mut out = String::new();
+        for (index, row) in restored.iter().chain(content.iter()).enumerate() {
+            let _ = write!(out, "\x1b[{};1H{}\x1b[0K", index + 1, row);
+        }
+        self.backend.emit(&out);
+    }
+}
+
+/// Hard wrap at the width boundary: no-space content wraps identically under
+/// ratatui's word wrapper, so the suites' replay models match 1:1.
+pub fn hard_wrap(text: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width.max(1));
+    let mut rows = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let take = rest.len().min(width);
+        rows.push(rest[..take].to_string());
+        rest = &rest[take..];
+    }
+    rows
 }
 
 /// The scripted input source (the app loop's [`cadmus_tui::input::EventSource`]

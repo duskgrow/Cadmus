@@ -680,3 +680,197 @@ behavior lands. The injection seam moves from `with_pacing(bool)` to
 `AppConfig::motion`, resolved by the binary before the terminal goes raw
 (the `detect_depth` pattern); `style::detect_paced` dies, its `TERM`
 reading absorbed into the loader's env layer.
+
+## Amendment — 2026-09-22 (2nd): the width shrink saves the window before clearing it
+
+Field report: resizing the terminal swallows history. Reproduced in the
+vt100 rig with rows long enough to re-wrap taller at the new width —
+every existing shrink test used short rows that re-wrap to the same
+height, so the loss class was invisible to the suite and to the spike's
+short-row matrix legs alike. The mechanism: the debounced shrink erased
+the whole screen and re-materialized only the tail that fits the new
+window; rows still visible but above that tail died with the clear on
+every terminal. Reflow does not save them — a reflowing terminal pushes
+only what overflows its own screen top into scrollback, and the shell's
+clear then erases rows the terminal was still showing.
+
+**The fix: before the clear, scroll the whole visible window into
+scrollback** (the band hugs the history, so the band's top edge is the
+window's row count; the standard path's DECSTBM region starts at the
+screen top, where departing rows enter native scrollback, and the
+full-screen fallback moves them inside the buffer — both preservation
+semantics the insert path already relies on). The replay is unchanged:
+it re-materializes the windowed tail from source. The world after a
+shrink is therefore scrollback, the pushed window, the replayed tail
+and the band, with no logical row lost.
+
+The cost lands in the same class the 2026-09-14 spike already accepted
+(scrollback duplication on a shrink replay) and makes it explicit and
+terminal-independent: the pushed window's overlap with the replayed
+tail now appears twice in every terminal's scrollback, not only where
+reflow happened to preserve it. Bounding the push to the orphaned
+prefix (coverage-aligned between the old and new tails) was rejected
+for this pass: display-row cuts do not align across wraps, the
+transcript would need a second rendered-history coordinate it
+deliberately does not retain, and over-push is the safe direction —
+duplication is the accepted cost, loss is not.
+
+Evidence: the new regression pins in `tests/dynamic_height_spike.rs`
+(full-world sequence with re-wrap-expanding rows) and
+`tests/history_insert.rs` (the standard path's window-scroll protocol;
+vt100 cannot track partial-region departures), with the pre-existing
+shrink suites updated from "scrollback untouched" to the
+save-then-clear sequence.
+
+## Amendment — 2026-09-22 (3rd): height grow follows the content, not the top edge
+
+Second field report, same day: on Windows Terminal the band keeps a fixed
+row offset from the terminal's top edge across a height grow — old history
+reappears above it while the band and its clear swallow the newest history
+below. Root cause: `fit_screen` anchored the band at its old top row on
+grow. That model is only valid on top-anchoring terminals (tmux's class —
+content stays put, blanks appear at the bottom). Restoring terminals
+(ConPTY/Windows Terminal, reflow xterm) keep the screen's logical bottom:
+the grow reveals scrollback rows at the top and every content row shifts
+down by the grow amount, band image included — so the old top row then
+holds shifted history, and the band's clear erased exactly the newest
+turns. The vt100 rig top-anchors on resize, so — like the width-shrink
+loss fixed the same day — the class was invisible to every suite.
+
+**The fix: on grow, the band follows its content by the grow amount**
+(clamped to the bottom edge), never its old top offset. On restoring
+terminals that lands the band exactly on its shifted image — glued to the
+history, zero loss. On top-anchoring terminals the band moves onto blanks
+and its vacated image stays as bounded residue: rows above the band image
+cannot be told apart from that image without reading the screen, so the
+shell never clears them — residue is the accepted cost, erased history is
+not. A cursor query could disambiguate the two terminal classes but is
+rejected for the same reason post-boot CPR is banned everywhere: queries
+time out under resize storms, which is exactly when they would be needed.
+The clamped-band recovery (shrink to a tiny screen, then regrow)
+re-expands the band over rows above its image; those are history and get
+the displaced-scroll into scrollback first, the same mechanism the shrink
+leg already used.
+
+Disclosed cost, irreducible without reading the screen: on top-anchoring
+terminals the residue does not stay on screen — it migrates into
+**permanent scrollback** as composer image, through two vectors. The
+clamp-recovery's displaced scroll counts rows whose top is the clamped
+band image (nothing moved on this class), so the band image's top rows
+depart into scrollback; and a later width shrink sweeps the vacated-image
+ghost with the window it saves (the 2026-09-22 (2nd) push counts the
+band's top edge, which the follow moved). This weakens the 2026-09-21
+guarantee that a transient composer never becomes permanent scrollback —
+on tmux's class, grow paths now leak ≤ one band image per gesture. The
+alternative is the irreducible bad direction (erasing rows that on the
+other class are history), so the leak stays; the physical matrix owns
+judging how it reads in practice.
+
+Evidence: three new pins in `tests/dynamic_height_spike.rs` — the
+restoring leg (a `restore_on_grow` rig helper rebuilds the shifted state
+vt100 cannot produce), the top-anchoring leg (history intact, the ghost
+and its scrollback migration pinned as disclosed residue), and the
+clamp-recovery leg (covered history scrolls out, nothing lost), plus a
+height-grow-during-raw-flush leg in `tests/history_insert.rs`; the grow
+legs go red on the pre-fix top-anchored geometry. Compositing on real
+restoring terminals stays with the manual matrix — vt100 cannot judge
+it, and the next physical run should re-verify the grow gesture
+specifically.
+
+## Amendment — 2026-09-22 (4th): grow = class-keyed interim fit + debounced source refill with save-push
+
+The physical matrix's verdict on the third amendment, same day, from the
+maintainer's daily terminal (a top-anchoring GUI terminal of alacritty's
+class): every height grow leaks a band ghost, and in a live session the
+leak is not bounded. The third amendment made the follow-content rule
+universal, but top-anchoring terminals keep the band image put — the
+follow parks the band on blanks and leaves the vacated image behind,
+one ghost per gesture, and later inserts scroll each ghost through the
+visible transcript region into permanent scrollback. The first attempt
+at a fix kept the band at its old top row on the `Standard` class — no
+ghost, but the band then holds a fixed offset from the terminal's top
+edge across a grow, visibly floating above the new blanks: the
+pre-amendment complaint the follow was written to cure, traded back.
+Both failures come from one confusion: the interim fit (what the shell
+can do alone, between the physical resize and the debounced event) and
+the settled world (what the source SSOT can rebuild) were being asked
+to be the same operation.
+
+**The fix separates the two.** The interim grow fit is keyed on the
+terminal class through the existing strategy seam: `FullScreen` (the
+Windows Terminal/ConPTY evidence class) follows the content — the third
+amendment's loss fix stands where its evidence lives. `Standard` (Zed,
+vt100, the top-anchoring class) erases the band's own vacated image and
+re-glues a bottom-glued band to the new bottom edge (those rows are the
+shell's own image and the grow's blanks on this class, never history —
+erasing them loses nothing and leaves no ghost); a content-hugging band
+keeps hugging. The debounced `on_resize` then does the settle: on any
+grow it clears the screen and replays the taller window tail from
+source — the rows the grow revealed re-materialize above the
+still-visible ones, any interim residue dies with the clear, and the
+final world is identical on every terminal class: the restoring
+terminal's visual, emulated where the terminal cannot do it itself. A
+grow fitted between debounce ticks accumulates a row-count marker
+(`grow_refit_pending`, the `replay_pending` pattern) so a raced fit
+cannot consume the obligation (a boolean marker; the save-push needs no
+count, as the next paragraph explains).
+
+**The settle saves before it clears, like the shrink — the whole
+window.** The refill re-materializes only source rows, and rows above
+the band are not necessarily in the source: pre-boot shell output is
+visible there from the first frame, and a restoring terminal reveals
+the grow's rows by pulling them OUT of its scrollback (physical probe,
+tmux 3.7b: a grown pane shows the pulled rows and its history no longer
+holds them; ConPTY consumes likewise). So the grow settle pushes the
+whole visible window into scrollback before the clear — exactly the
+second amendment's rule, for exactly its reason: bounding the push to
+the grow amount loses the rest of the window on every terminal, and
+duplication is the accepted cost, loss is not. The window's overlap
+with the replayed tail is the bounded duplication, per gesture.
+
+The same probe falsified the third amendment's "tmux's class — content
+stays put": tmux 3.7b restores on grow, so the scroll-quirk/anchor
+correlation now has a counterexample (tmux is `Standard` for the scroll
+quirk but restoring for the anchor). What keeps this from mattering:
+the settle is the universal corrector. On the debounced path the fit
+and the refill run in one guarded op, so even a wrong class guess never
+reaches a frame — the interim keying only shapes drag-window cosmetics
+and which rows churn scrollback; the heuristic-of-record stays on the
+`detect` seam, re-keyed the day a field report shows a real (not
+self-healed) loss. The second tmux artifact the probe pinned is
+terminal-side: each resize gesture archives the on-screen band image
+into tmux's own scrollback (tmux preserves the transient band as
+content; the shell cannot reach its archive). One stale image per
+gesture, bounded — not the shell's ghost class, which is unbounded and
+on-screen.
+
+Costs, all bounded and pinned: the grow window-push duplicates the
+window in scrollback once per gesture (the accepted class); the refill
+re-materializes rows already in scrollback (likewise); one full-screen
+repaint per settled grow; the `FullScreen`-on-top-anchor mismatch ghost
+dies on screen with the refill's clear but rides the window push into
+scrollback — one composer image per gesture, disclosed (the two costs
+pull the push count in opposite directions; loss prevention wins); a
+`Standard`-on-restoring interim clears restored rows, rebuilt by the
+same op's refill; the clamp recovery under a double mismatch leaks the
+whole clamp image plus the push's blank rows (pinned). Unchanged
+floors: the shrink window-push duplicates the window in a reflowing
+terminal's scrollback (second amendment), width growth never replays
+(stale narrow wraps self-heal on the next shrink), and the only
+complete cures — an alternate-screen repaint, or reading the screen —
+stay rejected (native scrollback is ADR-0012's chosen benefit) and
+infeasible (queries time out under resize storms) respectively; the GUI
+is the end-state primary interface.
+
+Evidence: the re-pinned legs in `tests/dynamic_height_spike.rs` (both
+classes' reglue/refill worlds, the mismatch legs' drag-window-bounded
+costs, the clamp recoveries, the save-push cycles) and
+`tests/history_insert.rs` (mid-flush grow races, short-screen regrow)
+— and the new `just spike-tmux` leg: scripted resize gestures against
+the inline_spike harness in a real terminal with `capture-pane`
+assertions (band glued after every gesture, the refill firing exactly
+once, no band ghost above the band rect on screen, the terminal-side
+archive reported for review). vt100 pins the mechanism; spike-tmux lets
+the agent judge compositing on a real restoring terminal without the
+maintainer as the test oracle; Windows Terminal stays with
+`spike-windows` and the physical matrix.

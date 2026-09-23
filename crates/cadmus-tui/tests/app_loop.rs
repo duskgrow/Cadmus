@@ -3348,20 +3348,46 @@ async fn slash_clear_starts_a_new_conversation() {
             // re-renders the world from the transcript's source, so a
             // transcript that forgot to reset would resurrect the cleared
             // conversation (the replay window is newest-first — the pin is
-            // the exact sequence, never one row's absence).
+            // the exact sequence, never one row's absence). The shrink first
+            // pushes the visible window into scrollback, so the world's new
+            // sequence is scrollback, the pushed window, the replayed
+            // post-clear tail and the band — capture the first two once the
+            // paced drain has landed the usage block's last row and the
+            // terminal has resized (the shell has not reacted yet: it reads
+            // the event, so the captures are exactly what the push copies).
+            settle_until(|| has_row(&world.nonblank_rows(), "output 0 · reasoning 0")).await;
             world.resize(24, 60);
+            let scrollback: Vec<String> = world
+                .scrollback_rows()
+                .into_iter()
+                .filter(|row| !row.is_empty())
+                .collect();
+            let visible = world.visible_rows();
+            let band_top = visible
+                .iter()
+                .position(|row| row == COMPOSER_PLACEHOLDER)
+                .expect("the composer row marks the band's top edge");
+            let window = visible[..band_top]
+                .iter()
+                .filter(|row| !row.is_empty())
+                .cloned();
             rig.input.send(Event::Resize(60, 24)).expect("resize event");
             settle().await;
+            let post_clear = [
+                "New conversation — the trajectory log keeps the old one.",
+                "1 model request this session",
+                "input 45,000 · cache read 200 · cache write 0",
+                "output 0 · reasoning 0",
+            ];
+            let expected_world: Vec<String> = scrollback
+                .into_iter()
+                .chain(window)
+                .chain(post_clear.map(String::from))
+                .chain([COMPOSER_PLACEHOLDER, "kimi·k2"].map(String::from))
+                .collect();
             assert_eq!(
                 world.nonblank_rows(),
-                vec![
-                    "New conversation — the trajectory log keeps the old one.",
-                    "1 model request this session",
-                    "input 45,000 · cache read 200 · cache write 0",
-                    "output 0 · reasoning 0",
-                    COMPOSER_PLACEHOLDER,
-                    "kimi·k2",
-                ],
+                expected_world,
                 "the cleared conversation must not replay: {:?}",
                 world.nonblank_rows()
             );

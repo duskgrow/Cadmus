@@ -45,6 +45,10 @@ pub struct InlineShell<B: Backend<Error = io::Error> + Clone + Write, W: Write> 
     /// A shrink observed between debounce ticks still owes a source replay,
     /// even if the window grows again before the notification arrives.
     replay_pending: bool,
+    /// A grow fitted between debounce ticks still owes the tail refill:
+    /// `fit_screen` re-glues the band but only the debounced replay can
+    /// re-materialize the revealed rows from source.
+    grow_refit_pending: bool,
     stats: ShellStats,
     scrollback: ScrollbackStrategy,
 }
@@ -80,6 +84,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> 
             width: screen.width,
             screen,
             replay_pending: false,
+            grow_refit_pending: false,
             stats: ShellStats::default(),
             scrollback,
         };
@@ -202,10 +207,13 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> 
         })
     }
 
-    /// Debounced resize owns the destructive width-shrink replay. Ordinary
-    /// draws and inserts may fit the band meanwhile, but never clear history
-    /// or consume the replay marker. `replay_tail` supplies only displayed
-    /// content from the caller's source, bounded to the visible window.
+    /// Debounced resize owns the destructive width-shrink replay and the
+    /// grow refit. Ordinary draws and inserts may fit the band meanwhile,
+    /// but never clear history or consume the replay markers. `replay_tail`
+    /// supplies only displayed content from the caller's source, bounded to
+    /// the visible window. Rows still visible but above the replay window
+    /// would die with the clear, so on shrink they leave into scrollback
+    /// first (ADR-0018, 2026-09-22).
     pub fn on_resize(
         &mut self,
         cols: u16,
@@ -214,12 +222,28 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> 
         render: impl FnOnce(&mut Frame<'_>),
     ) -> io::Result<()> {
         self.guarded(|shell| {
+            let grew = rows > shell.screen.height || shell.grow_refit_pending;
             if shell.fit_screen(Size::new(cols, rows)).is_err() {
                 shell.stats.tolerated_resize_errors += 1;
                 return Ok(());
             }
             let shrunk = cols < shell.width || shell.replay_pending;
             if shrunk {
+                // The band hugs the history, so the band's top edge is also
+                // the count of visible history rows. The clear erases them
+                // and the replay re-materializes only the tail that fits the
+                // new window — push the whole window into scrollback first
+                // or the rows in between are lost on every terminal.
+                let visible = shell.band_area().y;
+                if visible > 0 {
+                    crate::history::scroll_history(
+                        shell.terminal.backend_mut(),
+                        visible,
+                        rows,
+                        visible,
+                        shell.scrollback,
+                    )?;
+                }
                 crate::history::clear_below(shell.terminal.backend_mut(), 0, rows)?;
                 shell.install_area(Rect::new(0, 0, cols, clamp_height(shell.band_height, rows)))?;
                 shell.clear_band()?;
@@ -230,9 +254,43 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> 
                     shell.stats.inserted_rows += tail.len();
                     shell.stats.shrink_replays += 1;
                 }
+            } else if grew {
+                // The interim fit re-glued the band; the settle refills the
+                // revealed rows from source and erases any drag-window
+                // residue, making the final world identical on every
+                // terminal class. The refill re-materializes only source
+                // rows, so the whole visible window leaves into scrollback
+                // first — the shrink's save-then-clear rule, for the same
+                // reason: rows above the band are not necessarily in the
+                // source (pre-boot shell output; rows a restoring terminal
+                // just pulled OUT of its scrollback — tmux and ConPTY both
+                // consume), and bounding the push to the grow amount would
+                // lose the rest on every terminal (ADR-0018, 2026-09-22
+                // 4th). The window's overlap with the replayed tail is the
+                // accepted bounded duplication.
+                let visible = shell.band_area().y;
+                if visible > 0 {
+                    crate::history::scroll_history(
+                        shell.terminal.backend_mut(),
+                        visible,
+                        rows,
+                        visible,
+                        shell.scrollback,
+                    )?;
+                }
+                crate::history::clear_below(shell.terminal.backend_mut(), 0, rows)?;
+                shell.install_area(Rect::new(0, 0, cols, clamp_height(shell.band_height, rows)))?;
+                shell.clear_band()?;
+                let tail = replay_tail(rows.saturating_sub(shell.band_height), cols);
+                if !tail.is_empty() {
+                    shell.insert_history(&tail)?;
+                    shell.stats.inserts += 1;
+                    shell.stats.inserted_rows += tail.len();
+                }
             }
             shell.width = cols;
             shell.replay_pending = false;
+            shell.grow_refit_pending = false;
             shell.tolerated_draw(render);
             Ok(())
         })
@@ -280,9 +338,51 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> 
         }
         let old = self.band_area();
         let height = clamp_height(self.band_height, screen.height);
-        let top = old.y.min(screen.height.saturating_sub(height));
-        let history_bottom = old.y.min(screen.height);
+        let bottom_limit = screen.height.saturating_sub(height);
+        let grow = screen.height.saturating_sub(self.screen.height);
+        // On grow the band image moves differently per terminal class and no
+        // query can tell the classes apart (CPR times out under resize
+        // storms — exactly when it would be needed). Restoring terminals
+        // (ConPTY/Windows Terminal, reflow xterm) shift every row down by
+        // the grow amount — band image included — so the band follows its
+        // content; clearing rows at the old top would erase shifted history.
+        // Top-anchoring terminals (tmux, Zed, vt100) keep content put: a
+        // bottom-glued band is re-glued to the new bottom edge (its vacated
+        // rows are the shell's own band image plus blanks, so erasing them
+        // loses nothing and leaves no ghost), and a content-hugging band
+        // keeps hugging. The debounced `on_resize` replay refills the
+        // revealed rows from source, so the settled world is identical on
+        // both classes (ADR-0018, 2026-09-22 4th amendment).
+        let restoring = self.scrollback == ScrollbackStrategy::FullScreen;
+        let old_limit = self
+            .screen
+            .height
+            .saturating_sub(clamp_height(self.band_height, self.screen.height));
+        let glued = old.y >= old_limit;
+        let content_top = if restoring || glued {
+            old.y.saturating_add(grow)
+        } else {
+            old.y
+        };
+        let top = content_top.min(bottom_limit);
+        // The clamped-band recovery can re-expand the band over rows above
+        // its image: those are history — scroll the region out first (its
+        // top rows depart into scrollback, exactly the space the recovery
+        // needs). Shrink keeps the old rule; a re-glued band moving down
+        // covers only its own vacated image and blanks.
+        let history_bottom = if grow > 0 && restoring {
+            content_top
+        } else {
+            old.y.min(screen.height)
+        };
         let displaced = history_bottom.saturating_sub(top);
+        if grow > 0 && !restoring && top > old.y {
+            // The band moves down off its image: erase the vacated rows
+            // before the displaced scroll can drag image rows up into the
+            // transcript. Safe on this class — the rows are the shell's own
+            // band image and the grow's blanks, never history.
+            crate::history::clear_below(self.terminal.backend_mut(), old.y, screen.height)?;
+        }
         if displaced > 0 {
             crate::history::scroll_history(
                 self.terminal.backend_mut(),
@@ -292,11 +392,11 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write> InlineShell<B, W> 
                 self.scrollback,
             )?;
         }
-        self.install_area(Rect::new(0, top, screen.width, height))?;
-        self.clear_band()?;
         self.replay_pending |= screen.width < self.screen.width;
+        self.grow_refit_pending |= grow > 0;
+        self.install_area(Rect::new(0, top, screen.width, height))?;
         self.screen = screen;
-        Ok(())
+        self.clear_band()
     }
 
     fn insert_history(&mut self, rows: &[Line<'_>]) -> io::Result<()> {
