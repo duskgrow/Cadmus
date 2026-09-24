@@ -61,6 +61,7 @@ use crate::frame::{Draw, FrameRequester, frame_scheduler};
 use crate::input::{EventSource, InputBroker};
 use crate::layout::{self, BandLayout, LayoutInput};
 use crate::shell::InlineShell;
+use crate::slash::{self, SessionUsage};
 use crate::style::ir_style;
 use crate::transcript::{Light, Transcript, failed_after_line, truncate_cells, worked_for_line};
 use crate::wrap::wrap_rows;
@@ -268,6 +269,12 @@ pub struct App<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: Event
     /// The latest response's context size (input + cache-read tokens),
     /// shown on the run-status row once known.
     context_tokens: Option<u64>,
+    /// The session's token totals, rendered by `/usage`. Fresh recorded
+    /// responses only (the one client rule): a resync's replayed prefix
+    /// must not double-count — what fell into the lag hole stays
+    /// uncounted, the marker-flagged presentation loss extended to the
+    /// totals (the log remains the exact record).
+    usage: SessionUsage,
     command_seq: u64,
     /// Steers sent but not yet applied core-side (record-on-effect: the
     /// recorded command is the application). The composer placeholder
@@ -368,6 +375,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
             band_floor: None,
             clock: None,
             context_tokens: None,
+            usage: SessionUsage::default(),
             command_seq: 0,
             pending_steers: 0,
             approvals: VecDeque::new(),
@@ -729,6 +737,16 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         if text.trim().is_empty() {
             return;
         }
+        // Slash commands expand client-side at the idle prompt (ADR-0011's
+        // floor): no model round-trip, no log noise. Mid-run text never
+        // reaches here — Enter steered it (the binding amendment), and a
+        // slash-looking steer rides that path like any other text.
+        if let Some(command) = slash::parse(&text) {
+            self.composer.clear();
+            self.run_slash(command);
+            self.requester.schedule_frame();
+            return;
+        }
         // The high-water floor engages BEFORE the composer clears, seeded
         // with the height the band actually claimed for the prompt: the
         // next pump's composer collapse and the prompt flush then shrink
@@ -754,6 +772,31 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
         self.clock = Some(RunClock::start(Instant::now()));
         self.status = Status::Streaming;
         self.requester.schedule_frame();
+    }
+
+    /// Execute one slash command (the [`slash`] module docs own the
+    /// policy): every effect is client-local — a transcript note, a
+    /// conversation reset, or the quit flag; nothing touches the run, the
+    /// log, or the model's context.
+    fn run_slash(&mut self, command: slash::Slash) {
+        match command {
+            slash::Slash::Help => self.transcript.push_note_block(slash::help_lines()),
+            slash::Slash::Usage => {
+                let lines = slash::usage_lines(&self.usage);
+                self.transcript.push_note_block(lines);
+            }
+            slash::Slash::Clear => {
+                self.history.clear();
+                self.context_tokens = None;
+                self.transcript.reset();
+                self.transcript.push_note_block(vec![slash::cleared_line()]);
+            }
+            slash::Slash::Quit => self.quit = true,
+            slash::Slash::Unknown(name) => {
+                self.transcript
+                    .push_note_block(vec![slash::unknown_line(&name)]);
+            }
+        }
     }
 
     /// One steering command (ADR-0011 item 3's granularities, bound per
@@ -903,12 +946,16 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
     }
 
     /// The context-size metric: the latest response's input + cache-read
-    /// tokens, shown on the run-status row once known.
-    fn note_tokens(&mut self, item: &LiveItem) {
+    /// tokens, shown on the run-status row once known. Fresh items also
+    /// fold into the `/usage` session totals (the field's doc).
+    fn note_tokens(&mut self, item: &LiveItem, fresh: bool) {
         if let LiveKind::Recorded { event } = &item.kind
             && let EventKind::LlmResponse { usage: Some(u), .. } = &event.kind
         {
             self.context_tokens = Some(u.input + u.cache_read);
+            if fresh {
+                self.usage.note(u);
+            }
         }
     }
 
@@ -919,7 +966,7 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
                 // queue too: a stale request must not reopen it. The
                 // baseline is read before the item applies.
                 let fresh = item.seq > self.transcript.as_of_seq();
-                self.note_tokens(&item);
+                self.note_tokens(&item, fresh);
                 let light = self.transcript.apply_item(&item);
                 if fresh
                     && let LiveKind::ApprovalRequested {

@@ -64,8 +64,9 @@ const CONTINUATION_GUTTER: &str = "  ";
 const GUTTER_WIDTH: u16 = 2;
 
 /// Default placeholder text rendered when the composer buffer is empty
-/// (idle: no run's keys to name).
-pub(crate) const DEFAULT_PLACEHOLDER: &str = "Ask anything";
+/// (idle: no run's keys to name). The `/help` mention is the slash
+/// namespace's discoverability hook (the crate's `slash` module docs).
+pub(crate) const DEFAULT_PLACEHOLDER: &str = "Ask anything · /help for commands";
 
 /// The placeholder while a run is active — the truthfulness rule: it names
 /// only the keys that work mid-run (Enter steers at the next request
@@ -1370,10 +1371,10 @@ mod tests {
         let line: String = (0..40)
             .map(|x| buf.cell((x, 0)).unwrap().symbol())
             .collect();
-        assert_eq!(line, "❯ Ask anything                          ");
+        assert_eq!(line, "❯ Ask anything · /help for commands     ");
         // The prompt prefix reads in the prompt style (the app's accent).
         assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Cyan);
-        for x in 2..14 {
+        for x in 2..35 {
             assert!(buf.cell((x, 0)).unwrap().modifier.contains(Modifier::DIM));
         }
     }

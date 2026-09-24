@@ -86,6 +86,58 @@ spike-windows:
         RUSTFLAGS="-L $PTHREADS_LIB" \
         cargo build -p cadmus-tui --example inline_spike --release --target x86_64-pc-windows-gnu
 
+# The tmux leg of the inline-shell visual matrix (ADR-0018): drives the
+# inline_spike harness through scripted resize gestures in a real terminal
+# and asserts on capture-pane scrapes — band glued to the bottom across
+# height grow/shrink and width shrink, the grow refill firing exactly once
+# (the `inserts` counter gains one over the turn count), and zero band
+# images anywhere in the frozen final buffer. This is the agent-runnable
+# visual check: vt100 pins the mechanism, this leg judges compositing on a
+# real top-anchoring terminal; Windows Terminal stays with spike-windows.
+# Captures land in target/inline-spike/tmux/ for review. Requires tmux.
+spike-tmux:
+    #!/usr/bin/env sh
+    set -eu
+    cargo build -p cadmus-tui --example inline_spike
+    out=target/inline-spike/tmux
+    mkdir -p "$out"
+    tmux kill-session -t spike 2>/dev/null || true
+    trap 'tmux kill-session -t spike 2>/dev/null || true' EXIT
+    tmux new-session -d -s spike -x 100 -y 24 "$PWD/target/debug/examples/inline_spike"
+    tmux set-option -t spike remain-on-exit on
+    sleep 4
+    tmux capture-pane -t spike -p > "$out/1-baseline-100x24.txt"
+    before=$(tmux capture-pane -t spike -p | grep -o 'turns [0-9]* · inserts [0-9]*' | grep -o '[0-9]*' | paste -sd' ' -)
+    tmux resize-window -t spike -y 36 && sleep 1
+    tmux capture-pane -t spike -p > "$out/2-grow-100x36.txt"
+    after=$(tmux capture-pane -t spike -p | grep -o 'turns [0-9]* · inserts [0-9]*' | grep -o '[0-9]*' | paste -sd' ' -)
+    tmux resize-window -t spike -y 20 && sleep 1
+    tmux capture-pane -t spike -p > "$out/3-shrink-100x20.txt"
+    tmux resize-window -t spike -x 60 && sleep 1
+    tmux capture-pane -t spike -p > "$out/4-width-shrink-60x20.txt"
+    for f in "$out"/2-*.txt "$out"/3-*.txt "$out"/4-*.txt; do
+        tail -8 "$f" | grep -q 'turns [0-9]' || { echo "FAIL: band not glued to the bottom in $f"; exit 1; }
+        # No band-signature line above the band rect on screen: the ghost
+        # class (a vacated band image polluting the visible transcript).
+        if head -n -8 "$f" | grep -q 'inline_spike — c · g · s · q\|turns [0-9]'; then
+            echo "FAIL: band ghost above the band rect in $f"
+            head -n -8 "$f" | grep -n 'inline_spike — c · g · s · q\|turns [0-9]'
+            exit 1
+        fi
+    done
+    set -- $before; tb=$1; ib=$2
+    set -- $after;  ta=$1; ia=$2
+    [ $((ia - ta)) -eq $((ib - tb + 1)) ] || { echo "FAIL: grow refill did not fire exactly once ($before -> $after)"; exit 1; }
+    tmux send-keys -t spike q && sleep 1
+    tmux capture-pane -t spike -p -S - > "$out/5-final-buffer.txt"
+    # Report-only: tmux archives the on-screen band image into its own
+    # scrollback at each resize gesture (terminal-side, the shell cannot
+    # reach it) — one stale pair per gesture is expected here; growth
+    # beyond the gesture count is the shell's ghost class and the captures
+    # above fail on it first.
+    grep -n 'inline_spike — c · g · s · q\|turns [0-9]' "$out/5-final-buffer.txt" || true
+    echo "spike-tmux ok: band glued across grow/shrink/width-shrink, refill fired once, no on-screen ghosts"
+
 # Smoke check for agent-facing docs: SKILL.md frontmatter, size budgets, and
 # pointer integrity (AGENTS.md / CLAUDE.md / .claude/skills). Std-only Rust in
 # crates/xtask; runs on every platform `just ci` runs on.

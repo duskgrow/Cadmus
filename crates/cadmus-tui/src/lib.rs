@@ -41,6 +41,9 @@
 //!   discipline 2).
 //! - [`clock`] — the run wall-clock (submit→run-end, paused across approval
 //!   waits), pure state over injected instants.
+//! - `slash` — the composer's client-side command namespace (ADR-0011's
+//!   floor): parsed at the idle prompt, executed by the app, never a model
+//!   round-trip or a log line; the command table renders `/help`.
 //! - [`transcript`] — the view-model materialization (item 10): protocol
 //!   events in, widget-readable rows out; one snapshot per pump appends the
 //!   newly stable rows to the emission queue, and the paced drain confirms
@@ -63,6 +66,7 @@ mod history;
 pub mod input;
 pub mod layout;
 pub mod shell;
+mod slash;
 pub mod stream;
 pub mod style;
 pub mod transcript;

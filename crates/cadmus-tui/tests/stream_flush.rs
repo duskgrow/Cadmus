@@ -224,8 +224,6 @@ fn an_open_fence_streams_its_body_lines() {
 fn width_shrink_replays_the_stream_tail_from_source() {
     let world = World::new();
     let (mut app, mut expected) = boot_anchored(&world);
-
-    // One row at 80 columns, two rows once re-wrapped at 40.
     let long_paragraph = "one two three four five six seven eight nine ten eleven twelve";
     app.stream.push_delta(long_paragraph);
     app.stream.push_delta("\n\n");
@@ -236,6 +234,9 @@ fn width_shrink_replays_the_stream_tail_from_source() {
     let pre_scrollback = world.scrollback_rows();
 
     world.resize(24, 40);
+    // The push copies the window as the terminal currently holds it — after
+    // the physical resize, so a non-reflowing terminal's truncation shows.
+    let window = world.visible_rows()[..usize::from(app.shell.band_area().y)].to_vec();
     let render = StreamApp::band_render();
     let stream = &mut app.stream;
     let theme = &app.theme;
@@ -248,10 +249,14 @@ fn width_shrink_replays_the_stream_tail_from_source() {
             render,
         )
         .expect("resize");
+    // The visible window (the boot lines and the flushed paragraph) leaves
+    // into scrollback before the clear; the replay then restores the tail.
+    let mut scrollback_after = pre_scrollback.clone();
+    scrollback_after.extend(window.iter().cloned());
     assert_eq!(
         world.scrollback_rows(),
-        pre_scrollback,
-        "width shrink must not touch scrollback"
+        scrollback_after,
+        "the visible window leaves into scrollback before the clear"
     );
     // The replayed rows are the flushed paragraph re-wrapped at 40 columns;
     // the unstable tail ("eta theta ...") appears nowhere.
@@ -268,22 +273,27 @@ fn width_shrink_replays_the_stream_tail_from_source() {
     );
 
     // Streaming continues undisturbed at the new width; closing the
-    // paragraph flushes it exactly once, at the new wrap. (The shrink
-    // cleared the on-screen boot lines — the shell's shrink clear; the
-    // replay owns only the stream's tail — so the world is now the
-    // replay, the new flush and the band.)
+    // paragraph flushes it exactly once, at the new wrap. (The shrink pushed
+    // the on-screen boot lines into scrollback — the replay owns only the
+    // stream's tail — so the world is now the pushed window, the replay,
+    // the new flush and the band.)
     app.stream.push_delta("nu xi omicron pi rho\n\n");
     app.pump();
+    let mut expected_world: Vec<String> = scrollback_after
+        .into_iter()
+        .filter(|row| !row.is_empty())
+        .collect();
+    expected_world.extend([
+        first_row.to_string(),
+        "nine ten eleven twelve".to_string(),
+        "eta theta iota kappa lambda mu nu xi".to_string(),
+        "omicron pi rho".to_string(),
+        PROMPT_ROW.to_string(),
+        STATUS_ROW.to_string(),
+    ]);
     assert_eq!(
         world.nonblank_rows(),
-        vec![
-            first_row.to_string(),
-            "nine ten eleven twelve".to_string(),
-            "eta theta iota kappa lambda mu nu xi".to_string(),
-            "omicron pi rho".to_string(),
-            PROMPT_ROW.to_string(),
-            STATUS_ROW.to_string(),
-        ],
+        expected_world,
         "the closed paragraph flushes once at the new width"
     );
 }

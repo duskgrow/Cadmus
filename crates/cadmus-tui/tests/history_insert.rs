@@ -11,7 +11,7 @@ use std::io::{self, Write};
 
 use cadmus_tui::cursor::CursorTracker;
 use cadmus_tui::shell::{InlineShell, ScrollbackStrategy};
-use common::{BSU, ESU, GuardSink, VtBackend, World};
+use common::{BSU, ESU, GuardSink, VtBackend, World, hard_wrap};
 use ratatui::Frame;
 use ratatui::backend::Backend;
 use ratatui::layout::{Position, Rect};
@@ -414,6 +414,61 @@ fn standard_grow_shrink_then_flush_restores_the_visible_tail() {
     }
 }
 
+/// The Standard-strategy leg of the 2026-09-22 save-the-window-first
+/// contract (the `FullScreen` leg lives in `dynamic_height_spike.rs` and owns
+/// the full-world assertion): the shrink must scroll the visible window
+/// into scrollback before the clear. vt100 cannot track rows leaving a
+/// partial region, so this leg judges the emitted protocol and the visible
+/// rows, per this suite's header note.
+#[test]
+fn standard_width_shrink_scrolls_the_window_into_scrollback_first() {
+    let world = World::new();
+    let (mut shell, _guard) = boot(&world, 8, ScrollbackStrategy::Standard);
+    // 96 cells per logical row: 2 display rows at 80 columns, 3 at 40.
+    let source: Vec<String> = (0..12)
+        .map(|i| format!("row-{i:02}·{}", "x".repeat(89)))
+        .collect();
+    flush(&mut shell, &source);
+    assert_eq!(shell.band_area().y, 16);
+    world.backend.take_raw_bytes();
+
+    world.resize(24, 40);
+    let replay_source = source.clone();
+    shell
+        .on_resize(
+            40,
+            24,
+            move |max_rows, width| {
+                let rows: Vec<String> = replay_source
+                    .iter()
+                    .flat_map(|row| hard_wrap(row, width))
+                    .collect();
+                let skip = rows.len().saturating_sub(usize::from(max_rows));
+                rows.into_iter().skip(skip).map(Line::from).collect()
+            },
+            render_band,
+        )
+        .expect("debounced width shrink");
+
+    // The save: DECSTBM over the window (its top IS the screen top, so the
+    // departures land in native scrollback on a real terminal), the cursor
+    // parked at the region's bottom, one CRLF per visible row.
+    let raw = world.backend.take_raw_bytes();
+    let mut needle = b"\x1b[1;16r\x1b[16;1H".to_vec();
+    needle.extend(b"\r\n".repeat(16));
+    assert!(
+        contains_bytes(&raw, &needle),
+        "the window scrolls into scrollback before the clear: {raw:?}"
+    );
+    // The replayed tail fills the window at the new width.
+    let tail: Vec<String> = source
+        .iter()
+        .flat_map(|row| hard_wrap(row, 40))
+        .skip(20)
+        .collect();
+    assert_visible_tail(&world, &mut shell, &tail);
+}
+
 fn stale_width_shrink_replay<B: Backend<Error = io::Error> + Clone + Write>(
     world: &World,
     shell: &mut Shell<B>,
@@ -463,8 +518,9 @@ fn stale_width_shrink_replay<B: Backend<Error = io::Error> + Clone + Write>(
     assert_eq!(replay_calls.get(), 1);
     assert_eq!(shell.width(), 12);
     assert_eq!(shell.stats().shrink_replays, replays_before + 1);
-    // Pre-existing visible shell rows may be cleared by a width shrink;
-    // this caller owns only the replay tail and it must appear exactly once.
+    // Pre-existing visible shell rows leave into scrollback on a width
+    // shrink (vt100 drops the partial-region departures); this caller owns
+    // only the replay tail and on screen it must appear exactly once.
     let visible = world.visible_rows();
     let top = usize::from(shell.band_area().y);
     assert_eq!(
@@ -615,17 +671,118 @@ fn physical_resize_during_band_growth_reconciles_the_new_rectangle() {
             assert!(area.bottom() <= screen_rows);
             assert_band(&world, &mut shell);
             if strategy == ScrollbackStrategy::FullScreen {
-                assert_full_world(&world, &mut shell, &rows);
+                if screen_rows == 12 {
+                    // The grow leg: the band follows its content. vt100
+                    // top-anchors on grow, so the move leaves a blank gap
+                    // between the history and the band — the accepted
+                    // residue; a restoring terminal shifts the band image
+                    // down with the content and the band lands on it
+                    // gap-free.
+                    let mut expected = rows.clone();
+                    expected.extend([String::new(), String::new()]);
+                    expected.extend(band_rows(area.height));
+                    let mut actual = world.scrollback_rows();
+                    actual.extend(world.visible_rows());
+                    assert_eq!(actual, expected, "grow-leg world with the follow gap");
+                } else {
+                    assert_full_world(&world, &mut shell, &rows);
+                }
             }
             assert_eq!(guard.take(), [BSU, ESU].concat());
+            // The grow leg owes the debounced refill (the raced fit set the
+            // marker); the shrink legs fit clean and must not replay.
+            let replay = rows.clone();
             shell
-                .on_resize(24, screen_rows, |_, _| panic!("height only"), render_band)
+                .on_resize(
+                    24,
+                    screen_rows,
+                    move |max_rows, _width| {
+                        assert_eq!(screen_rows, 12, "only the grow leg replays");
+                        replay[replay.len().saturating_sub(usize::from(max_rows))..]
+                            .iter()
+                            .cloned()
+                            .map(Line::from)
+                            .collect()
+                    },
+                    render_band,
+                )
                 .expect("notify settled resize");
             assert_band(&world, &mut shell);
             let inserted = numbered_rows(100, 16);
             flush(&mut shell, &inserted);
             assert_visible_tail(&world, &mut shell, &inserted);
         }
+    }
+}
+
+#[test]
+fn physical_height_grow_during_raw_flush_reglues_and_refills() {
+    for strategy in [ScrollbackStrategy::Standard, ScrollbackStrategy::FullScreen] {
+        let world = World::new();
+        world.resize(10, 24);
+        let rows = numbered_rows(0, 6);
+        world.print_lines(&rows);
+        let (mut shell, guard) = boot(&world, 4, strategy);
+        // The grow (10 → 16) races the flush: it lands mid-insert, before
+        // the shell's bookkeeping, and the mid-op `sync_size` must re-glue
+        // the bottom-glued band without erasing or misplacing rows — the
+        // restoring class follows its shifted image, the top-anchoring
+        // class erases its own vacated image first (ADR-0018, 2026-09-22
+        // 4th amendment; the insert's own clear already removed that image
+        // here, so both classes land on the same geometry).
+        world.backend.resize_on_next_raw_flush(16, 24);
+        flush(&mut shell, &["MARK".into()]);
+        let area = shell.band_area();
+        assert_eq!(area, Rect::new(0, 12, 24, 4), "band re-glued to the bottom");
+        assert!(area.bottom() <= 16, "band on-screen: {area:?}");
+        assert_band(&world, &mut shell);
+        assert_eq!(guard.take(), [BSU, ESU].concat());
+        let world_rows = world.nonblank_rows();
+        // vt100 drops the insert's own row departing the partial region
+        // (the suite header's standing artifact), so Standard asserts from
+        // the second row; the grow itself scrolls nothing here.
+        let check_from = usize::from(strategy == ScrollbackStrategy::Standard);
+        for row in rows[check_from..].iter().chain(["MARK".to_string()].iter()) {
+            assert!(
+                world_rows.iter().any(|actual| actual.contains(row)),
+                "lost {row}: {world_rows:?}"
+            );
+        }
+        // The settled notification owes the grow's refill: the transcript
+        // is shorter than the new window, so every row re-materializes and
+        // the band hugs the content — the drag-window geometry heals away.
+        let mut source = rows[check_from..].to_vec();
+        source.push("MARK".to_string());
+        let replay = source.clone();
+        shell
+            .on_resize(
+                24,
+                16,
+                move |max_rows, _width| {
+                    replay
+                        .iter()
+                        .skip(replay.len().saturating_sub(usize::from(max_rows)))
+                        .cloned()
+                        .map(Line::from)
+                        .collect()
+                },
+                render_band,
+            )
+            .expect("notify settled resize");
+        assert_eq!(
+            usize::from(shell.band_area().y),
+            source.len(),
+            "band hugs the refilled content"
+        );
+        let visible = world.visible_rows();
+        assert_eq!(visible[..source.len()], source[..], "the refilled world");
+        assert!(
+            visible[shell.band_area().bottom() as usize..]
+                .iter()
+                .all(String::is_empty),
+            "nothing below the hugging band"
+        );
+        assert_band(&world, &mut shell);
     }
 }
 
@@ -778,11 +935,20 @@ fn flush_on_a_short_screen<B: Backend<Error = io::Error> + Clone + Write>(
     assert_band(world, shell);
 
     world.resize(10, width);
+    // The regrow owes the debounced refill: the newest rows that fit the
+    // taller window re-materialize from source above the re-expanded band.
+    let replay = rows.clone();
     shell
         .on_resize(
             width,
             10,
-            |_, _| panic!("height-only growth cannot replay"),
+            move |max_rows, _width| {
+                replay[replay.len().saturating_sub(usize::from(max_rows))..]
+                    .iter()
+                    .cloned()
+                    .map(Line::from)
+                    .collect()
+            },
             render_band,
         )
         .expect("restore screen height");
