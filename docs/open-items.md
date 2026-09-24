@@ -385,3 +385,23 @@ declares limits, `Usage` counts tokens, and neither the registry
 dialects nor the wire carry rates. Do not invent a model→price lookup
 in the frontend; the consumer lands pricing as provider metadata and
 the floor renders it then.
+
+## Session storage model survey (2026-09-24)
+
+Consumer: the phase-1 closeout session-model ADR — ADR-0022's closeout
+set (resume/fork) needs the trace-granularity decision before code.
+
+`docs/research/2026-09-24-agent-session-storage-survey.md` — Codex,
+Gemini CLI, Claude Code, Aider, OpenCode, Goose: all keep one persistent
+store per conversation and append new events in place; none mint
+per-turn files embedding the full history (the TUI's current model, an
+artifact of cloning one-shot chat per run). Fork lineage, compaction
+marker+snapshot, rewind, and retention patterns for the ADR are
+catalogued in the survey's §4.
+
+Adjacent findings from the same review: the TUI's per-turn traces carry
+no lineage links (a session picker would show one row per prompt); and
+`/usage` counts the conversation between `/clear`s (the accumulator
+resets on `/clear` since 2026-09-24) — a log-derived all-time usage
+view (ADR-0011's numbers-from-the-log rule) awaits the trace-reading
+machinery the closeout builds.
