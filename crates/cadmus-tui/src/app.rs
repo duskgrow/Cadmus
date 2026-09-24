@@ -273,7 +273,9 @@ pub struct App<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: Event
     /// responses only (the one client rule): a resync's replayed prefix
     /// must not double-count — what fell into the lag hole stays
     /// uncounted, the marker-flagged presentation loss extended to the
-    /// totals (the log remains the exact record).
+    /// totals (the log remains the exact record). `/clear` resets the
+    /// accumulator: a session is the conversation between clears
+    /// (maintainer, 2026-09-24), not the process.
     usage: SessionUsage,
     command_seq: u64,
     /// Steers sent but not yet applied core-side (record-on-effect: the
@@ -788,6 +790,10 @@ impl<B: Backend<Error = io::Error> + Clone + Write, W: Write, I: EventSource> Ap
             slash::Slash::Clear => {
                 self.history.clear();
                 self.context_tokens = None;
+                // The totals reset with the conversation: a session is the
+                // conversation between clears, so /usage after a clear
+                // reports the new session, not the process's lifetime sum.
+                self.usage = SessionUsage::default();
                 self.transcript.reset();
                 self.transcript.push_note_block(vec![slash::cleared_line()]);
             }

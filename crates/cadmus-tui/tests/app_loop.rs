@@ -3338,11 +3338,13 @@ async fn slash_clear_starts_a_new_conversation() {
             assert_eq!(status_row(&world), "kimi·k2");
             assert!(driver.submitted().len() == 1, "no new run");
 
-            // Session usage deliberately survives the clear: the totals are
-            // the session's, not the conversation's.
+            // The totals reset with the clear: a session is the
+            // conversation between clears (maintainer, 2026-09-24), and the
+            // old session's numbers stay exact in the trajectory log.
             type_text(&rig, "/usage");
             rig.input.send(key(KeyCode::Enter)).expect("input");
-            settle_until(|| has_row(&world.nonblank_rows(), "1 model request this session")).await;
+            settle_until(|| has_row(&world.nonblank_rows(), "No model usage yet this session"))
+                .await;
 
             // The shrink replay is /clear's core promise: a resize
             // re-renders the world from the transcript's source, so a
@@ -3355,7 +3357,8 @@ async fn slash_clear_starts_a_new_conversation() {
             // paced drain has landed the usage block's last row and the
             // terminal has resized (the shell has not reacted yet: it reads
             // the event, so the captures are exactly what the push copies).
-            settle_until(|| has_row(&world.nonblank_rows(), "output 0 · reasoning 0")).await;
+            settle_until(|| has_row(&world.nonblank_rows(), "No model usage yet this session."))
+                .await;
             world.resize(24, 60);
             let scrollback: Vec<String> = world
                 .scrollback_rows()
@@ -3375,9 +3378,7 @@ async fn slash_clear_starts_a_new_conversation() {
             settle().await;
             let post_clear = [
                 "New conversation — the trajectory log keeps the old one.",
-                "1 model request this session",
-                "input 45,000 · cache read 200 · cache write 0",
-                "output 0 · reasoning 0",
+                "No model usage yet this session.",
             ];
             let expected_world: Vec<String> = scrollback
                 .into_iter()

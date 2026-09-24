@@ -100,6 +100,8 @@ pub(crate) fn cleared_line() -> ir::Line {
 /// recorded responses at the app's token seam. Client-side accumulation:
 /// the trajectory log stays the exact, replayable record (ADR-0011's
 /// numbers-from-the-log rule) — this is the session-at-a-glance view.
+/// `/clear` resets the totals: a session is the conversation between
+/// clears (maintainer, 2026-09-24), not the process's lifetime.
 #[derive(Default)]
 pub(crate) struct SessionUsage {
     /// Responses that carried a usage report (≈ model requests).
