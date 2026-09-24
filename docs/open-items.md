@@ -295,18 +295,15 @@ finish line stays "an assistant turn without tool calls" (ADR-0005).
 
 ## Agent UI/UX landscape survey (2026-09-11)
 
-Consumer: the GUI ADR — scheduled (maintainer, 2026-09-11) for right
-after the daily-driver milestone, no longer post-phase-5. Remaining for
-it: the tech re-anchoring (report §5
-— `gpui` is Apache-2.0 but its crates.io line stopped at 0.2.2 (2025-10)
-and the git line's dependency tree is heavy (maintainer-verified); §5.3
-options table) and the orchestration/review patterns of §2.2 as design
-input. The design language is no longer its scope: consumed by
-ADR-0017 (2026-09-13, Linear-structured tokens, one theme SSOT,
-renderer-level degradation), which the GUI ADR inherits whole. The
-other consumers landed 2026-09-11: floor re-baseline → ADR-0011
-amendment, ACP → ADR-0014, orchestration layer → ADR-0015. Delete once
-the GUI ADR lands.
+Consumer: the GUI repo's kickoff (direction settled 2026-09-23 by
+ADR-0019/0023). Consumed 2026-09-23: the tech re-anchoring —
+foreign-language client (Flutter/Kotlin shortlist), the GPUI path
+abandoned and its licensing question moot — and the design-language
+question (ADR-0023: independent redesign, no inheritance from
+ADR-0017). Still open for the kickoff: the orchestration/review
+patterns of §2.2 as design input. The other consumers landed
+2026-09-11: floor re-baseline → ADR-0011 amendment, ACP → ADR-0014,
+orchestration layer → ADR-0015. Delete at the GUI repo's kickoff.
 
 `docs/research/2026-09-11-agent-uiux-landscape.md` — five-track survey
 (agent TUIs, agent GUIs, Rust terminal-style GUI tech, orchestrator↔agent
