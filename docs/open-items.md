@@ -405,3 +405,17 @@ no lineage links (a session picker would show one row per prompt); and
 resets on `/clear` since 2026-09-24) — a log-derived all-time usage
 view (ADR-0011's numbers-from-the-log rule) awaits the trace-reading
 machinery the closeout builds.
+
+## The `!` shell pass-through and `@` file completion are descoped from phase 1
+
+Consumer: a future TUI command-surface change, if field demand appears —
+otherwise the GUI repo's own command surface at its kickoff.
+
+ADR-0011's interaction floor lists `!` shell pass-through (output into
+context) and `@` file completion alongside slash commands. Slash v1
+(2026-09-24) ships four no-argument commands, and ADR-0022's demotion
+stops TUI investment at the committed floor, so the two affordances have
+no build slot in phase 1. Recorded so the descope is a decision rather
+than a silence: when they land they stay client-side expansions (the
+slash namespace's pattern), and the composer already owns the input
+seam.
